@@ -1,0 +1,59 @@
+# =============================================
+# Vivado .gitignore
+# =============================================
+
+# 综合/实现/仿真运行产物（可由 Vivado 重建）
+*.runs/
+*.sim/
+
+# 缓存
+*.cache/
+
+# 硬件调试临时文件
+*.hw/
+
+# IP 用户辅助文件（可由 Vivado 重建）
+*.ip_user_files/
+
+# Vivado 日志与临时文件
+*.jou
+*.log
+*.str
+*.debug
+*.wdb
+
+# Vivado 临时目录
+.Xil/
+**/.Xil/
+
+# 系统锁文件
+*.os_lck
+
+# WebTalk 统计文件
+webtalk*.xml
+webtalk*.html
+webtalk*.jou
+
+# Bitstream（体积大，通常不提交）
+*.bit
+*.ltx
+*.bin
+
+# IP 生成物（只保留 .xci 配置文件）
+# .xci 是 IP 的"设置单"，其余文件可由 Vivado 根据 .xci 重新生成
+*.ip_user_files/
+**/ip/**/*.v
+**/ip/**/*.vhdl
+**/ip/**/*.veo
+**/ip/**/*.dcp
+**/ip/**/*.xml
+**/ip/**/*_stub.*
+**/ip/**/*_sim_netlist.*
+**/ip/**/*_funcsim.*
+**/ip/**/*.vds
+**/ip/**/*_ooc.xdc
+**/ip/**/synth/
+**/ip/**/sim/
+**/ip/**/doc/
+**/ip/**/hdl/
+**/ip/**/simulation/
