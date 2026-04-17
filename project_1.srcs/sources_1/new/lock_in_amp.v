@@ -42,6 +42,7 @@ wire [47:0] phase_offset; //串口输入控制相位
 wire [47:0] reg_phase_word_2 = phase_offset; 
 wire [47:0] reg_freq_word_2;
 wire [47:0] freq_word_2;  //串口输入控制频率
+wire [47:0] freq_word_3;  //新增: 串口输入控制第二路待锁信号频率
 assign reg_freq_word_2 = freq_word_2;    
 wire [95:0] dds_config_data_2 = {reg_phase_word_2,reg_freq_word_2}; 
 
@@ -62,6 +63,31 @@ dds_compiler_1 u_dds_compiler_1 (
   .m_axis_data_tdata     (sine_cos_2),        
   .m_axis_phase_tvalid   (m_axis_phase_tvalid_dds1),    
   .m_axis_phase_tdata    (m_axis_phase_tdata_dds1)      
+);
+
+// =========================================================================
+// ★ DDS 3  用于输出新增的第二路待锁信号
+// =========================================================================
+wire [47:0] reg_phase_word_3 = 48'd0; // 默认零相位
+wire [47:0] reg_freq_word_3 = freq_word_3;
+wire [95:0] dds_config_data_3 = {reg_phase_word_3, reg_freq_word_3}; 
+
+wire signed [31:0] sine_cos_3;
+wire signed [13:0] sine_3 = sine_cos_3[29:16]; // 这是第二路待锁信号
+wire signed [13:0] cos_3  = sine_cos_3[13:0];
+
+wire m_axis_data_tvalid_dds3;
+wire m_axis_phase_tvalid_dds3;
+wire [47:0] m_axis_phase_tdata_dds3;
+
+dds_compiler_1 u_dds_compiler_3 (
+  .aclk                  (clk_65M),                                  
+  .s_axis_config_tvalid  (1'b1),  
+  .s_axis_config_tdata   (dds_config_data_3),    
+  .m_axis_data_tvalid    (m_axis_data_tvalid_dds3),      
+  .m_axis_data_tdata     (sine_cos_3),        
+  .m_axis_phase_tvalid   (m_axis_phase_tvalid_dds3),    
+  .m_axis_phase_tdata    (m_axis_phase_tdata_dds3)      
 );
 
 
@@ -120,6 +146,36 @@ fft_peak_tracker u_fft_tracker (
     .freq_update_valid  (freq_updated)
 );
 
+// =========================================================================
+// ★ 第二路锁相环的 FFT 自动寻峰及中心频率追踪
+// =========================================================================
+wire freq_updated_3;
+wire signed [47:0] auto_center_freq_3;
+wire fft_data_tready_3;
+
+reg [15:0] fft_cnt_3 = 0;
+always @(posedge clk_65M or negedge sys_rst_n) begin
+    if (!sys_rst_n) begin
+        fft_cnt_3 <= 0;
+    end else if (fft_data_tready_3) begin
+        fft_cnt_3 <= fft_cnt_3 + 1'b1;
+    end
+end
+wire fft_tlast_3 = (fft_cnt_3 == 16'd65535);
+
+fft_peak_tracker u_fft_tracker_3 (
+    .clk                (clk_65M),
+    .rst_n              (sys_rst_n),
+    
+    .s_axis_data_tdata  ({16'd0, {2{sine_3[13]}}, sine_3}),
+    .s_axis_data_tvalid (1'b1),
+    .s_axis_data_tlast  (fft_tlast_3), 
+    .s_axis_data_tready (fft_data_tready_3),
+
+    .center_freq        (auto_center_freq_3),
+    .freq_update_valid  (freq_updated_3)
+);
+
 // 例化 PLL 控制器
 wire is_locked; // 可以接一个 LED 灯观察是否锁定成功
 pll_controller #(
@@ -139,6 +195,36 @@ pll_controller #(
     .valid_in     ( cic_valid_out_y ),  
     .dds_freq_out ( reg_freq_word  ),
     .is_locked    ( is_locked      )    // 锁定指示灯
+);
+
+// =========================================================================
+// ★ 第二路锁相环的 PLL 控制器
+// =========================================================================
+wire [47:0] reg_freq_word_pll_3; // 第二路 PLL 的输出频率控制字
+wire is_locked_3;
+
+// 预定义第二路所需的滤波器输出信号
+wire signed [27:0] final_dc_out_x_3;
+wire signed [27:0] final_dc_out_y_3;
+wire               cic_valid_out_y_3;
+
+pll_controller #(
+    .KI_FRAC      ( 16     ),           
+    .IN_WIDTH     ( 28      ),
+    .SWEEP_THRES  ( 28'd5000  ),        
+    .LOCK_X_THRES ( 28'd8000  )         
+) u_pll_controller_3 (
+    .clk          ( clk_65M        ),
+    .rst_n        ( sys_rst_n      ),
+    .pll_en       ( pll_en         ),
+    .pll_kp       ( pll_kp         ), // 共用一组 PI 参数
+    .pll_ki       ( pll_ki         ),
+    .center_freq  ( auto_center_freq_3 ), // 第二路中心频率
+    .phase_error_in ( final_dc_out_y_3 ), 
+    .amp_in       ( final_dc_out_x_3 ),   
+    .valid_in     ( cic_valid_out_y_3 ),  
+    .dds_freq_out ( reg_freq_word_pll_3  ),
+    .is_locked    ( is_locked_3      )    // 第二路锁定指示灯
 );
 
 // 相位偏置 
@@ -165,6 +251,30 @@ dds_compiler_1 u_dds_compiler_0 (
   .m_axis_data_tdata     (sine_cos),        
   .m_axis_phase_tvalid   (m_axis_phase_tvalid_dds0),    
   .m_axis_phase_tdata    (m_axis_phase_tdata_dds0)      
+);
+
+// =========================================================================
+// ★ 第二路 DDS 0: 用于第二路混频和解调的本地参考信号 (闭环中)
+// =========================================================================
+wire [47:0] reg_phase_word_pll_3 = 48'd0;
+wire [95:0] dds_config_data_pll_3 = {reg_phase_word_pll_3, reg_freq_word_pll_3}; 
+
+wire signed [31:0] sine_cos_pll_3;
+wire signed [13:0] sine_pll_3 = sine_cos_pll_3[29:16];
+wire signed [13:0] cos_pll_3  = sine_cos_pll_3[13:0];
+
+wire m_axis_data_tvalid_dds_pll_3;
+wire m_axis_phase_tvalid_dds_pll_3;
+wire [47:0] m_axis_phase_tdata_dds_pll_3;
+
+dds_compiler_1 u_dds_compiler_0_3 (
+  .aclk                  (clk_65M),                                  
+  .s_axis_config_tvalid  (1'b1),  
+  .s_axis_config_tdata   (dds_config_data_pll_3),    
+  .m_axis_data_tvalid    (m_axis_data_tvalid_dds_pll_3),      
+  .m_axis_data_tdata     (sine_cos_pll_3),        
+  .m_axis_phase_tvalid   (m_axis_phase_tvalid_dds_pll_3),    
+  .m_axis_phase_tdata    (m_axis_phase_tdata_dds_pll_3)      
 );
 
 // =========================================================================
@@ -224,6 +334,23 @@ mult_hunpin y_mult_hunpin (
   .P   (ad_Y)        
 );
 
+// 第二路混频
+wire signed [27:0] ad_X_3; 
+mult_hunpin x_mult_hunpin_3 (
+  .CLK (clk_65M),  
+  .A   (sine_3),        
+  .B   (sine_pll_3),       
+  .P   (ad_X_3)        
+);
+
+wire signed [27:0] ad_Y_3; 
+mult_hunpin y_mult_hunpin_3 (
+  .CLK (clk_65M),  
+  .A   (sine_3),        
+  .B   (cos_pll_3),        
+  .P   (ad_Y_3)        
+);
+
 // =========================================================================
 // ★ CIC 降采样滤波
 // =========================================================================
@@ -249,6 +376,30 @@ cic_compiler_0 u_cic_compiler_y (
   .s_axis_data_tready  (s_axis_data_tready_y),
   .m_axis_data_tdata   (ad_Y_cic),          
   .m_axis_data_tvalid  (cic_valid_out_y)
+);
+
+// 第二路 CIC 滤波
+wire signed [27:0] ad_X_cic_3;
+wire               cic_valid_out_x_3;
+wire               s_axis_data_tready_x_3;
+cic_compiler_0 u_cic_compiler_x_3 (
+  .aclk                (clk_65M),
+  .s_axis_data_tdata   (ad_X_3),              
+  .s_axis_data_tvalid  (1'b1),
+  .s_axis_data_tready  (s_axis_data_tready_x_3),
+  .m_axis_data_tdata   (ad_X_cic_3),          
+  .m_axis_data_tvalid  (cic_valid_out_x_3)
+);
+
+wire signed [27:0] ad_Y_cic_3;
+wire               s_axis_data_tready_y_3;
+cic_compiler_0 u_cic_compiler_y_3 (
+  .aclk                (clk_65M),
+  .s_axis_data_tdata   (ad_Y_3),              
+  .s_axis_data_tvalid  (1'b1),
+  .s_axis_data_tready  (s_axis_data_tready_y_3),
+  .m_axis_data_tdata   (ad_Y_cic_3),          
+  .m_axis_data_tvalid  (cic_valid_out_y_3)
 );
 
 // =========================================================================
@@ -278,6 +429,36 @@ iir_lpf_ema #(
     .din        ( ad_Y_cic ),
     .dout       ( final_dc_out_y ),
     .valid_out  ( final_dc_valid_y )
+);
+
+// 第二路 IIR 滤波
+wire final_dc_valid_x_3;
+wire final_dc_valid_y_3;
+
+iir_lpf_ema #(
+    .IN_WIDTH   ( 28 ),    
+    .FRAC_WIDTH ( 32 )     
+) u_iir_lpf_ema_x_3 (
+    .clk        ( clk_65M ),
+    .rst_n      ( sys_rst_n ),
+    .en         ( cic_valid_out_x_3 ),
+    .shift_k    ( tau_x ), 
+    .din        ( ad_X_cic_3 ),
+    .dout       ( final_dc_out_x_3 ),
+    .valid_out  ( final_dc_valid_x_3 )
+);
+
+iir_lpf_ema #(
+    .IN_WIDTH   ( 28 ),    
+    .FRAC_WIDTH ( 32 )
+) u_iir_lpf_ema_y_3 (
+    .clk        ( clk_65M ),
+    .rst_n      ( sys_rst_n ),
+    .en         ( cic_valid_out_y_3 ),
+    .shift_k    ( tau_y ), 
+    .din        ( ad_Y_cic_3 ),
+    .dout       ( final_dc_out_y_3 ),
+    .valid_out  ( final_dc_valid_y_3 )
 );
 
 // =========================================================================
@@ -326,6 +507,7 @@ uart_commend u_uart_commend (
     .tau_y(tau_y),                           // TAUY 指令输出
     .phase_offset(phase_offset),             // PHAS 指令输出
     .freq_word_2(freq_word_2),               // FRQ2 指令输出
+    .freq_word_3(freq_word_3),               // FRQ3 指令输出
     .send_en(send_en),                       // 发送使能
     .send_data(send_data)                    // 发送数据
 );
@@ -335,7 +517,7 @@ uart_commend u_uart_commend (
 // 和频差频输出
 // ★ DDS21模块 2F1+F2
 // =========================================================================
-wire [47:0] reg_freq_word_21 = reg_freq_word * 2;
+wire [47:0] reg_freq_word_21 = reg_freq_word * 2 + reg_freq_word_3;
 wire [95:0] dds_config_data_21 = {48'd0,reg_freq_word_21}; 
 
 wire signed [31:0] sine_cos_21;
@@ -359,7 +541,7 @@ dds_compiler_1 u_dds_compiler_21 (
 
 // ★ DDS12模块 F1+2F2
 // =========================================================================
-wire [47:0] reg_freq_word_12 = reg_freq_word * 3;
+wire [47:0] reg_freq_word_12 = reg_freq_word + 2*reg_freq_word_3;
 wire [95:0] dds_config_data_12 = {48'd0,reg_freq_word_12}; 
 
 wire signed [31:0] sine_cos_12;
@@ -383,7 +565,7 @@ dds_compiler_1 u_dds_compiler_12 (
 
 // ★ DDS11模块 F1+F2
 // =========================================================================
-wire [47:0] reg_freq_word_11 = reg_freq_word + reg_freq_word_21;
+wire [47:0] reg_freq_word_11 = reg_freq_word + reg_freq_word_3;
 wire [95:0] dds_config_data_11 = {48'd0,reg_freq_word_11}; 
 
 wire signed [31:0] sine_cos_11;
@@ -423,7 +605,8 @@ ila_0 u_ila_0 (
 	.probe8 (cos_2),          // 14bit: ADC采集到的原始输入波形	
 	.probe9 (is_locked),          // 14bit: 锁定状态指示灯
  	.probe10 (auto_center_freq),          // 48bit: 观察FFT找出的自动中心频率
-    .probe11 (reg_freq_word_2)          // 48bit: DDS2输出
+    .probe11 (reg_freq_word_2),          // 48bit: DDS2输出
+    .probe12 (reg_freq_word_3)          // 48bit: DDS3输出
 );
 
 endmodule

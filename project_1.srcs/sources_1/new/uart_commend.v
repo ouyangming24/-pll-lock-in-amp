@@ -13,6 +13,7 @@ module uart_commend(
     output reg [4:0]  tau_y,
     output reg [47:0] phase_offset,
     output reg [47:0] freq_word_2,
+    output reg [47:0] freq_word_3,
     output reg send_en,
     output reg [7:0] send_data
 );
@@ -35,6 +36,7 @@ module uart_commend(
     parameter CMD_XYOUT= 4'd7;
     parameter CMD_STOP = 4'd8;
     parameter CMD_FRQ2 = 4'd9;
+    parameter CMD_FRQ3 = 4'd10;
 
     reg [2:0] curr_state;
     reg [3:0] cmd_type;
@@ -194,6 +196,11 @@ module uart_commend(
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
+                            else if (cmd_buffer[0] == "F" && cmd_buffer[1] == "R" && cmd_buffer[2] == "Q" && cmd_buffer[3] == "3" && rec_data == ":") begin
+                                cmd_type <= CMD_FRQ3;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
                             else if (cmd_buffer[0] == "X" && cmd_buffer[1] == "Y" && cmd_buffer[2] == "O" && cmd_buffer[3] == "U" && rec_data == "T") begin
                                 cmd_type <= CMD_XYOUT;
                                 xy_data_enable <= 1'b1;
@@ -249,6 +256,9 @@ module uart_commend(
                             end
                             else if (cmd_type == CMD_FRQ2) begin
                                 freq_word_2 <= value_buffer;
+                            end
+                            else if (cmd_type == CMD_FRQ3) begin
+                                freq_word_3 <= value_buffer;
                             end
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;
