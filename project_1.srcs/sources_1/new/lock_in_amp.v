@@ -330,6 +330,82 @@ uart_commend u_uart_commend (
     .send_data(send_data)                    // 发送数据
 );
 
+
+// =========================================================================
+// 和频差频输出
+// ★ DDS21模块 2F1+F2
+// =========================================================================
+wire [47:0] reg_freq_word_21 = reg_freq_word * 2;
+wire [95:0] dds_config_data_21 = {48'd0,reg_freq_word_21}; 
+
+wire signed [31:0] sine_cos_21;
+wire signed [13:0] sine_21 = sine_cos_21[29:16]; // 这就是同频同相输出的信号
+wire signed [13:0] cos_21  = sine_cos_21[13:0];
+
+wire m_axis_data_tvalid_dds21;
+wire m_axis_phase_tvalid_dds21;
+wire [47:0] m_axis_phase_tdata_dds21;
+
+// 例化第二个 DDS (请确保工程中 dds_compiler_1 支持多次例化)
+dds_compiler_1 u_dds_compiler_21 (
+  .aclk                  (clk_65M),                                  
+  .s_axis_config_tvalid  (1'b1),  
+  .s_axis_config_tdata   (dds_config_data_21),    
+  .m_axis_data_tvalid    (m_axis_data_tvalid_dds21),      
+  .m_axis_data_tdata     (sine_cos_21),        
+  .m_axis_phase_tvalid   (m_axis_phase_tvalid_dds21),    
+  .m_axis_phase_tdata    (m_axis_phase_tdata_dds21)      
+);
+
+// ★ DDS12模块 F1+2F2
+// =========================================================================
+wire [47:0] reg_freq_word_12 = reg_freq_word * 3;
+wire [95:0] dds_config_data_12 = {48'd0,reg_freq_word_12}; 
+
+wire signed [31:0] sine_cos_12;
+wire signed [13:0] sine_12 = sine_cos_12[29:16]; // 这就是同频同相输出的信号
+wire signed [13:0] cos_12  = sine_cos_12[13:0];
+
+wire m_axis_data_tvalid_dds12;
+wire m_axis_phase_tvalid_dds12;
+wire [47:0] m_axis_phase_tdata_dds12;
+
+// 例化第二个 DDS (请确保工程中 dds_compiler_1 支持多次例化)
+dds_compiler_1 u_dds_compiler_12 (
+  .aclk                  (clk_65M),                                  
+  .s_axis_config_tvalid  (1'b1),  
+  .s_axis_config_tdata   (dds_config_data_12),    
+  .m_axis_data_tvalid    (m_axis_data_tvalid_dds12),      
+  .m_axis_data_tdata     (sine_cos_12),        
+  .m_axis_phase_tvalid   (m_axis_phase_tvalid_dds12),    
+  .m_axis_phase_tdata    (m_axis_phase_tdata_dds12)      
+);
+
+// ★ DDS11模块 F1+F2
+// =========================================================================
+wire [47:0] reg_freq_word_11 = reg_freq_word + reg_freq_word_21;
+wire [95:0] dds_config_data_11 = {48'd0,reg_freq_word_11}; 
+
+wire signed [31:0] sine_cos_11;
+wire signed [13:0] sine_11 = sine_cos_11[29:16]; // 这就是同频同相输出的信号
+wire signed [13:0] cos_11  = sine_cos_11[13:0];
+
+wire m_axis_data_tvalid_dds11;
+wire m_axis_phase_tvalid_dds11;
+wire [47:0] m_axis_phase_tdata_dds11;
+
+// 例化第二个 DDS (请确保工程中 dds_compiler_1 支持多次例化)
+dds_compiler_1 u_dds_compiler_11 (
+  .aclk                  (clk_65M),                                  
+  .s_axis_config_tvalid  (1'b1),  
+  .s_axis_config_tdata   (dds_config_data_11),    
+  .m_axis_data_tvalid    (m_axis_data_tvalid_dds11),      
+  .m_axis_data_tdata     (sine_cos_11),        
+  .m_axis_phase_tvalid   (m_axis_phase_tvalid_dds11),    
+  .m_axis_phase_tdata    (m_axis_phase_tdata_dds11)      
+);
+
+
 // =========================================================================
 // ★ ILA 探针观察 (在 Vivado 中抓取波形)
 // =========================================================================
@@ -337,9 +413,9 @@ ila_0 u_ila_0 (
 	.clk    (sys_clk),
 	// probe0 原本是 14bit，现改为观察新 DDS 输出的【同频同相正弦波】
 	.probe0 (sine),           // 14bit: 第二个DDS输出的同频同相正弦波 (与ADC做对比)
-	.probe1 (ad_X),             // 28bit: 乘法器全精度输出
-	.probe2 (ad_X_cic),         // 28bit: CIC降采样后输出（粗滤后）
-	.probe3 (ad_Y),   // 28bit: IIR滤波后X通道纯净直流（同相分量，理想值等于信号幅值的一半）
+	.probe1 (sine_21),             // 28bit: 乘法器全精度输出
+	.probe2 (sine_12),         // 28bit: CIC降采样后输出（粗滤后）
+	.probe3 (sine_11),   // 28bit: IIR滤波后X通道纯净直流（同相分量，理想值等于信号幅值的一半）
 	.probe4 (ad_Y_cic),   // 28bit: IIR滤波后Y通道纯净直流（正交分量，锁定时趋于0）
 	.probe5 (reg_freq_word),             // 28bit: 乘法器全精度输出 Y通道
 	.probe6 (cos),         // 28bit: CIC降采样后输出 Y通道
@@ -347,7 +423,7 @@ ila_0 u_ila_0 (
 	.probe8 (cos_2),          // 14bit: ADC采集到的原始输入波形	
 	.probe9 (is_locked),          // 14bit: 锁定状态指示灯
  	.probe10 (auto_center_freq),          // 48bit: 观察FFT找出的自动中心频率
-    .probe11 (reg_freq_word_2)          // 32bit: DDS1输出
+    .probe11 (reg_freq_word_2)          // 48bit: DDS2输出
 );
 
 endmodule
