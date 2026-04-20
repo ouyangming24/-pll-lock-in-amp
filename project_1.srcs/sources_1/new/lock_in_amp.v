@@ -50,49 +50,6 @@ clk_wiz_0 u_clk_wiz_0 (
 
 
 // =========================================================================
-// ★ 测试信号 DDS tx1 (由 UART 指令 FRQ2 控制频率, PHAS 控制相位)
-// =========================================================================
-wire [47:0] tx1_phase_word;              // 串口输入控制相位 (PHAS 指令)
-wire [47:0] tx1_freq_word;               // 串口输入控制频率 (FRQ2 指令)
-wire [95:0] dds_tx1_config  = {tx1_phase_word, tx1_freq_word};
-
-wire signed [31:0] tx1_sine_cos;
-wire signed [13:0] sine_tx1 = tx1_sine_cos[29:16];
-wire signed [13:0] cos_tx1  = tx1_sine_cos[13:0];
-
-dds_compiler_1 u_dds_tx1 (
-  .aclk                  (clk_65M),
-  .s_axis_config_tvalid  (1'b1),
-  .s_axis_config_tdata   (dds_tx1_config),
-  .m_axis_data_tvalid    (),
-  .m_axis_data_tdata     (tx1_sine_cos),
-  .m_axis_phase_tvalid   (),
-  .m_axis_phase_tdata    ()
-);
-
-// =========================================================================
-// ★ 测试信号 DDS tx2 (由 UART 指令 FRQ3 控制频率, 默认零相位)
-// =========================================================================
-wire [47:0] tx2_phase_word = 48'd0;
-wire [47:0] tx2_freq_word;               // 串口输入控制频率 (FRQ3 指令)
-wire [95:0] dds_tx2_config = {tx2_phase_word, tx2_freq_word};
-
-wire signed [31:0] tx2_sine_cos;
-wire signed [13:0] sine_tx2 = tx2_sine_cos[29:16];
-wire signed [13:0] cos_tx2  = tx2_sine_cos[13:0];
-
-dds_compiler_1 u_dds_tx2 (
-  .aclk                  (clk_65M),
-  .s_axis_config_tvalid  (1'b1),
-  .s_axis_config_tdata   (dds_tx2_config),
-  .m_axis_data_tvalid    (),
-  .m_axis_data_tdata     (tx2_sine_cos),
-  .m_axis_phase_tvalid   (),
-  .m_axis_phase_tdata    ()
-);
-
-
-// =========================================================================
 // ★ 数字锁相环 (PLL) 公共信号
 // =========================================================================
 wire pll_en = 1'b1; // 锁相环使能开关
@@ -106,7 +63,7 @@ wire [4:0]  tau_y;
 
 
 // =========================================================================
-// ★ 通道1: FFT 自动寻峰及中心频率追踪 (65536 点)
+// ★ 通道1: FFT 自动寻峰及中心频率追踪 (32768 点)
 // =========================================================================
 wire                fft_tready_ch1;
 wire                freq_updated_ch1;
@@ -120,7 +77,7 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
         fft_cnt_ch1 <= fft_cnt_ch1 + 1'b1;
     end
 end
-wire fft_tlast_ch1 = (fft_cnt_ch1 == 16'd65535);
+wire fft_tlast_ch1 = (fft_cnt_ch1 == 16'd32767);
 
 fft_peak_tracker u_fft_ch1 (
     .clk                (clk_65M),
@@ -136,7 +93,7 @@ fft_peak_tracker u_fft_ch1 (
 );
 
 // =========================================================================
-// ★ 通道2: FFT 自动寻峰及中心频率追踪 (65536 点)
+// ★ 通道2: FFT 自动寻峰及中心频率追踪 (32768 点)
 // =========================================================================
 wire                fft_tready_ch2;
 wire                freq_updated_ch2;
@@ -150,7 +107,7 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
         fft_cnt_ch2 <= fft_cnt_ch2 + 1'b1;
     end
 end
-wire fft_tlast_ch2 = (fft_cnt_ch2 == 16'd65535);
+wire fft_tlast_ch2 = (fft_cnt_ch2 == 16'd32767);
 
 fft_peak_tracker u_fft_ch2 (
     .clk                (clk_65M),
@@ -165,6 +122,11 @@ fft_peak_tracker u_fft_ch2 (
     .freq_update_valid  (freq_updated_ch2)
 );
 
+
+wire [47:0] tx1_phase_word;              // 串口输入控制相位 (PHAS 指令)
+wire [47:0] tx1_freq_word;               // 串口输入控制频率 (FRQ2 指令)
+wire [47:0] tx2_phase_word = 48'd0;              // 串口输入控制相位 (PHAS 指令)
+wire [47:0] tx2_freq_word;               // 串口输入控制频率 (FRQ3 指令)
 
 // =========================================================================
 // ★ 通道1: PLL 控制器 (提前声明所需反馈信号)
@@ -455,6 +417,47 @@ iir_lpf_ema #(
 
 
 // =========================================================================
+// ★ 测试信号 DDS tx1 (由 UART 指令 FRQ2 控制频率, PHAS 控制相位)
+// =========================================================================
+
+wire [95:0] dds_tx1_config  = {48'd0, pll_freq_ch1};
+
+wire signed [31:0] tx1_sine_cos;
+wire signed [13:0] sine_tx1 = tx1_sine_cos[29:16];
+wire signed [13:0] cos_tx1  = tx1_sine_cos[13:0];
+
+dds_compiler_1 u_dds_tx1 (
+  .aclk                  (clk_65M),
+  .s_axis_config_tvalid  (1'b1),
+  .s_axis_config_tdata   (dds_tx1_config),
+  .m_axis_data_tvalid    (),
+  .m_axis_data_tdata     (tx1_sine_cos),
+  .m_axis_phase_tvalid   (),
+  .m_axis_phase_tdata    ()
+);
+
+// =========================================================================
+// ★ 测试信号 DDS tx2 (由 UART 指令 FRQ3 控制频率, 默认零相位)
+// =========================================================================
+
+wire [95:0] dds_tx2_config = {tx2_phase_word, pll_freq_ch2};
+
+wire signed [31:0] tx2_sine_cos;
+wire signed [13:0] sine_tx2 = tx2_sine_cos[29:16];
+wire signed [13:0] cos_tx2  = tx2_sine_cos[13:0];
+
+dds_compiler_1 u_dds_tx2 (
+  .aclk                  (clk_65M),
+  .s_axis_config_tvalid  (1'b1),
+  .s_axis_config_tdata   (dds_tx2_config),
+  .m_axis_data_tvalid    (),
+  .m_axis_data_tdata     (tx2_sine_cos),
+  .m_axis_phase_tvalid   (),
+  .m_axis_phase_tdata    ()
+);
+
+
+// =========================================================================
 // ★ 例化uart_commend模块 (UART 指令收发)
 // =========================================================================
 wire [7:0] rec_data;
@@ -565,24 +568,25 @@ dds_compiler_1 u_dds_11 (
 );
 
 
+
 // =========================================================================
 // ★ ILA 探针观察 (在 Vivado 中抓取波形)
 // =========================================================================
 ila_0 u_ila_0 (
     .clk     (sys_clk),
     .probe0  (ref_sine_ch1),            // 14bit: 通道1 本振参考正弦
-    .probe1  (sine_21),                 // 14bit: 2F1+F2 输出
-    .probe2  (sine_12),                 // 14bit: F1+2F2 输出
-    .probe3  (sine_11),                 // 14bit: F1+F2  输出
+    .probe1  (adc_ch1),                 // 14bit: 通道1 输入数据
+    .probe2  (adc_ch2),                 // 14bit: 通道2 输入数据
+    .probe3  (ref_cos_ch1),             // 14bit: 通道1 本振参考余弦
     .probe4  (cic_y_ch1),               // 28bit: 通道1 CIC Y
     .probe5  (pll_freq_ch1),            // 48bit: 通道1 PLL 锁定频率
-    .probe6  (ref_cos_ch1),             // 14bit: 通道1 本振参考余弦
-    .probe7  (sine_tx1),                // 14bit: 测试信号 tx1
-    .probe8  (cos_tx1),                 // 14bit: 测试信号 tx1 cos
-    .probe9  (is_locked_ch1),           //  1bit: 通道1 锁定状态
-    .probe10 (center_freq_auto_ch1),    // 48bit: 通道1 FFT 中心频率
-    .probe11 (tx1_freq_word),           // 48bit: tx1 UART 设置频率
-    .probe12 (tx2_freq_word)            // 48bit: tx2 UART 设置频率
+    .probe6  (ref_sine_ch2),            // 14bit: 通道2 本振参考正弦
+    .probe7  (ref_cos_ch2),             // 14bit: 通道2 本振参考余弦
+    .probe8  (cic_y_ch2),               // 28bit: 通道2 CIC Y
+    .probe9  (pll_freq_ch2),             // 48bit: 通道2 PLL 锁定频率
+    .probe10 (center_freq_auto_ch1),
+    .probe11 (center_freq_auto_ch2)
+    
 );
 
 endmodule

@@ -139,7 +139,7 @@ architecture tb of tb_xfft_0 is
   -- Data master channel alias signals
   signal m_axis_data_tdata_re             : std_logic_vector(13 downto 0) := (others => '0');  -- real data
   signal m_axis_data_tdata_im             : std_logic_vector(13 downto 0) := (others => '0');  -- imaginary data
-  signal m_axis_data_tuser_xk_index       : std_logic_vector(15 downto 0) := (others => '0');  -- sample index
+  signal m_axis_data_tuser_xk_index       : std_logic_vector(14 downto 0) := (others => '0');  -- sample index
   signal m_axis_data_tuser_blk_exp        : std_logic_vector(4 downto 0) := (others => '0');  -- block exponent
 
   -- Status master channel alias signals
@@ -150,7 +150,7 @@ architecture tb of tb_xfft_0 is
   -----------------------------------------------------------------------
 
   constant IP_WIDTH    : integer := 14;
-  constant MAX_SAMPLES : integer := 2**16;  -- maximum number of samples in a frame
+  constant MAX_SAMPLES : integer := 2**15;  -- maximum number of samples in a frame
   type T_IP_SAMPLE is record
     re : std_logic_vector(IP_WIDTH-1 downto 0);
     im : std_logic_vector(IP_WIDTH-1 downto 0);
@@ -517,7 +517,7 @@ begin
       elsif m_axis_data_tvalid = '1' and m_axis_data_tready = '1' then
         -- Record output data such that it can be used as input data
         -- Output sample index is given by xk_index field of m_axis_data_tuser
-        index := to_integer(unsigned(m_axis_data_tuser(15 downto 0)));
+        index := to_integer(unsigned(m_axis_data_tuser(14 downto 0)));
         op_data(index).re <= m_axis_data_tdata(13 downto 0);
         op_data(index).im <= m_axis_data_tdata(29 downto 16);
         -- Track the number of output frames
@@ -623,7 +623,7 @@ begin
   -- Data master channel alias signals
   m_axis_data_tdata_re           <= m_axis_data_tdata(13 downto 0);
   m_axis_data_tdata_im           <= m_axis_data_tdata(29 downto 16);
-  m_axis_data_tuser_xk_index     <= m_axis_data_tuser(15 downto 0);
+  m_axis_data_tuser_xk_index     <= m_axis_data_tuser(14 downto 0);
   m_axis_data_tuser_blk_exp      <= m_axis_data_tuser(20 downto 16);
 
   -- Status master channel alias signals

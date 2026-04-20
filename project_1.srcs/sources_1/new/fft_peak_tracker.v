@@ -3,17 +3,17 @@
 /*
  * 模块名称: fft_peak_tracker
  * 功能描述: 自动跟踪信号中心频率的模块
- *           1. 内部例化 xfft_0 (1024点)
+ *           1. 内部例化 xfft_0 (32768点)
  *           2. 解析复数结果并流水线计算幅值平方
  *           3. 自动寻找第一半频区(屏蔽直流)的最大峰值
  *           4. 将峰值对应的频率索引转换成 48位中心频率，直接喂给 pll_controller
  */
 module fft_peak_tracker #(
-    parameter FFT_POINTS = 65536,
+    parameter FFT_POINTS = 32768,
     // DDS_FTW_MULT (频率控制字乘数)
     // 计算公式: (Fs / FFT_POINTS) * (2^48 / Fclk)
-    // 65MHz / 65536 点: 2^48 / 65536 = 2^32 = 48'h0001_0000_0000
-    parameter [47:0] BIN_TO_FTW = 48'h0001_0000_0000 
+    // 65MHz / 32768 点: 2^48 / 32768 = 2^33 = 48'h0002_0000_0000
+    parameter [47:0] BIN_TO_FTW = 48'h0002_0000_0000 
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -23,7 +23,7 @@ module fft_peak_tracker #(
     // ==========================================
     input  wire [31:0] s_axis_data_tdata,   // [31:16]可以全填0，[15:0]填 ADC 输入实数
     input  wire        s_axis_data_tvalid,
-    input  wire        s_axis_data_tlast,   // 必须每 1024 个点拉高一次
+    input  wire        s_axis_data_tlast,   // 必须每 32768 个点拉高一次
     output wire        s_axis_data_tready,
 
     // ==========================================
@@ -103,7 +103,7 @@ module fft_peak_tracker #(
     // 提取实部和虚部 (参考截图中 CHAN_0_XN_IM [29:16] 和 CHAN_0_XN_RE [13:0])
     wire signed [13:0] re_in = m_axis_data_tdata[13:0];
     wire signed [13:0] im_in = m_axis_data_tdata[29:16];
-    // 提取当前频率索引 (65536点占用 16位)
+    // 提取当前频率索引 (32768点占用 15位, 仍用16位容纳)
     wire        [15:0] index_in = m_axis_data_tuser[15:0]; 
     
     // 符号扩展至16位，防止乘法器溢出
