@@ -65,62 +65,62 @@ wire [4:0]  tau_y;
 // =========================================================================
 // ★ 通道1: FFT 自动寻峰及中心频率追踪 (32768 点)
 // =========================================================================
-wire                fft_tready_ch1;
-wire                freq_updated_ch1;
-wire signed [47:0]  center_freq_auto_ch1;
+// wire                fft_tready_ch1;
+// wire                freq_updated_ch1;
+// wire signed [47:0]  center_freq_auto_ch1;
 
-reg [15:0] fft_cnt_ch1 = 0;
-always @(posedge clk_65M or negedge sys_rst_n) begin
-    if (!sys_rst_n) begin
-        fft_cnt_ch1 <= 0;
-    end else if (fft_tready_ch1) begin
-        fft_cnt_ch1 <= fft_cnt_ch1 + 1'b1;
-    end
-end
-wire fft_tlast_ch1 = (fft_cnt_ch1 == 16'd32767);
+// reg [15:0] fft_cnt_ch1 = 0;
+// always @(posedge clk_65M or negedge sys_rst_n) begin
+//     if (!sys_rst_n) begin
+//         fft_cnt_ch1 <= 0;
+//     end else if (fft_tready_ch1) begin
+//         fft_cnt_ch1 <= fft_cnt_ch1 + 1'b1;
+//     end
+// end
+// wire fft_tlast_ch1 = (fft_cnt_ch1 == 16'd32767);
 
-fft_peak_tracker u_fft_ch1 (
-    .clk                (clk_65M),
-    .rst_n              (sys_rst_n),
+// fft_peak_tracker u_fft_ch1 (
+//     .clk                (clk_65M),
+//     .rst_n              (sys_rst_n),
 
-    .s_axis_data_tdata  ({16'd0, {2{adc_ch1[13]}}, adc_ch1}),
-    .s_axis_data_tvalid (1'b1),
-    .s_axis_data_tlast  (fft_tlast_ch1),
-    .s_axis_data_tready (fft_tready_ch1),
+//     .s_axis_data_tdata  ({16'd0, {2{adc_ch1[13]}}, adc_ch1}),
+//     .s_axis_data_tvalid (1'b1),
+//     .s_axis_data_tlast  (fft_tlast_ch1),
+//     .s_axis_data_tready (fft_tready_ch1),
 
-    .center_freq        (center_freq_auto_ch1),
-    .freq_update_valid  (freq_updated_ch1)
-);
+//     .center_freq        (center_freq_auto_ch1),
+//     .freq_update_valid  (freq_updated_ch1)
+// );
 
-// =========================================================================
-// ★ 通道2: FFT 自动寻峰及中心频率追踪 (32768 点)
-// =========================================================================
-wire                fft_tready_ch2;
-wire                freq_updated_ch2;
-wire signed [47:0]  center_freq_auto_ch2;
+// // =========================================================================
+// // ★ 通道2: FFT 自动寻峰及中心频率追踪 (32768 点)
+// // =========================================================================
+// wire                fft_tready_ch2;
+// wire                freq_updated_ch2;
+// wire signed [47:0]  center_freq_auto_ch2;
 
-reg [15:0] fft_cnt_ch2 = 0;
-always @(posedge clk_65M or negedge sys_rst_n) begin
-    if (!sys_rst_n) begin
-        fft_cnt_ch2 <= 0;
-    end else if (fft_tready_ch2) begin
-        fft_cnt_ch2 <= fft_cnt_ch2 + 1'b1;
-    end
-end
-wire fft_tlast_ch2 = (fft_cnt_ch2 == 16'd32767);
+// reg [15:0] fft_cnt_ch2 = 0;
+// always @(posedge clk_65M or negedge sys_rst_n) begin
+//     if (!sys_rst_n) begin
+//         fft_cnt_ch2 <= 0;
+//     end else if (fft_tready_ch2) begin
+//         fft_cnt_ch2 <= fft_cnt_ch2 + 1'b1;
+//     end
+// end
+// wire fft_tlast_ch2 = (fft_cnt_ch2 == 16'd32767);
 
-fft_peak_tracker u_fft_ch2 (
-    .clk                (clk_65M),
-    .rst_n              (sys_rst_n),
+// fft_peak_tracker u_fft_ch2 (
+//     .clk                (clk_65M),
+//     .rst_n              (sys_rst_n),
 
-    .s_axis_data_tdata  ({16'd0, {2{adc_ch2[13]}}, adc_ch2}),
-    .s_axis_data_tvalid (1'b1),
-    .s_axis_data_tlast  (fft_tlast_ch2),
-    .s_axis_data_tready (fft_tready_ch2),
+//     .s_axis_data_tdata  ({16'd0, {2{adc_ch2[13]}}, adc_ch2}),
+//     .s_axis_data_tvalid (1'b1),
+//     .s_axis_data_tlast  (fft_tlast_ch2),
+//     .s_axis_data_tready (fft_tready_ch2),
 
-    .center_freq        (center_freq_auto_ch2),
-    .freq_update_valid  (freq_updated_ch2)
-);
+//     .center_freq        (center_freq_auto_ch2),
+//     .freq_update_valid  (freq_updated_ch2)
+// );
 
 
 wire [47:0] tx1_phase_word;              // 串口输入控制相位 (PHAS 指令)
@@ -151,7 +151,7 @@ pll_controller #(
     .pll_en         ( pll_en               ),
     .pll_kp         ( pll_kp               ),
     .pll_ki         ( pll_ki               ),
-    .center_freq    ( center_freq_auto_ch1 ),
+    .center_freq    ( tx1_freq_word ),
     .phase_error_in ( dc_y_ch1             ),
     .amp_in         ( dc_x_ch1             ),
     .valid_in       ( cic_valid_y_ch1      ),
@@ -182,7 +182,7 @@ pll_controller #(
     .pll_en         ( pll_en               ),
     .pll_kp         ( pll_kp               ),  // 共用一组 PI 参数
     .pll_ki         ( pll_ki               ),
-    .center_freq    ( center_freq_auto_ch2 ),
+    .center_freq    ( tx2_freq_word ),
     .phase_error_in ( dc_y_ch2             ),
     .amp_in         ( dc_x_ch2             ),
     .valid_in       ( cic_valid_y_ch2      ),
@@ -584,8 +584,8 @@ ila_0 u_ila_0 (
     .probe7  (ref_cos_ch2),             // 14bit: 通道2 本振参考余弦
     .probe8  (cic_y_ch2),               // 28bit: 通道2 CIC Y
     .probe9  (pll_freq_ch2),             // 48bit: 通道2 PLL 锁定频率
-    .probe10 (center_freq_auto_ch1),
-    .probe11 (center_freq_auto_ch2)
+    .probe10 (tx1_freq_word),
+    .probe11 (tx2_freq_word)
     
 );
 
