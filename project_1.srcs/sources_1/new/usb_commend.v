@@ -1,10 +1,38 @@
-module uart_commend(
+`timescale 1ns / 1ps
+// =============================================================================
+//  usb_commend.v  (原 uart_commend.v 改名而来)
+//
+//  字节流级指令/数据协议解析器。
+//  本模块 *不* 关心物理层, 只处理字节流:
+//      - 输入: rec_data[7:0] + rec_done 脉冲  (每到一字节)
+//      - 输出: send_en / send_data[7:0]       (等 tx_done 脉冲确认)
+//
+//  因此它对 UART / FT245BL USB-FIFO 都适用。当前工程通过 ft245_rx/ft245_tx
+//  对接 FT245BL 芯片, 本模块保留对外纯字节流接口, 未来替换物理层无需修改。
+//
+//  支持的指令 (ASCII, 以 \r\n 或 \n 结尾):
+//      FREQ:<十进制>   中心频率 (48bit 频率字)
+//      KP:<十进制>     PLL 比例系数 (16bit)
+//      KI:<十进制>     PLL 积分系数 (16bit)
+//      TAUX:<十进制>   X 路 IIR 平滑系数 (5bit)
+//      TAUY:<十进制>   Y 路 IIR 平滑系数 (5bit)
+//      PHAS:<十进制>   tx1 相位偏移 (48bit)
+//      FRQ2:<十进制>   tx1 频率字 (48bit)
+//      FRQ3:<十进制>   tx2 频率字 (48bit)
+//      XYOUT           开启 48 字节数据帧周期性回传
+//      stop            关闭数据帧回传
+//
+//  回传数据帧 (48 字节 / 384 bit, 大端):
+//      [0..3]   0xA5_5A_A5_5A             同步头
+//      [4..47]  11 × int32 (通道1/2/3 的各路 X/Y/DC)
+// =============================================================================
+module usb_commend(
     input wire clk,
     input wire rst_n,
     input wire [7:0] rec_data,
     input wire rec_done,
     input wire tx_done,
-    input wire [127:0] x_y_fir,
+    input wire [383:0] x_y_fir,    // 48字节完整回传帧 (4字节同步头 + 11×int32)
     input wire m_axis_data_tvalid_fir_x,
     output reg [47:0] center_freq,
     output reg [15:0] pll_kp,
@@ -46,9 +74,12 @@ module uart_commend(
 
     reg xy_data_enable;
     reg [7:0] byte_cnt;
-    reg [127:0] xy_data_reg;
+    reg [383:0] xy_data_reg;       // 48 字节帧缓存 (同步头 + 11×int32)
     reg new_data_ready;
     reg data_sending;
+
+    // 帧长度 (字节), 随 x_y_fir 宽度一起调整
+    localparam [7:0] FRAME_BYTES = 8'd48;
 
     reg [31:0] delay_cnt;
     parameter DELAY_1S = 32'd50_000_00;
@@ -89,7 +120,7 @@ module uart_commend(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            xy_data_reg <= 128'd0;
+            xy_data_reg <= 384'd0;
             new_data_ready <= 1'b0;
         end else if (m_axis_data_tvalid_fir_x_posedge && xy_data_enable && !data_sending) begin
             xy_data_reg <= x_y_fir;
@@ -313,7 +344,8 @@ module uart_commend(
                     else if (!send_en && !tx_done) begin
                         send_en <= 1'b1;
                         data_sending <= 1'b1;
-                        send_data <= xy_data_reg[127-byte_cnt*8 -: 8];
+                        // byte_cnt = 0 -> 最高字节 (同步头 0xA5) 先发
+                        send_data <= xy_data_reg[383-byte_cnt*8 -: 8];
                         curr_state <= WAIT_XYDATA;
                     end
                 end
@@ -335,7 +367,7 @@ module uart_commend(
                     end
                     else if (tx_done) begin
                         send_en <= 1'b0;
-                        if (byte_cnt < 8'd15) begin  
+                        if (byte_cnt < FRAME_BYTES - 1) begin  
                             byte_cnt <= byte_cnt + 1'b1;
                             curr_state <= SEND_XYDATA;
                         end

@@ -92,8 +92,42 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN U22}  [get_ports adc_pdn_2]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN T22}  [get_ports adc_otr_2]
 
 
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN L17} [get_ports uart_tx ]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN M17} [get_ports uart_rx ]
+
+
+
+
+#############################################################################
+# FT245BL USB-FIFO 接口 (替代原先的 UART)
+#   - FT245BL VCCIO 建议接 3.3 V, FPGA 端 IOSTANDARD 用 LVCMOS33
+#   - 下面的 PACKAGE_PIN 全是 ★占位★, 必须根据实际 PCB 连线修改!
+#   - 原 uart_tx(L17) / uart_rx(M17) 的 2 个引脚已释放, 可用于其他功能
+#############################################################################
+
+# ---- FIFO 数据总线 D0..D7 (双向) ------------------------------------------
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN H20} [get_ports {ft_d[0]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN F18} [get_ports {ft_d[1]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G17} [get_ports {ft_d[2]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN C18} [get_ports {ft_d[3]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN F19} [get_ports {ft_d[4]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN E19} [get_ports {ft_d[5]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN C22} [get_ports {ft_d[6]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN B21} [get_ports {ft_d[7]}]
+
+# ---- FIFO 控制信号 ---------------------------------------------------------
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN B22} [get_ports ft_rd_n  ]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN D22} [get_ports ft_wr    ]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN E20} [get_ports ft_rxf_n ]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G19} [get_ports ft_txe_n ]
+
+
+# ---- 未接 FPGA 的 FT245 引脚 (PCB 处理, 不在此约束) -----------------------
+#   FT245 PWREN# (pin 10) : 输出, 未使用 -> 悬空或接 LED/测试点
+#   FT245 SI/WU  (pin 11) : 输入, 未使用 -> PCB 上拉到 VCCIO (强制要求!)
+
+# ---- 建议的时序/电气约束 ---------------------------------------------------
+# FT245 的 FIFO 时钟上限为 48 MHz, 本工程 sys_clk = 50 MHz 已足够慢,
+# 读写时序由 ft245_rx/ft245_tx 内部计数器保证, 通常不需要额外 SDC 约束。
+# 若以后加入更高速的同步 FIFO (FT245BL 不支持), 再补 create_generated_clock。
 
 
 

@@ -23,8 +23,23 @@ module lock_in_amp(
    output  wire          adc_clk_2     ,   // ADC采样时钟输出
 
 
-    input  wire uart_rx,             // UART接收端口
-    output wire uart_tx              // UART发送端口
+    // ------------------------------------------------------------------
+    // FT245BL 接口 (替代原先的 UART)
+    //   - D[7:0]   : 双向数据总线, 由 ft_d_oe 决定方向
+    //   - RXF#     : 低 = FT245 RX FIFO (来自 PC) 有数据可读 (输入)
+    //   - RD#      : FPGA 读选通 (输出)
+    //   - TXE#     : 低 = FT245 TX FIFO (去 PC)   可写       (输入)
+    //   - WR       : FPGA 写选通 (输出), 下降沿锁存
+    //
+    // 未接 FPGA 的引脚 (PCB 层面直接处理):
+    //   - PWREN#   : FT245 输出, 未使用 -> FT245 此脚不接 FPGA (可悬空或接 LED 指示)
+    //   - SI/WU    : FT245 输入, 未使用 -> FT245 此脚 PCB 上直接上拉到 VCCIO
+    // ------------------------------------------------------------------
+    inout  wire [7:0] ft_d,          // FIFO 数据总线 D0..D7
+    input  wire       ft_rxf_n,      // RXF#
+    output wire       ft_rd_n,       // RD#
+    input  wire       ft_txe_n,      // TXE#
+    output wire       ft_wr          // WR
 );
 
 //===========================================================================
@@ -480,35 +495,108 @@ dds_compiler_1 u_dds_tx2 (
 
 
 // =========================================================================
-// ★ 例化uart_commend模块 (UART 指令收发)
+// ★ FT245BL 物理层 + 上层指令收发
+//   - ft245_rx / ft245_tx 负责 FT245 读/写时序
+//   - usb_commend  负责字节流级协议, 对物理层 (UART / FT245) 无感知
+//   - D[7:0] 双向总线: 写时由 ft245_tx 驱动, 其余时间高阻 (FT245 读 / 空闲)
 // =========================================================================
 wire [7:0] rec_data;
-wire rec_done;
-wire tx_done;
-wire send_en;
+wire       rec_done;
+wire       tx_done;
+wire       send_en;
 wire [7:0] send_data;
 
-uart_rec u_uart_rec (
-    .clk(sys_clk),
-    .rst_n(sys_rst_n),
-    .rx(uart_rx),
-    .rec_data(rec_data),
-    .rec_done(rec_done)
+// FT245 三态总线方向控制
+wire [7:0] ft_d_tx;     // ft245_tx 想驱动出去的数据
+wire       ft_d_oe;     // ft245_tx 输出使能 (1=FPGA 驱动总线)
+wire [7:0] ft_d_in;     // 从总线读入 (给 ft245_rx)
+
+assign ft_d    = ft_d_oe ? ft_d_tx : 8'bz;   // 三态驱动
+assign ft_d_in = ft_d;                       // 读方向直接取总线
+
+// --- 读通道 (PC -> FPGA): 指令/参数下发 --------------------------------
+ft245_rx #(
+    .CLK_PERIOD_NS(20),    // sys_clk = 50 MHz
+    .T_RD_LOW_NS  (80),
+    .T_RD_HIGH_NS (100)
+) u_ft245_rx (
+    .clk      (sys_clk ),
+    .rst_n    (sys_rst_n),
+    .ft_rxf_n (ft_rxf_n),
+    .ft_rd_n  (ft_rd_n ),
+    .ft_d_in  (ft_d_in ),
+    .rec_data (rec_data),
+    .rec_done (rec_done)
 );
 
-uart_send u_uart_send (
-    .clk(sys_clk),
-    .rst_n(sys_rst_n),
-    .send_en(send_en),
+// --- 写通道 (FPGA -> PC): 响应/数据上传 --------------------------------
+ft245_tx #(
+    .CLK_PERIOD_NS(20),
+    .T_WR_HIGH_NS (80),
+    .T_WR_COOL_NS (160)
+) u_ft245_tx (
+    .clk      (sys_clk ),
+    .rst_n    (sys_rst_n),
+    .ft_txe_n (ft_txe_n),
+    .ft_wr    (ft_wr   ),
+    .ft_d_out (ft_d_tx ),
+    .ft_d_oe  (ft_d_oe ),
+    .send_en  (send_en ),
     .send_data(send_data),
-    .tx(uart_tx),
-    .tx_done(tx_done)
+    .tx_done  (tx_done )
 );
 
-// 打包通道1的 X/Y 滤波结果为 128 位 (上位机回传)
-wire [127:0] x_y_fir_packed = {36'd0, dc_x_ch1, 36'd0, dc_y_ch1};
+// =========================================================================
+// ★ 上位机回传帧打包 (48 字节 / 384 bit, 大端)
+//   偏移        字段              类型
+//   --------- ----------------- ----------
+//   [ 0.. 3]  0xA5_5A_A5_5A     sync header (魔数)
+//   [ 4.. 7]  dc_x_ch1          int32 (通道1 @ F1 的 X)
+//   [ 8..11]  dc_y_ch1          int32 (通道1 @ F1 的 Y)
+//   [12..15]  dc_x_ch2          int32 (通道2 @ F2 的 X)
+//   [16..19]  dc_y_ch2          int32 (通道2 @ F2 的 Y)
+//   [20..23]  dc_x_ch3_21       int32 (通道3 @ 2F1+F2 的 X)
+//   [24..27]  dc_y_ch3_21       int32 (通道3 @ 2F1+F2 的 Y)
+//   [28..31]  dc_x_ch3_12       int32 (通道3 @ F1+2F2 的 X)
+//   [32..35]  dc_y_ch3_12       int32 (通道3 @ F1+2F2 的 Y)
+//   [36..39]  dc_x_ch3_11       int32 (通道3 @ F1+F2  的 X)
+//   [40..43]  dc_y_ch3_11       int32 (通道3 @ F1+F2  的 Y)
+//   [44..47]  dc_ch3            int32 (通道3 DC 分量)
+//
+//   - 所有 28bit 有符号数据通过符号扩展到 32bit
+//   - 发送顺序: 字节 0 先, 字节 47 后; 每个 int32 高字节先发 (大端)
+//   - 上位机解析: Python `struct.unpack('>4B11i', frame)` 或先匹配头再读数据
+// =========================================================================
+// 28bit -> 32bit 符号扩展
+wire [31:0] s32_x_ch1    = {{4{dc_x_ch1   [27]}}, dc_x_ch1    };
+wire [31:0] s32_y_ch1    = {{4{dc_y_ch1   [27]}}, dc_y_ch1    };
+wire [31:0] s32_x_ch2    = {{4{dc_x_ch2   [27]}}, dc_x_ch2    };
+wire [31:0] s32_y_ch2    = {{4{dc_y_ch2   [27]}}, dc_y_ch2    };
+wire [31:0] s32_x_ch3_21 = {{4{dc_x_ch3_21[27]}}, dc_x_ch3_21 };
+wire [31:0] s32_y_ch3_21 = {{4{dc_y_ch3_21[27]}}, dc_y_ch3_21 };
+wire [31:0] s32_x_ch3_12 = {{4{dc_x_ch3_12[27]}}, dc_x_ch3_12 };
+wire [31:0] s32_y_ch3_12 = {{4{dc_y_ch3_12[27]}}, dc_y_ch3_12 };
+wire [31:0] s32_x_ch3_11 = {{4{dc_x_ch3_11[27]}}, dc_x_ch3_11 };
+wire [31:0] s32_y_ch3_11 = {{4{dc_y_ch3_11[27]}}, dc_y_ch3_11 };
+wire [31:0] s32_dc_ch3   = {{4{dc_ch3     [27]}}, dc_ch3      };
 
-uart_commend u_uart_commend (
+// 拼成 384 bit, 最高 32bit 是同步头, 最低 32bit 是 dc_ch3
+wire [383:0] x_y_fir_packed = {
+    32'hA5_5A_A5_5A,   // [383:352]
+    s32_x_ch1,         // [351:320]
+    s32_y_ch1,         // [319:288]
+    s32_x_ch2,         // [287:256]
+    s32_y_ch2,         // [255:224]
+    s32_x_ch3_21,      // [223:192]
+    s32_y_ch3_21,      // [191:160]
+    s32_x_ch3_12,      // [159:128]
+    s32_y_ch3_12,      // [127: 96]
+    s32_x_ch3_11,      // [ 95: 64]
+    s32_y_ch3_11,      // [ 63: 32]
+    s32_dc_ch3         // [ 31:  0]
+};
+
+usb_commend u_usb_commend (
     .clk(sys_clk),
     .rst_n(sys_rst_n),
     .rec_data(rec_data),
