@@ -22,9 +22,12 @@
 //      XYOUT           开启 48 字节数据帧周期性回传
 //      stop            关闭数据帧回传
 //
-//  回传数据帧 (48 字节 / 384 bit, 大端):
-//      [0..3]   0xA5_5A_A5_5A             同步头
-//      [4..47]  11 × int32 (通道1/2/3 的各路 X/Y/DC)
+//  回传数据帧 (80 字节 / 640 bit, 大端):
+//      [0..3]    0xA5_5A_A5_5A             同步头
+//      [4..47]   11 × int32 (通道1/2/3 的各路 X/Y/DC)
+//      [48..59]  3 × int32  (原始 ADC 采样 ch1/ch2/ch3)
+//      [60..75]  2 × uint64 (PLL 锁定频率字 ch1/ch2)
+//      [76..79]  1 × int32  (lock_flags: bit0=ch1, bit1=ch2)
 // =============================================================================
 module usb_commend(
     input wire clk,
@@ -32,7 +35,7 @@ module usb_commend(
     input wire [7:0] rec_data,
     input wire rec_done,
     input wire tx_done,
-    input wire [383:0] x_y_fir,    // 48字节完整回传帧 (4字节同步头 + 11×int32)
+    input wire [639:0] x_y_fir,    // 80字节完整回传帧
     input wire m_axis_data_tvalid_fir_x,
     output reg [47:0] center_freq,
     output reg [15:0] pll_kp,
@@ -74,12 +77,12 @@ module usb_commend(
 
     reg xy_data_enable;
     reg [7:0] byte_cnt;
-    reg [383:0] xy_data_reg;       // 48 字节帧缓存 (同步头 + 11×int32)
+    reg [639:0] xy_data_reg;       // 80 字节帧缓存
     reg new_data_ready;
     reg data_sending;
 
     // 帧长度 (字节), 随 x_y_fir 宽度一起调整
-    localparam [7:0] FRAME_BYTES = 8'd48;
+    localparam [7:0] FRAME_BYTES = 8'd80;
 
     reg [31:0] delay_cnt;
     parameter DELAY_1S = 32'd50_000_00;
@@ -120,7 +123,7 @@ module usb_commend(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            xy_data_reg <= 384'd0;
+            xy_data_reg <= 640'd0;
             new_data_ready <= 1'b0;
         end else if (m_axis_data_tvalid_fir_x_posedge && xy_data_enable && !data_sending) begin
             xy_data_reg <= x_y_fir;
@@ -345,7 +348,7 @@ module usb_commend(
                         send_en <= 1'b1;
                         data_sending <= 1'b1;
                         // byte_cnt = 0 -> 最高字节 (同步头 0xA5) 先发
-                        send_data <= xy_data_reg[383-byte_cnt*8 -: 8];
+                        send_data <= xy_data_reg[639-byte_cnt*8 -: 8];
                         curr_state <= WAIT_XYDATA;
                     end
                 end

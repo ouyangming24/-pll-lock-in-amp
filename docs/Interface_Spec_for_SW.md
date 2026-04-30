@@ -87,13 +87,15 @@ frequency_word = round(f_target_Hz × 2^48 / f_clk)
 
 > ⚠️ 软件**必须等收到应答**再发下一条命令，否则可能丢命令。
 
-### 3.3 FPGA → PC：48 字节数据帧（XYOUT 后周期回传）
+### 3.3 FPGA → PC：80 字节数据帧（XYOUT 后周期回传）
+
+> **协议版本 v1.1**（v1.0 是 48 字节帧，已废弃）
 
 **完整帧布局（大端）**：
 
 | 偏移 | 长度 | 字段 | 类型 | 含义 |
 |:---:|:---:|---|---|---|
-| 0  | 4 | **同步头** | 0xA5 5A A5 5A | 固定魔数，用于对齐 |
+| 0  | 4 | **同步头** | `0xA5 5A A5 5A` | 固定魔数，用于对齐 |
 | 4  | 4 | `ch1_x`     | int32 | 通道1 @ F1 的 X 分量 |
 | 8  | 4 | `ch1_y`     | int32 | 通道1 @ F1 的 Y 分量 |
 | 12 | 4 | `ch2_x`     | int32 | 通道2 @ F2 的 X 分量 |
@@ -105,14 +107,42 @@ frequency_word = round(f_target_Hz × 2^48 / f_clk)
 | 36 | 4 | `ch3_x_11`  | int32 | 通道3 @ (F1+F2)  X |
 | 40 | 4 | `ch3_y_11`  | int32 | 通道3 @ (F1+F2)  Y |
 | 44 | 4 | `ch3_dc`    | int32 | 通道3 直流分量 |
+| **48** | **4** | **`adc_ch1`** | **int32** | **★ 通道1 原始 ADC 瞬时采样 (14bit 符号扩展)** |
+| **52** | **4** | **`adc_ch2`** | **int32** | **★ 通道2 原始 ADC 瞬时采样** |
+| **56** | **4** | **`adc_ch3`** | **int32** | **★ 通道3 原始 ADC 瞬时采样** |
+| **60** | **8** | **`pll_freq_ch1`** | **uint64** | **★ 通道1 锁定的 DDS 频率字 (低 48bit 有效, 高 16bit 为 0)** |
+| **68** | **8** | **`pll_freq_ch2`** | **uint64** | **★ 通道2 锁定的 DDS 频率字** |
+| **76** | **4** | **`lock_flags`** | **int32** | **★ bit 0 = ch1 锁定, bit 1 = ch2 锁定, 其余位保留** |
 
 **重要约定**：
-1. 所有数值是 **28 位有符号** 内部计算结果，符号扩展到 32 位（高 4 位是符号位的复制）
-   → 软件直接当 `int32` 大端解析即可
-2. **同步头不是 4 字节连续 ASCII**，是 4 个字节 `A5 5A A5 5A`
-3. 帧之间**没有分隔符**，靠同步头自对齐
-4. **典型帧率**：50–100 Hz（取决于 `TAUX/TAUY`）
-5. **绝不会拆包**：48 字节是原子的，不存在跨帧的不完整字节序列
+1. 所有 28 位 / 14 位有符号数据均**符号扩展到 32 位**
+2. `pll_freq_ch1/ch2` 是 48 位频率字，高位补 0 后形成 64 位无符号
+   - 物理频率换算：`f_Hz = word × F_CLK / 2^48`，其中 `F_CLK = 65 MHz`
+3. `lock_flags` 是位掩码：`is_locked_ch1 = (lock_flags >> 0) & 1`
+4. **同步头不是 4 字节连续 ASCII**，是 4 个字节 `A5 5A A5 5A`
+5. 帧之间**没有分隔符**，靠同步头自对齐
+6. **典型帧率**：50–100 Hz（取决于 `TAUX/TAUY`）
+7. **绝不会拆包**：80 字节是原子的，不存在跨帧的不完整字节序列
+
+**Python `struct` 解析示例**：
+
+```python
+import struct
+SYNC = b'\xA5\x5A\xA5\x5A'
+FRAME_LEN = 80
+fmt = '>11i' + '3i' + 'QQ' + 'i'   # 11 锁相 + 3 ADC + 2 频率 + 1 锁定标志
+fields = struct.unpack(fmt, frame[4:])  # 跳过 4 字节同步头
+ch1_x, ch1_y, ch2_x, ch2_y, \
+ch3_x_21, ch3_y_21, ch3_x_12, ch3_y_12, ch3_x_11, ch3_y_11, ch3_dc, \
+adc_ch1, adc_ch2, adc_ch3, \
+pll_freq_ch1_word, pll_freq_ch2_word, \
+lock_flags = fields
+
+f1_hz = pll_freq_ch1_word * 65e6 / (1 << 48)
+f2_hz = pll_freq_ch2_word * 65e6 / (1 << 48)
+ch1_locked = bool(lock_flags & 1)
+ch2_locked = bool(lock_flags & 2)
+```
 
 ---
 

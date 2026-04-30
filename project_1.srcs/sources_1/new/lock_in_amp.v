@@ -1,285 +1,82 @@
 `timescale 1ns / 1ps
+// =============================================================================
+//  lock_in_amp.v   ─── 双通道数字锁相放大器顶层
+//
+//  [v3.2 重构]
+//   1) 把"锁相环 (PLL)"和"锁相放大器 (PSD)"各自封装为独立模块:
+//        - pll_loop.v    : 闭环 PLL (ADC 信号 → 锁定频率字 + X/Y)
+//        - lockin_psd.v  : 开环 PSD (外部参考频率 → X/Y)
+//   2) F2 现在通过 adc_ch2 真正闭环锁定:
+//        - 通道2 PLL 跟踪 adc_ch2 → pll_freq_ch2
+//        - 三个和差频 DDS 改用 pll_freq_ch2 (而不是 tx2_freq_word)
+//   3) tx1_freq_word / tx2_freq_word 仍保留为 PLL 扫频起点
+// =============================================================================
 
 module lock_in_amp(
-    input                 sys_clk     ,  //系统时钟
-    input                 sys_rst_n   ,  //系统复位，低电平有效
-//    //DA芯片接口
-//    output  wire          dac_pd      ,   // DAC掉电控制
-//    output  wire          dac_clk     ,   // DAC时钟输出
-//    output  wire  [13:0]  da_data     ,   // DAC数据输出
+    input                 sys_clk     ,
+    input                 sys_rst_n   ,
 
-   //AD芯片接口
-   input   wire  [13:0]  adc_data    ,   // ADC数据输入
-   input   wire          adc_otr     ,   // ADC过量程指示
-   output  wire          adc_pdn     ,   // ADC掉电控制
-   output  wire          adc_oeb_b   ,   // ADC输出使能（低电平有效）
-   output  wire          adc_clk     ,   // ADC采样时钟输出
+   //AD 芯片接口 (锁定通道1/2)
+   input   wire  [13:0]  adc_data    ,
+   input   wire          adc_otr     ,
+   output  wire          adc_pdn     ,
+   output  wire          adc_oeb_b   ,
+   output  wire          adc_clk     ,
 
-   //AD_2芯片接口
-   input   wire  [13:0]  adc_data_2    ,   // ADC数据输入
-   input   wire          adc_otr_2     ,   // ADC过量程指示
-   output  wire          adc_pdn_2     ,   // ADC掉电控制
-   output  wire          adc_oeb_b_2   ,   // ADC输出使能（低电平有效）
-   output  wire          adc_clk_2     ,   // ADC采样时钟输出
+   //AD_2 芯片接口 (通道3 相敏检测)
+   input   wire  [13:0]  adc_data_2    ,
+   input   wire          adc_otr_2     ,
+   output  wire          adc_pdn_2     ,
+   output  wire          adc_oeb_b_2   ,
+   output  wire          adc_clk_2     ,
 
-
-    // ------------------------------------------------------------------
-    // FT245BL 接口 (替代原先的 UART)
-    //   - D[7:0]   : 双向数据总线, 由 ft_d_oe 决定方向
-    //   - RXF#     : 低 = FT245 RX FIFO (来自 PC) 有数据可读 (输入)
-    //   - RD#      : FPGA 读选通 (输出)
-    //   - TXE#     : 低 = FT245 TX FIFO (去 PC)   可写       (输入)
-    //   - WR       : FPGA 写选通 (输出), 下降沿锁存
-    //
-    // 未接 FPGA 的引脚 (PCB 层面直接处理):
-    //   - PWREN#   : FT245 输出, 未使用 -> FT245 此脚不接 FPGA (可悬空或接 LED 指示)
-    //   - SI/WU    : FT245 输入, 未使用 -> FT245 此脚 PCB 上直接上拉到 VCCIO
-    // ------------------------------------------------------------------
-    inout  wire [7:0] ft_d,          // FIFO 数据总线 D0..D7
-    input  wire       ft_rxf_n,      // RXF#
-    output wire       ft_rd_n,       // RD#
-    input  wire       ft_txe_n,      // TXE#
-    output wire       ft_wr          // WR
+   // FT245BL USB 接口
+   inout  wire [7:0] ft_d,
+   input  wire       ft_rxf_n,
+   output wire       ft_rd_n,
+   input  wire       ft_txe_n,
+   output wire       ft_wr
 );
 
-//===========================================================================
-// 命名约定：
-//   - 两路AD采样锁定通道的所有信号均以 _ch1 / _ch2 结尾
-//   - 角色前缀：adc_  (AD采样)   ref_  (本振参考DDS)    mix_  (混频乘法器)
-//              cic_  (CIC滤波)   iir_  (IIR滤波)       dc_   (直流分量输出)
-//              pll_  (PLL控制器)  fft_  (FFT寻峰)      center_freq_ (中心频率)
-//   - 两个独立测试信号 DDS (由 UART FRQ2/FRQ3 指令控制) 以 _tx1 / _tx2 结尾
-//   - 三个和差频 DDS 保持 _21 / _12 / _11 后缀
-//===========================================================================
+// =========================================================================
+// 命名约定:
+//   adc_chN  : ADC 采样后的输入信号
+//   pll_freq_chN : 通道N PLL 锁定后的频率字
+//   dc_x_chN / dc_y_chN : 通道N 锁相输出 (28 bit signed)
+//   _21 / _12 / _11 : 通道3 在 (2F1+F2)/(F1+2F2)/(F1+F2) 频点的解调
+//   _ch3_dc : 通道3 的直流分量
+// =========================================================================
 
 assign sys_rst = ~sys_rst_n;
 
-// AD数据接收 ---------------------------------------------------------------
-wire  [13:0]  adc_ch1;  // AD1通道A采样数据 (锁定通道1输入)
-wire  [13:0]  adc_ch2;  // AD1通道B采样数据 (锁定通道2输入)
-wire  [13:0]  adc_ch3;  // AD2通道A采样数据 (通道3 相敏检测输入: 含3路和频+DC)
-wire  [13:0]  adc_ch4;  // AD2通道B采样数据 (暂未使用)
+wire [13:0] adc_ch1, adc_ch2, adc_ch3, adc_ch4;
 
-//*****************************************************
-//**                    时钟网络
-//*****************************************************
-wire clk_65M;
-wire clk_locked;
-
+// ─── 时钟 ──────────────────────────────────────────────────────────────────
+wire clk_65M, clk_locked;
 clk_wiz_0 u_clk_wiz_0 (
-    .clk_out1 (clk_65M),     // 65MHz 主工作时钟
+    .clk_out1 (clk_65M),
     .reset    (sys_rst),
     .locked   (clk_locked),
     .clk_in1  (sys_clk)
 );
 
-
-// =========================================================================
-// ★ 数字锁相环 (PLL) 公共信号
-// =========================================================================
-wire pll_en = 1'b1; // 锁相环使能开关
-
-// UART 参数控制信号
-wire [47:0] center_freq_uart; // FREQ 指令 (本设计未直接使用，预留)
+// ─── 上位机参数 ────────────────────────────────────────────────────────────
+wire pll_en = 1'b1;
+wire [47:0] center_freq_uart;
 wire [15:0] pll_kp;
 wire [15:0] pll_ki;
 wire [4:0]  tau_x;
 wire [4:0]  tau_y;
+wire [47:0] tx1_phase_word;
+wire [47:0] tx1_freq_word;
+wire [47:0] tx2_phase_word = 48'd0;
+wire [47:0] tx2_freq_word;
 
 
 // =========================================================================
-// ★ 通道1: FFT 自动寻峰及中心频率追踪 (32768 点)
+// ★ AD 数据接收
 // =========================================================================
-// wire                fft_tready_ch1;
-// wire                freq_updated_ch1;
-// wire signed [47:0]  center_freq_auto_ch1;
-
-// reg [15:0] fft_cnt_ch1 = 0;
-// always @(posedge clk_65M or negedge sys_rst_n) begin
-//     if (!sys_rst_n) begin
-//         fft_cnt_ch1 <= 0;
-//     end else if (fft_tready_ch1) begin
-//         fft_cnt_ch1 <= fft_cnt_ch1 + 1'b1;
-//     end
-// end
-// wire fft_tlast_ch1 = (fft_cnt_ch1 == 16'd32767);
-
-// fft_peak_tracker u_fft_ch1 (
-//     .clk                (clk_65M),
-//     .rst_n              (sys_rst_n),
-
-//     .s_axis_data_tdata  ({16'd0, {2{adc_ch1[13]}}, adc_ch1}),
-//     .s_axis_data_tvalid (1'b1),
-//     .s_axis_data_tlast  (fft_tlast_ch1),
-//     .s_axis_data_tready (fft_tready_ch1),
-
-//     .center_freq        (center_freq_auto_ch1),
-//     .freq_update_valid  (freq_updated_ch1)
-// );
-
-// // =========================================================================
-// // ★ 通道2: FFT 自动寻峰及中心频率追踪 (32768 点)
-// // =========================================================================
-// wire                fft_tready_ch2;
-// wire                freq_updated_ch2;
-// wire signed [47:0]  center_freq_auto_ch2;
-
-// reg [15:0] fft_cnt_ch2 = 0;
-// always @(posedge clk_65M or negedge sys_rst_n) begin
-//     if (!sys_rst_n) begin
-//         fft_cnt_ch2 <= 0;
-//     end else if (fft_tready_ch2) begin
-//         fft_cnt_ch2 <= fft_cnt_ch2 + 1'b1;
-//     end
-// end
-// wire fft_tlast_ch2 = (fft_cnt_ch2 == 16'd32767);
-
-// fft_peak_tracker u_fft_ch2 (
-//     .clk                (clk_65M),
-//     .rst_n              (sys_rst_n),
-
-//     .s_axis_data_tdata  ({16'd0, {2{adc_ch2[13]}}, adc_ch2}),
-//     .s_axis_data_tvalid (1'b1),
-//     .s_axis_data_tlast  (fft_tlast_ch2),
-//     .s_axis_data_tready (fft_tready_ch2),
-
-//     .center_freq        (center_freq_auto_ch2),
-//     .freq_update_valid  (freq_updated_ch2)
-// );
-
-
-wire [47:0] tx1_phase_word;              // 串口输入控制相位 (PHAS 指令)
-wire [47:0] tx1_freq_word;               // 串口输入控制频率 (FRQ2 指令)
-wire [47:0] tx2_phase_word = 48'd0;              // 串口输入控制相位 (PHAS 指令)
-wire [47:0] tx2_freq_word;               // 串口输入控制频率 (FRQ3 指令)
-
-// =========================================================================
-// ★ 通道1: PLL 控制器 (提前声明所需反馈信号)
-// =========================================================================
-wire [47:0]         pll_freq_ch1;       // PLL 输出频率控制字 -> 驱动本振DDS
-wire signed [27:0]  dc_x_ch1;           // IIR 输出 X (同相幅值)
-wire signed [27:0]  dc_y_ch1;           // IIR 输出 Y (正交/相位误差)
-wire                dc_valid_x_ch1;
-wire                dc_valid_y_ch1;
-wire                cic_valid_x_ch1;
-wire                cic_valid_y_ch1;
-wire                is_locked_ch1;
-
-pll_controller #(
-    .KI_FRAC      ( 16      ),
-    .IN_WIDTH     ( 28      ),
-    .SWEEP_THRES  ( 28'd5000 ),        // 捕捉差频的阈值
-    .LOCK_X_THRES ( 28'd8000 )         // 维持锁定的信号幅值阈值
-) u_pll_ch1 (
-    .clk            ( clk_65M              ),
-    .rst_n          ( sys_rst_n            ),
-    .pll_en         ( pll_en               ),
-    .pll_kp         ( pll_kp               ),
-    .pll_ki         ( pll_ki               ),
-    .center_freq    ( tx1_freq_word ),
-    .phase_error_in ( dc_y_ch1             ),
-    .amp_in         ( dc_x_ch1             ),
-    .valid_in       ( cic_valid_y_ch1      ),
-    .dds_freq_out   ( pll_freq_ch1         ),
-    .is_locked      ( is_locked_ch1        )
-);
-
-// =========================================================================
-// ★ 通道2: PLL 控制器
-// =========================================================================
-wire [47:0]         pll_freq_ch2;
-wire signed [27:0]  dc_x_ch2;
-wire signed [27:0]  dc_y_ch2;
-wire                dc_valid_x_ch2;
-wire                dc_valid_y_ch2;
-wire                cic_valid_x_ch2;
-wire                cic_valid_y_ch2;
-wire                is_locked_ch2;
-
-pll_controller #(
-    .KI_FRAC      ( 16      ),
-    .IN_WIDTH     ( 28      ),
-    .SWEEP_THRES  ( 28'd5000 ),
-    .LOCK_X_THRES ( 28'd8000 )
-) u_pll_ch2 (
-    .clk            ( clk_65M              ),
-    .rst_n          ( sys_rst_n            ),
-    .pll_en         ( pll_en               ),
-    .pll_kp         ( pll_kp               ),  // 共用一组 PI 参数
-    .pll_ki         ( pll_ki               ),
-    .center_freq    ( tx2_freq_word ),
-    .phase_error_in ( dc_y_ch2             ),
-    .amp_in         ( dc_x_ch2             ),
-    .valid_in       ( cic_valid_y_ch2      ),
-    .dds_freq_out   ( pll_freq_ch2         ),
-    .is_locked      ( is_locked_ch2        )
-);
-
-
-// =========================================================================
-// ★ 通道1: 本振参考 DDS (PLL 闭环内，用于混频解调)
-// =========================================================================
-wire [47:0] ref_phase_ch1 = 48'd0;
-wire [95:0] dds_ref_ch1_config = {ref_phase_ch1, pll_freq_ch1};
-
-wire signed [31:0] ref_sine_cos_ch1;
-wire signed [13:0] ref_sine_ch1 = ref_sine_cos_ch1[29:16];
-wire signed [13:0] ref_cos_ch1  = ref_sine_cos_ch1[13:0];
-
-dds_compiler_1 u_dds_ref_ch1 (
-  .aclk                  (clk_65M),
-  .s_axis_config_tvalid  (1'b1),
-  .s_axis_config_tdata   (dds_ref_ch1_config),
-  .m_axis_data_tvalid    (),
-  .m_axis_data_tdata     (ref_sine_cos_ch1),
-  .m_axis_phase_tvalid   (),
-  .m_axis_phase_tdata    ()
-);
-
-// =========================================================================
-// ★ 通道2: 本振参考 DDS (PLL 闭环内，用于混频解调)
-// =========================================================================
-wire [47:0] ref_phase_ch2 = 48'd0;
-wire [95:0] dds_ref_ch2_config = {ref_phase_ch2, pll_freq_ch2};
-
-wire signed [31:0] ref_sine_cos_ch2;
-wire signed [13:0] ref_sine_ch2 = ref_sine_cos_ch2[29:16];
-wire signed [13:0] ref_cos_ch2  = ref_sine_cos_ch2[13:0];
-
-dds_compiler_1 u_dds_ref_ch2 (
-  .aclk                  (clk_65M),
-  .s_axis_config_tvalid  (1'b1),
-  .s_axis_config_tdata   (dds_ref_ch2_config),
-  .m_axis_data_tvalid    (),
-  .m_axis_data_tdata     (ref_sine_cos_ch2),
-  .m_axis_phase_tvalid   (),
-  .m_axis_phase_tdata    ()
-);
-
-// =========================================================================
-// ★ AD / DA 接口
-// =========================================================================
-//wire [13:0] data_buf;
-//sin_amp_offset u_sin_amp_offset(
-//    .clk          (sys_clk),
-//    .rst_n        (sys_rst_n),
-//    .signed_in    (sine_tx1),    // 示例: 把 tx1 信号送 DAC
-//    .scale_factor (31'd50),
-//    .bias         (1'd0),
-//    .unsigned_out (data_buf)
-//);
-
-//da_wave_send u_da_wave_send(
-//    .CLK_165M  (sys_clk ),
-//    .SYS_RST   (sys_rst_n),
-//    .DATA_BUF  (data_buf ),
-//    .PD        (dac_pd   ),
-//    .DAC_CLK   (dac_clk  ),
-//    .DAC_DATA  (da_data  )
-//);
-
-// AD 数据接收
-ad_wave_rec u_ad_wave_rec(
+ad_wave_rec u_ad_wave_rec (
    .CLK_65M   (clk_65M   ),
    .RST_N     (sys_rst_n ),
    .ADC_IN    (adc_data  ),
@@ -291,8 +88,7 @@ ad_wave_rec u_ad_wave_rec(
    .ADC_OUTB  (adc_ch2   )
 );
 
-// AD_2 数据接收 (用于通道3 相敏检测)
-ad_wave_rec u_ad_wave_rec_2(
+ad_wave_rec u_ad_wave_rec_2 (
    .CLK_65M   (clk_65M     ),
    .RST_N     (sys_rst_n   ),
    .ADC_IN    (adc_data_2  ),
@@ -304,201 +100,205 @@ ad_wave_rec u_ad_wave_rec_2(
    .ADC_OUTB  (adc_ch4     )
 );
 
-// =========================================================================
-// ★ 通道1: 混频 (乘法器)
-// =========================================================================
-wire signed [27:0] mix_x_ch1;
-mult_hunpin u_mix_x_ch1 (
-  .CLK (clk_65M),
-  .A   (adc_ch1),
-  .B   (ref_sine_ch1),
-  .P   (mix_x_ch1)
-);
-
-wire signed [27:0] mix_y_ch1;
-mult_hunpin u_mix_y_ch1 (
-  .CLK (clk_65M),
-  .A   (adc_ch1),
-  .B   (ref_cos_ch1),
-  .P   (mix_y_ch1)
-);
 
 // =========================================================================
-// ★ 通道2: 混频 (乘法器)
+// ★ 通道1: 锁相环 (闭环 PLL)  —— 跟踪 adc_ch1 → 输出 F1 = pll_freq_ch1
 // =========================================================================
-wire signed [27:0] mix_x_ch2;
-mult_hunpin u_mix_x_ch2 (
-  .CLK (clk_65M),
-  .A   (adc_ch2),
-  .B   (ref_sine_ch2),
-  .P   (mix_x_ch2)
-);
+wire [47:0]         pll_freq_ch1;
+wire signed [27:0]  dc_x_ch1, dc_y_ch1;
+wire                cic_valid_x_ch1, cic_valid_y_ch1;
+wire                dc_valid_x_ch1,  dc_valid_y_ch1;
+wire                is_locked_ch1;
 
-wire signed [27:0] mix_y_ch2;
-mult_hunpin u_mix_y_ch2 (
-  .CLK (clk_65M),
-  .A   (adc_ch2),
-  .B   (ref_cos_ch2),
-  .P   (mix_y_ch2)
-);
-
-
-// =========================================================================
-// ★ 通道1: CIC 降采样滤波
-// =========================================================================
-wire signed [27:0] cic_x_ch1;
-wire               cic_x_tready_ch1;
-cic_compiler_0 u_cic_x_ch1 (
-  .aclk                (clk_65M),
-  .s_axis_data_tdata   (mix_x_ch1),
-  .s_axis_data_tvalid  (1'b1),
-  .s_axis_data_tready  (cic_x_tready_ch1),
-  .m_axis_data_tdata   (cic_x_ch1),
-  .m_axis_data_tvalid  (cic_valid_x_ch1)
-);
-
-wire signed [27:0] cic_y_ch1;
-wire               cic_y_tready_ch1;
-cic_compiler_0 u_cic_y_ch1 (
-  .aclk                (clk_65M),
-  .s_axis_data_tdata   (mix_y_ch1),
-  .s_axis_data_tvalid  (1'b1),
-  .s_axis_data_tready  (cic_y_tready_ch1),
-  .m_axis_data_tdata   (cic_y_ch1),
-  .m_axis_data_tvalid  (cic_valid_y_ch1)
-);
-
-// =========================================================================
-// ★ 通道2: CIC 降采样滤波
-// =========================================================================
-wire signed [27:0] cic_x_ch2;
-wire               cic_x_tready_ch2;
-cic_compiler_0 u_cic_x_ch2 (
-  .aclk                (clk_65M),
-  .s_axis_data_tdata   (mix_x_ch2),
-  .s_axis_data_tvalid  (1'b1),
-  .s_axis_data_tready  (cic_x_tready_ch2),
-  .m_axis_data_tdata   (cic_x_ch2),
-  .m_axis_data_tvalid  (cic_valid_x_ch2)
-);
-
-wire signed [27:0] cic_y_ch2;
-wire               cic_y_tready_ch2;
-cic_compiler_0 u_cic_y_ch2 (
-  .aclk                (clk_65M),
-  .s_axis_data_tdata   (mix_y_ch2),
-  .s_axis_data_tvalid  (1'b1),
-  .s_axis_data_tready  (cic_y_tready_ch2),
-  .m_axis_data_tdata   (cic_y_ch2),
-  .m_axis_data_tvalid  (cic_valid_y_ch2)
+// 锁定阈值说明:
+//   28 bit signed 信号在 14×14 混频 + CIC + IIR 后, 满量程量级 ≈ ±30 M.
+//   旧值 5000/8000 远小于 ADC 噪声本底 (~800 K), 会让系统永远 "假锁".
+//   下面是按"输入信号 ≥ 25% 满量程 (即 ±2000 LSB)"的工况估算:
+//     locked dc_x ≈ 8 M    → 取 30%–50% 作为 LOCK_X_THRES → 3 M
+//     beat dc_y peak ≈ 3 M → 取 ~25% 作为 SWEEP_THRES     → 800 K
+//   如果你的输入信号弱, 把这两个值都按比例下调 (例如信号是 5% 满量程 → 阈值都除 5).
+pll_loop #(
+    .KI_FRAC      (16),
+    .IN_WIDTH     (28),
+    .SWEEP_THRES  (28'd800_000),    // ★ 5_000 → 800_000  (Y 进 LOCK 门槛)
+    .LOCK_X_THRES (28'd3_000_000)   // ★ 8_000 → 3_000_000 (X 维持 LOCK 门槛)
+) u_pll_ch1 (
+    .clk          (clk_65M),
+    .rst_n        (sys_rst_n),
+    .pll_en       (pll_en),
+    .adc_in       (adc_ch1),
+    .center_freq  (tx1_freq_word),
+    .pll_kp       (pll_kp),
+    .pll_ki       (pll_ki),
+    .tau_x        (tau_x),
+    .tau_y        (tau_y),
+    .dds_freq_out (pll_freq_ch1),
+    .dc_x         (dc_x_ch1),
+    .dc_y         (dc_y_ch1),
+    .cic_valid_x  (cic_valid_x_ch1),
+    .cic_valid_y  (cic_valid_y_ch1),
+    .dc_valid_x   (dc_valid_x_ch1),
+    .dc_valid_y   (dc_valid_y_ch1),
+    .is_locked    (is_locked_ch1)
 );
 
 
 // =========================================================================
-// ★ 通道1: IIR 指数移动平均 (提取微弱直流分量)
+// ★ 通道2: 锁相环 (闭环 PLL)  —— ★ 跟踪 adc_ch2 → 输出 F2 = pll_freq_ch2
 // =========================================================================
-iir_lpf_ema #(
-    .IN_WIDTH   ( 28 ),
-    .FRAC_WIDTH ( 32 )
-) u_iir_x_ch1 (
-    .clk        ( clk_65M          ),
-    .rst_n      ( sys_rst_n        ),
-    .en         ( cic_valid_x_ch1  ),
-    .shift_k    ( tau_x            ), // X通道(测量幅值)保持慢速滤波
-    .din        ( cic_x_ch1        ),
-    .dout       ( dc_x_ch1         ),
-    .valid_out  ( dc_valid_x_ch1   )
-);
+wire [47:0]         pll_freq_ch2;
+wire signed [27:0]  dc_x_ch2, dc_y_ch2;
+wire                cic_valid_x_ch2, cic_valid_y_ch2;
+wire                dc_valid_x_ch2,  dc_valid_y_ch2;
+wire                is_locked_ch2;
 
-iir_lpf_ema #(
-    .IN_WIDTH   ( 28 ),
-    .FRAC_WIDTH ( 32 )
-) u_iir_y_ch1 (
-    .clk        ( clk_65M          ),
-    .rst_n      ( sys_rst_n        ),
-    .en         ( cic_valid_y_ch1  ),
-    .shift_k    ( tau_y            ), // Y通道给PLL做反馈
-    .din        ( cic_y_ch1        ),
-    .dout       ( dc_y_ch1         ),
-    .valid_out  ( dc_valid_y_ch1   )
-);
-
-// =========================================================================
-// ★ 通道2: IIR 指数移动平均
-// =========================================================================
-iir_lpf_ema #(
-    .IN_WIDTH   ( 28 ),
-    .FRAC_WIDTH ( 32 )
-) u_iir_x_ch2 (
-    .clk        ( clk_65M          ),
-    .rst_n      ( sys_rst_n        ),
-    .en         ( cic_valid_x_ch2  ),
-    .shift_k    ( tau_x            ),
-    .din        ( cic_x_ch2        ),
-    .dout       ( dc_x_ch2         ),
-    .valid_out  ( dc_valid_x_ch2   )
-);
-
-iir_lpf_ema #(
-    .IN_WIDTH   ( 28 ),
-    .FRAC_WIDTH ( 32 )
-) u_iir_y_ch2 (
-    .clk        ( clk_65M          ),
-    .rst_n      ( sys_rst_n        ),
-    .en         ( cic_valid_y_ch2  ),
-    .shift_k    ( tau_y            ),
-    .din        ( cic_y_ch2        ),
-    .dout       ( dc_y_ch2         ),
-    .valid_out  ( dc_valid_y_ch2   )
+pll_loop #(
+    .KI_FRAC      (16),
+    .IN_WIDTH     (28),
+    .SWEEP_THRES  (28'd800_000),    // ★ 与 Ch1 一致
+    .LOCK_X_THRES (28'd3_000_000)
+) u_pll_ch2 (
+    .clk          (clk_65M),
+    .rst_n        (sys_rst_n),
+    .pll_en       (pll_en),
+    .adc_in       (adc_ch2),
+    .center_freq  (tx2_freq_word),     // 扫频起点 (FRQ3 指令设置)
+    .pll_kp       (pll_kp),
+    .pll_ki       (pll_ki),
+    .tau_x        (tau_x),
+    .tau_y        (tau_y),
+    .dds_freq_out (pll_freq_ch2),
+    .dc_x         (dc_x_ch2),
+    .dc_y         (dc_y_ch2),
+    .cic_valid_x  (cic_valid_x_ch2),
+    .cic_valid_y  (cic_valid_y_ch2),
+    .dc_valid_x   (dc_valid_x_ch2),
+    .dc_valid_y   (dc_valid_y_ch2),
+    .is_locked    (is_locked_ch2)
 );
 
 
 // =========================================================================
-// ★ 测试信号 DDS tx1 (由 UART 指令 FRQ2 控制频率, PHAS 控制相位)
+// ★ 测试信号 DDS (tx1 / tx2)
+//    输出可送 DAC, 频率即跟随 PLL 锁定结果
 // =========================================================================
-
-wire [95:0] dds_tx1_config  = {48'd0, pll_freq_ch1};
-
+wire [95:0]        dds_tx1_config = {tx1_phase_word, pll_freq_ch1};
 wire signed [31:0] tx1_sine_cos;
 wire signed [13:0] sine_tx1 = tx1_sine_cos[29:16];
 wire signed [13:0] cos_tx1  = tx1_sine_cos[13:0];
 
 dds_compiler_1 u_dds_tx1 (
-  .aclk                  (clk_65M),
-  .s_axis_config_tvalid  (1'b1),
-  .s_axis_config_tdata   (dds_tx1_config),
-  .m_axis_data_tvalid    (),
-  .m_axis_data_tdata     (tx1_sine_cos),
-  .m_axis_phase_tvalid   (),
-  .m_axis_phase_tdata    ()
+    .aclk                  (clk_65M),
+    .s_axis_config_tvalid  (1'b1),
+    .s_axis_config_tdata   (dds_tx1_config),
+    .m_axis_data_tvalid    (),
+    .m_axis_data_tdata     (tx1_sine_cos),
+    .m_axis_phase_tvalid   (),
+    .m_axis_phase_tdata    ()
 );
 
-// =========================================================================
-// ★ 测试信号 DDS tx2 (由 UART 指令 FRQ3 控制频率, 默认零相位)
-// =========================================================================
-
-wire [95:0] dds_tx2_config = {tx2_phase_word, pll_freq_ch2};
-
+wire [95:0]        dds_tx2_config = {tx2_phase_word, pll_freq_ch2};
 wire signed [31:0] tx2_sine_cos;
 wire signed [13:0] sine_tx2 = tx2_sine_cos[29:16];
 wire signed [13:0] cos_tx2  = tx2_sine_cos[13:0];
 
 dds_compiler_1 u_dds_tx2 (
-  .aclk                  (clk_65M),
-  .s_axis_config_tvalid  (1'b1),
-  .s_axis_config_tdata   (dds_tx2_config),
-  .m_axis_data_tvalid    (),
-  .m_axis_data_tdata     (tx2_sine_cos),
-  .m_axis_phase_tvalid   (),
-  .m_axis_phase_tdata    ()
+    .aclk                  (clk_65M),
+    .s_axis_config_tvalid  (1'b1),
+    .s_axis_config_tdata   (dds_tx2_config),
+    .m_axis_data_tvalid    (),
+    .m_axis_data_tdata     (tx2_sine_cos),
+    .m_axis_phase_tvalid   (),
+    .m_axis_phase_tdata    ()
+);
+
+
+// =========================================================================
+// ★ 通道3: 三路开环锁相放大器 (lockin_psd) + 一路 DC 通路
+//    参考频率全部使用 PLL 锁定后的 pll_freq_ch1 / pll_freq_ch2
+//    ★ F2 现在通过 adc_ch2 闭环, 不再用 tx2_freq_word
+// =========================================================================
+wire [47:0] f_2f1_plus_f2 = pll_freq_ch1 * 2 + pll_freq_ch2;
+wire [47:0] f_f1_plus_2f2 = pll_freq_ch1 + 2 * pll_freq_ch2;
+wire [47:0] f_f1_plus_f2  = pll_freq_ch1 + pll_freq_ch2;
+
+// ---- 通道3 @ 2F1+F2 -----------------------------------------------------
+wire signed [27:0] dc_x_ch3_21, dc_y_ch3_21;
+wire               dc_valid_x_ch3_21, dc_valid_y_ch3_21;
+
+lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
+    .clk         (clk_65M),
+    .rst_n       (sys_rst_n),
+    .adc_in      (adc_ch3),
+    .ref_freq    (f_2f1_plus_f2),
+    .ref_phase   (48'd0),
+    .tau         (tau_x),
+    .dc_x        (dc_x_ch3_21),
+    .dc_y        (dc_y_ch3_21),
+    .cic_valid_x (),
+    .cic_valid_y (),
+    .dc_valid_x  (dc_valid_x_ch3_21),
+    .dc_valid_y  (dc_valid_y_ch3_21)
+);
+
+// ---- 通道3 @ F1+2F2 -----------------------------------------------------
+wire signed [27:0] dc_x_ch3_12, dc_y_ch3_12;
+wire               dc_valid_x_ch3_12, dc_valid_y_ch3_12;
+
+lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
+    .clk         (clk_65M),
+    .rst_n       (sys_rst_n),
+    .adc_in      (adc_ch3),
+    .ref_freq    (f_f1_plus_2f2),
+    .ref_phase   (48'd0),
+    .tau         (tau_x),
+    .dc_x        (dc_x_ch3_12),
+    .dc_y        (dc_y_ch3_12),
+    .cic_valid_x (),
+    .cic_valid_y (),
+    .dc_valid_x  (dc_valid_x_ch3_12),
+    .dc_valid_y  (dc_valid_y_ch3_12)
+);
+
+// ---- 通道3 @ F1+F2  -----------------------------------------------------
+wire signed [27:0] dc_x_ch3_11, dc_y_ch3_11;
+wire               dc_valid_x_ch3_11, dc_valid_y_ch3_11;
+
+lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
+    .clk         (clk_65M),
+    .rst_n       (sys_rst_n),
+    .adc_in      (adc_ch3),
+    .ref_freq    (f_f1_plus_f2),
+    .ref_phase   (48'd0),
+    .tau         (tau_x),
+    .dc_x        (dc_x_ch3_11),
+    .dc_y        (dc_y_ch3_11),
+    .cic_valid_x (),
+    .cic_valid_y (),
+    .dc_valid_x  (dc_valid_x_ch3_11),
+    .dc_valid_y  (dc_valid_y_ch3_11)
+);
+
+// ---- 通道3 DC 通路: 直接 CIC + IIR (无混频) ------------------------------
+wire signed [27:0] adc_ch3_ext = {{14{adc_ch3[13]}}, adc_ch3};
+wire signed [27:0] cic_dc_ch3;
+wire               cic_valid_dc_ch3;
+cic_compiler_0 u_cic_dc_ch3 (
+    .aclk                (clk_65M),
+    .s_axis_data_tdata   (adc_ch3_ext), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
+    .m_axis_data_tdata   (cic_dc_ch3),  .m_axis_data_tvalid (cic_valid_dc_ch3)
+);
+
+wire signed [27:0] dc_ch3;
+wire               dc_valid_ch3;
+iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
+    .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_dc_ch3),
+    .shift_k(tau_x), .din(cic_dc_ch3), .dout(dc_ch3), .valid_out(dc_valid_ch3)
 );
 
 
 // =========================================================================
 // ★ FT245BL 物理层 + 上层指令收发
-//   - ft245_rx / ft245_tx 负责 FT245 读/写时序
-//   - usb_commend  负责字节流级协议, 对物理层 (UART / FT245) 无感知
-//   - D[7:0] 双向总线: 写时由 ft245_tx 驱动, 其余时间高阻 (FT245 读 / 空闲)
 // =========================================================================
 wire [7:0] rec_data;
 wire       rec_done;
@@ -506,17 +306,15 @@ wire       tx_done;
 wire       send_en;
 wire [7:0] send_data;
 
-// FT245 三态总线方向控制
-wire [7:0] ft_d_tx;     // ft245_tx 想驱动出去的数据
-wire       ft_d_oe;     // ft245_tx 输出使能 (1=FPGA 驱动总线)
-wire [7:0] ft_d_in;     // 从总线读入 (给 ft245_rx)
+wire [7:0] ft_d_tx;
+wire       ft_d_oe;
+wire [7:0] ft_d_in;
 
-assign ft_d    = ft_d_oe ? ft_d_tx : 8'bz;   // 三态驱动
-assign ft_d_in = ft_d;                       // 读方向直接取总线
+assign ft_d    = ft_d_oe ? ft_d_tx : 8'bz;
+assign ft_d_in = ft_d;
 
-// --- 读通道 (PC -> FPGA): 指令/参数下发 --------------------------------
 ft245_rx #(
-    .CLK_PERIOD_NS(20),    // sys_clk = 50 MHz
+    .CLK_PERIOD_NS(20),
     .T_RD_LOW_NS  (80),
     .T_RD_HIGH_NS (100)
 ) u_ft245_rx (
@@ -529,7 +327,6 @@ ft245_rx #(
     .rec_done (rec_done)
 );
 
-// --- 写通道 (FPGA -> PC): 响应/数据上传 --------------------------------
 ft245_tx #(
     .CLK_PERIOD_NS(20),
     .T_WR_HIGH_NS (80),
@@ -546,225 +343,31 @@ ft245_tx #(
     .tx_done  (tx_done )
 );
 
-// =========================================================================
-// ★ 和差频输出 DDS
-// 注意: F1 = pll_freq_ch1, F2 当前仍绑定到 tx2_freq_word;
-//       若要改用 pll_freq_ch2, 请将下面公式中的 tx2_freq_word 替换为 pll_freq_ch2
-// =========================================================================
-
-// --- 2F1 + F2 -----------------------------------------------------------
-wire [47:0] dds_freq_21 = pll_freq_ch1 * 2 + tx2_freq_word;
-wire [95:0] dds_cfg_21  = {48'd0, dds_freq_21};
-
-wire signed [31:0] sine_cos_21;
-wire signed [13:0] sine_21 = sine_cos_21[29:16];
-wire signed [13:0] cos_21  = sine_cos_21[13:0];
-
-dds_compiler_1 u_dds_21 (
-  .aclk                  (clk_65M),
-  .s_axis_config_tvalid  (1'b1),
-  .s_axis_config_tdata   (dds_cfg_21),
-  .m_axis_data_tvalid    (),
-  .m_axis_data_tdata     (sine_cos_21),
-  .m_axis_phase_tvalid   (),
-  .m_axis_phase_tdata    ()
-);
-
-// --- F1 + 2F2 -----------------------------------------------------------
-wire [47:0] dds_freq_12 = pll_freq_ch1 + 2 * tx2_freq_word;
-wire [95:0] dds_cfg_12  = {48'd0, dds_freq_12};
-
-wire signed [31:0] sine_cos_12;
-wire signed [13:0] sine_12 = sine_cos_12[29:16];
-wire signed [13:0] cos_12  = sine_cos_12[13:0];
-
-dds_compiler_1 u_dds_12 (
-  .aclk                  (clk_65M),
-  .s_axis_config_tvalid  (1'b1),
-  .s_axis_config_tdata   (dds_cfg_12),
-  .m_axis_data_tvalid    (),
-  .m_axis_data_tdata     (sine_cos_12),
-  .m_axis_phase_tvalid   (),
-  .m_axis_phase_tdata    ()
-);
-
-// --- F1 + F2 ------------------------------------------------------------
-wire [47:0] dds_freq_11 = pll_freq_ch1 + tx2_freq_word;
-wire [95:0] dds_cfg_11  = {48'd0, dds_freq_11};
-
-wire signed [31:0] sine_cos_11;
-wire signed [13:0] sine_11 = sine_cos_11[29:16];
-wire signed [13:0] cos_11  = sine_cos_11[13:0];
-
-dds_compiler_1 u_dds_11 (
-  .aclk                  (clk_65M),
-  .s_axis_config_tvalid  (1'b1),
-  .s_axis_config_tdata   (dds_cfg_11),
-  .m_axis_data_tvalid    (),
-  .m_axis_data_tdata     (sine_cos_11),
-  .m_axis_phase_tvalid   (),
-  .m_axis_phase_tdata    ()
-);
-
 
 // =========================================================================
-// ★ 通道3: 对 adc_ch3 做 4 路并行相敏检测 (开环, 不使用PLL)
-//    输入信号组成 = (2F1+F2) + (F1+2F2) + (F1+F2) + DC
-//    用已有的 3 个和差频 DDS (u_dds_21/12/11) 作为相敏检测的参考信号,
-//    外加一路直流 (DC) 的低通提取.
-//
-//    每路解调链路: 混频 -> CIC 降采样 -> IIR 指数平均 -> X/Y 直流量
-//    命名约定:  _ch3_21 / _ch3_12 / _ch3_11 / _ch3_dc
+// ★ 上位机回传帧打包 (80 字节 / 640 bit, 大端)
+//   偏移        字段              类型           说明
+//   --------- ----------------- ------------- ----------------------------
+//   [ 0.. 3]  0xA5_5A_A5_5A    sync header   魔数, 用于对齐
+//   [ 4.. 7]  dc_x_ch1          int32         通道1 @ F1 X (PLL 锁相输出)
+//   [ 8..11]  dc_y_ch1          int32         通道1 @ F1 Y
+//   [12..15]  dc_x_ch2          int32         通道2 @ F2 X
+//   [16..19]  dc_y_ch2          int32         通道2 @ F2 Y
+//   [20..23]  dc_x_ch3_21       int32         通道3 @ 2F1+F2 X
+//   [24..27]  dc_y_ch3_21       int32         通道3 @ 2F1+F2 Y
+//   [28..31]  dc_x_ch3_12       int32         通道3 @ F1+2F2 X
+//   [32..35]  dc_y_ch3_12       int32         通道3 @ F1+2F2 Y
+//   [36..39]  dc_x_ch3_11       int32         通道3 @ F1+F2  X
+//   [40..43]  dc_y_ch3_11       int32         通道3 @ F1+F2  Y
+//   [44..47]  dc_ch3            int32         通道3 DC 直流
+//   [48..51]  adc_ch1           int32         ★ NEW: 通道1 原始 ADC 采样
+//   [52..55]  adc_ch2           int32         ★ NEW: 通道2 原始 ADC 采样
+//   [56..59]  adc_ch3           int32         ★ NEW: 通道3 原始 ADC 采样
+//   [60..67]  pll_freq_ch1      uint64        ★ NEW: 通道1 锁定频率字 (48bit, 高 16bit 补0)
+//   [68..75]  pll_freq_ch2      uint64        ★ NEW: 通道2 锁定频率字
+//   [76..79]  lock_flags        int32         ★ NEW: bit0=ch1 locked, bit1=ch2 locked
 // =========================================================================
-
-// ---- 公共: CIC 就绪信号收集 (用于控制 IIR 使能) -------------------------
-wire cic_valid_x_ch3_21, cic_valid_y_ch3_21;
-wire cic_valid_x_ch3_12, cic_valid_y_ch3_12;
-wire cic_valid_x_ch3_11, cic_valid_y_ch3_11;
-
-// ---- 通道3-21: 对 (2F1+F2) 分量做相敏检测 -------------------------------
-wire signed [27:0] mix_x_ch3_21;
-mult_hunpin u_mix_x_ch3_21 (
-  .CLK (clk_65M), .A (adc_ch3), .B (sine_21), .P (mix_x_ch3_21)
-);
-wire signed [27:0] mix_y_ch3_21;
-mult_hunpin u_mix_y_ch3_21 (
-  .CLK (clk_65M), .A (adc_ch3), .B (cos_21),  .P (mix_y_ch3_21)
-);
-
-wire signed [27:0] cic_x_ch3_21;
-cic_compiler_0 u_cic_x_ch3_21 (
-  .aclk (clk_65M),
-  .s_axis_data_tdata (mix_x_ch3_21), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
-  .m_axis_data_tdata (cic_x_ch3_21), .m_axis_data_tvalid (cic_valid_x_ch3_21)
-);
-wire signed [27:0] cic_y_ch3_21;
-cic_compiler_0 u_cic_y_ch3_21 (
-  .aclk (clk_65M),
-  .s_axis_data_tdata (mix_y_ch3_21), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
-  .m_axis_data_tdata (cic_y_ch3_21), .m_axis_data_tvalid (cic_valid_y_ch3_21)
-);
-
-wire signed [27:0] dc_x_ch3_21, dc_y_ch3_21;
-wire               dc_valid_x_ch3_21, dc_valid_y_ch3_21;
-iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_x_ch3_21 (
-    .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_x_ch3_21),
-    .shift_k(tau_x), .din(cic_x_ch3_21), .dout(dc_x_ch3_21), .valid_out(dc_valid_x_ch3_21)
-);
-iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_y_ch3_21 (
-    .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_y_ch3_21),
-    .shift_k(tau_x), .din(cic_y_ch3_21), .dout(dc_y_ch3_21), .valid_out(dc_valid_y_ch3_21)
-);
-
-// ---- 通道3-12: 对 (F1+2F2) 分量做相敏检测 -------------------------------
-wire signed [27:0] mix_x_ch3_12;
-mult_hunpin u_mix_x_ch3_12 (
-  .CLK (clk_65M), .A (adc_ch3), .B (sine_12), .P (mix_x_ch3_12)
-);
-wire signed [27:0] mix_y_ch3_12;
-mult_hunpin u_mix_y_ch3_12 (
-  .CLK (clk_65M), .A (adc_ch3), .B (cos_12),  .P (mix_y_ch3_12)
-);
-
-wire signed [27:0] cic_x_ch3_12;
-cic_compiler_0 u_cic_x_ch3_12 (
-  .aclk (clk_65M),
-  .s_axis_data_tdata (mix_x_ch3_12), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
-  .m_axis_data_tdata (cic_x_ch3_12), .m_axis_data_tvalid (cic_valid_x_ch3_12)
-);
-wire signed [27:0] cic_y_ch3_12;
-cic_compiler_0 u_cic_y_ch3_12 (
-  .aclk (clk_65M),
-  .s_axis_data_tdata (mix_y_ch3_12), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
-  .m_axis_data_tdata (cic_y_ch3_12), .m_axis_data_tvalid (cic_valid_y_ch3_12)
-);
-
-wire signed [27:0] dc_x_ch3_12, dc_y_ch3_12;
-wire               dc_valid_x_ch3_12, dc_valid_y_ch3_12;
-iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_x_ch3_12 (
-    .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_x_ch3_12),
-    .shift_k(tau_x), .din(cic_x_ch3_12), .dout(dc_x_ch3_12), .valid_out(dc_valid_x_ch3_12)
-);
-iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_y_ch3_12 (
-    .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_y_ch3_12),
-    .shift_k(tau_x), .din(cic_y_ch3_12), .dout(dc_y_ch3_12), .valid_out(dc_valid_y_ch3_12)
-);
-
-// ---- 通道3-11: 对 (F1+F2) 分量做相敏检测 --------------------------------
-wire signed [27:0] mix_x_ch3_11;
-mult_hunpin u_mix_x_ch3_11 (
-  .CLK (clk_65M), .A (adc_ch3), .B (sine_11), .P (mix_x_ch3_11)
-);
-wire signed [27:0] mix_y_ch3_11;
-mult_hunpin u_mix_y_ch3_11 (
-  .CLK (clk_65M), .A (adc_ch3), .B (cos_11),  .P (mix_y_ch3_11)
-);
-
-wire signed [27:0] cic_x_ch3_11;
-cic_compiler_0 u_cic_x_ch3_11 (
-  .aclk (clk_65M),
-  .s_axis_data_tdata (mix_x_ch3_11), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
-  .m_axis_data_tdata (cic_x_ch3_11), .m_axis_data_tvalid (cic_valid_x_ch3_11)
-);
-wire signed [27:0] cic_y_ch3_11;
-cic_compiler_0 u_cic_y_ch3_11 (
-  .aclk (clk_65M),
-  .s_axis_data_tdata (mix_y_ch3_11), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
-  .m_axis_data_tdata (cic_y_ch3_11), .m_axis_data_tvalid (cic_valid_y_ch3_11)
-);
-
-wire signed [27:0] dc_x_ch3_11, dc_y_ch3_11;
-wire               dc_valid_x_ch3_11, dc_valid_y_ch3_11;
-iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_x_ch3_11 (
-    .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_x_ch3_11),
-    .shift_k(tau_x), .din(cic_x_ch3_11), .dout(dc_x_ch3_11), .valid_out(dc_valid_x_ch3_11)
-);
-iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_y_ch3_11 (
-    .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_y_ch3_11),
-    .shift_k(tau_x), .din(cic_y_ch3_11), .dout(dc_y_ch3_11), .valid_out(dc_valid_y_ch3_11)
-);
-
-// ---- 通道3-DC: 直接对 adc_ch3 做长时间平均, 提取直流分量 -----------------
-// 先符号扩展到 28 bit 送入 CIC, 再进 IIR 深度平滑
-wire signed [27:0] adc_ch3_ext = {{14{adc_ch3[13]}}, adc_ch3};
-wire signed [27:0] cic_dc_ch3;
-wire               cic_valid_dc_ch3;
-cic_compiler_0 u_cic_dc_ch3 (
-  .aclk (clk_65M),
-  .s_axis_data_tdata (adc_ch3_ext), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
-  .m_axis_data_tdata (cic_dc_ch3),  .m_axis_data_tvalid (cic_valid_dc_ch3)
-);
-
-wire signed [27:0] dc_ch3;     // 通道3 的直流分量输出
-wire               dc_valid_ch3;
-iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
-    .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_dc_ch3),
-    .shift_k(tau_x), .din(cic_dc_ch3), .dout(dc_ch3), .valid_out(dc_valid_ch3)
-);
-
-
-// =========================================================================
-// ★ 上位机回传帧打包 (48 字节 / 384 bit, 大端)
-//   偏移        字段              类型
-//   --------- ----------------- ----------
-//   [ 0.. 3]  0xA5_5A_A5_5A     sync header (魔数)
-//   [ 4.. 7]  dc_x_ch1          int32 (通道1 @ F1 的 X)
-//   [ 8..11]  dc_y_ch1          int32 (通道1 @ F1 的 Y)
-//   [12..15]  dc_x_ch2          int32 (通道2 @ F2 的 X)
-//   [16..19]  dc_y_ch2          int32 (通道2 @ F2 的 Y)
-//   [20..23]  dc_x_ch3_21       int32 (通道3 @ 2F1+F2 的 X)
-//   [24..27]  dc_y_ch3_21       int32 (通道3 @ 2F1+F2 的 Y)
-//   [28..31]  dc_x_ch3_12       int32 (通道3 @ F1+2F2 的 X)
-//   [32..35]  dc_y_ch3_12       int32 (通道3 @ F1+2F2 的 Y)
-//   [36..39]  dc_x_ch3_11       int32 (通道3 @ F1+F2  的 X)
-//   [40..43]  dc_y_ch3_11       int32 (通道3 @ F1+F2  的 Y)
-//   [44..47]  dc_ch3            int32 (通道3 DC 分量)
-//
-//   - 所有 28bit 有符号数据通过符号扩展到 32bit
-//   - 发送顺序: 字节 0 先, 字节 47 后; 每个 int32 高字节先发 (大端)
-//   - 上位机解析: Python `struct.unpack('>4B11i', frame)` 或先匹配头再读数据
-// =========================================================================
-// 28bit -> 32bit 符号扩展
+// 28bit -> 32bit 符号扩展 (锁相 X/Y)
 wire [31:0] s32_x_ch1    = {{4{dc_x_ch1   [27]}}, dc_x_ch1    };
 wire [31:0] s32_y_ch1    = {{4{dc_y_ch1   [27]}}, dc_y_ch1    };
 wire [31:0] s32_x_ch2    = {{4{dc_x_ch2   [27]}}, dc_x_ch2    };
@@ -777,20 +380,30 @@ wire [31:0] s32_x_ch3_11 = {{4{dc_x_ch3_11[27]}}, dc_x_ch3_11 };
 wire [31:0] s32_y_ch3_11 = {{4{dc_y_ch3_11[27]}}, dc_y_ch3_11 };
 wire [31:0] s32_dc_ch3   = {{4{dc_ch3     [27]}}, dc_ch3      };
 
-// 拼成 384 bit, 最高 32bit 是同步头, 最低 32bit 是 dc_ch3
-wire [383:0] x_y_fir_packed = {
-    32'hA5_5A_A5_5A,   // [383:352]
-    s32_x_ch1,         // [351:320]
-    s32_y_ch1,         // [319:288]
-    s32_x_ch2,         // [287:256]
-    s32_y_ch2,         // [255:224]
-    s32_x_ch3_21,      // [223:192]
-    s32_y_ch3_21,      // [191:160]
-    s32_x_ch3_12,      // [159:128]
-    s32_y_ch3_12,      // [127: 96]
-    s32_x_ch3_11,      // [ 95: 64]
-    s32_y_ch3_11,      // [ 63: 32]
-    s32_dc_ch3         // [ 31:  0]
+// 14bit -> 32bit 符号扩展 (原始 ADC)
+wire [31:0] s32_adc_ch1  = {{18{adc_ch1[13]}}, adc_ch1};
+wire [31:0] s32_adc_ch2  = {{18{adc_ch2[13]}}, adc_ch2};
+wire [31:0] s32_adc_ch3  = {{18{adc_ch3[13]}}, adc_ch3};
+
+// 48bit -> 64bit 高位补 0 (PLL 锁定频率字)
+wire [63:0] u64_pll_ch1  = {16'd0, pll_freq_ch1};
+wire [63:0] u64_pll_ch2  = {16'd0, pll_freq_ch2};
+
+// 锁定标志位 (位 0 = ch1 锁定, 位 1 = ch2 锁定)
+wire [31:0] s32_lock     = {30'd0, is_locked_ch2, is_locked_ch1};
+
+wire [639:0] x_y_fir_packed = {
+    32'hA5_5A_A5_5A,                            // [639:608] sync
+    s32_x_ch1,    s32_y_ch1,                    // [607:544]
+    s32_x_ch2,    s32_y_ch2,                    // [543:480]
+    s32_x_ch3_21, s32_y_ch3_21,                 // [479:416]
+    s32_x_ch3_12, s32_y_ch3_12,                 // [415:352]
+    s32_x_ch3_11, s32_y_ch3_11,                 // [351:288]
+    s32_dc_ch3,                                 // [287:256]
+    s32_adc_ch1, s32_adc_ch2, s32_adc_ch3,      // [255:160] 原始 ADC
+    u64_pll_ch1,                                // [159: 96]
+    u64_pll_ch2,                                // [ 95: 32]
+    s32_lock                                    // [ 31:  0]
 };
 
 usb_commend u_usb_commend (
@@ -801,35 +414,33 @@ usb_commend u_usb_commend (
     .tx_done(tx_done),
     .x_y_fir(x_y_fir_packed),
     .m_axis_data_tvalid_fir_x(dc_valid_x_ch1),
-    .center_freq(center_freq_uart),      // FREQ 指令输出 (未使用)
-    .pll_kp(pll_kp),                     // KP 指令输出
-    .pll_ki(pll_ki),                     // KI 指令输出
-    .tau_x(tau_x),                       // TAUX 指令输出
-    .tau_y(tau_y),                       // TAUY 指令输出
-    .phase_offset(tx1_phase_word),       // PHAS 指令输出 -> tx1 相位
-    .freq_word_2(tx1_freq_word),         // FRQ2 指令输出 -> tx1 频率
-    .freq_word_3(tx2_freq_word),         // FRQ3 指令输出 -> tx2 频率
+    .center_freq(center_freq_uart),
+    .pll_kp(pll_kp),
+    .pll_ki(pll_ki),
+    .tau_x(tau_x),
+    .tau_y(tau_y),
+    .phase_offset(tx1_phase_word),
+    .freq_word_2(tx1_freq_word),
+    .freq_word_3(tx2_freq_word),
     .send_en(send_en),
     .send_data(send_data)
 );
 
 
 // =========================================================================
-// ★ ILA 探针观察 (在 Vivado 中抓取波形)
+// ★ ILA 探针观察
 // =========================================================================
 ila_0 u_ila_0 (
-
     .clk     (sys_clk),
-    .probe0  (adc_ch1),                 // 14bit: 通道1 输入 参考信号1
-    .probe1  (adc_ch2),                 // 14bit: 通道2 输入 参考信号2
-    .probe2  (adc_ch3),                 // 14bit: 通道3 输入 (AD2)
-    .probe3  (pll_freq_ch1),            // 48bit: 通道1 PLL 锁定频率 = F1
-    .probe4  (pll_freq_ch2),            // 48bit: 通道2 PLL 锁定频率 = F2
-    .probe5  (dc_x_ch3_21),             // 28bit: 通道3 在 (2F1+F2) 频率处的 X
-    .probe6  (dc_x_ch3_12),             // 28bit: 通道3 在 (F1+2F2) 频率处的 X
-    .probe7  (dc_x_ch3_11),             // 28bit: 通道3 在 (F1+F2)  频率处的 X
-    .probe8  (dc_ch3)                   // 28bit: 通道3 DC 分量
-
+    .probe0  (adc_ch1),                 // 14bit
+    .probe1  (adc_ch2),                 // 14bit
+    .probe2  (adc_ch3),                 // 14bit
+    .probe3  (pll_freq_ch1),            // 48bit: F1
+    .probe4  (pll_freq_ch2),            // 48bit: F2 ★ 现已闭环
+    .probe5  (dc_x_ch3_21),             // 28bit
+    .probe6  (dc_x_ch3_12),             // 28bit
+    .probe7  (dc_x_ch3_11),             // 28bit
+    .probe8  (dc_ch3)                   // 28bit
 );
 
 endmodule
