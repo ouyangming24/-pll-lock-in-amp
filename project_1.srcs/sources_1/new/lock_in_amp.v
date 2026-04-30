@@ -547,77 +547,6 @@ ft245_tx #(
 );
 
 // =========================================================================
-// ★ 上位机回传帧打包 (48 字节 / 384 bit, 大端)
-//   偏移        字段              类型
-//   --------- ----------------- ----------
-//   [ 0.. 3]  0xA5_5A_A5_5A     sync header (魔数)
-//   [ 4.. 7]  dc_x_ch1          int32 (通道1 @ F1 的 X)
-//   [ 8..11]  dc_y_ch1          int32 (通道1 @ F1 的 Y)
-//   [12..15]  dc_x_ch2          int32 (通道2 @ F2 的 X)
-//   [16..19]  dc_y_ch2          int32 (通道2 @ F2 的 Y)
-//   [20..23]  dc_x_ch3_21       int32 (通道3 @ 2F1+F2 的 X)
-//   [24..27]  dc_y_ch3_21       int32 (通道3 @ 2F1+F2 的 Y)
-//   [28..31]  dc_x_ch3_12       int32 (通道3 @ F1+2F2 的 X)
-//   [32..35]  dc_y_ch3_12       int32 (通道3 @ F1+2F2 的 Y)
-//   [36..39]  dc_x_ch3_11       int32 (通道3 @ F1+F2  的 X)
-//   [40..43]  dc_y_ch3_11       int32 (通道3 @ F1+F2  的 Y)
-//   [44..47]  dc_ch3            int32 (通道3 DC 分量)
-//
-//   - 所有 28bit 有符号数据通过符号扩展到 32bit
-//   - 发送顺序: 字节 0 先, 字节 47 后; 每个 int32 高字节先发 (大端)
-//   - 上位机解析: Python `struct.unpack('>4B11i', frame)` 或先匹配头再读数据
-// =========================================================================
-// 28bit -> 32bit 符号扩展
-wire [31:0] s32_x_ch1    = {{4{dc_x_ch1   [27]}}, dc_x_ch1    };
-wire [31:0] s32_y_ch1    = {{4{dc_y_ch1   [27]}}, dc_y_ch1    };
-wire [31:0] s32_x_ch2    = {{4{dc_x_ch2   [27]}}, dc_x_ch2    };
-wire [31:0] s32_y_ch2    = {{4{dc_y_ch2   [27]}}, dc_y_ch2    };
-wire [31:0] s32_x_ch3_21 = {{4{dc_x_ch3_21[27]}}, dc_x_ch3_21 };
-wire [31:0] s32_y_ch3_21 = {{4{dc_y_ch3_21[27]}}, dc_y_ch3_21 };
-wire [31:0] s32_x_ch3_12 = {{4{dc_x_ch3_12[27]}}, dc_x_ch3_12 };
-wire [31:0] s32_y_ch3_12 = {{4{dc_y_ch3_12[27]}}, dc_y_ch3_12 };
-wire [31:0] s32_x_ch3_11 = {{4{dc_x_ch3_11[27]}}, dc_x_ch3_11 };
-wire [31:0] s32_y_ch3_11 = {{4{dc_y_ch3_11[27]}}, dc_y_ch3_11 };
-wire [31:0] s32_dc_ch3   = {{4{dc_ch3     [27]}}, dc_ch3      };
-
-// 拼成 384 bit, 最高 32bit 是同步头, 最低 32bit 是 dc_ch3
-wire [383:0] x_y_fir_packed = {
-    32'hA5_5A_A5_5A,   // [383:352]
-    s32_x_ch1,         // [351:320]
-    s32_y_ch1,         // [319:288]
-    s32_x_ch2,         // [287:256]
-    s32_y_ch2,         // [255:224]
-    s32_x_ch3_21,      // [223:192]
-    s32_y_ch3_21,      // [191:160]
-    s32_x_ch3_12,      // [159:128]
-    s32_y_ch3_12,      // [127: 96]
-    s32_x_ch3_11,      // [ 95: 64]
-    s32_y_ch3_11,      // [ 63: 32]
-    s32_dc_ch3         // [ 31:  0]
-};
-
-usb_commend u_usb_commend (
-    .clk(sys_clk),
-    .rst_n(sys_rst_n),
-    .rec_data(rec_data),
-    .rec_done(rec_done),
-    .tx_done(tx_done),
-    .x_y_fir(x_y_fir_packed),
-    .m_axis_data_tvalid_fir_x(dc_valid_x_ch1),
-    .center_freq(center_freq_uart),      // FREQ 指令输出 (未使用)
-    .pll_kp(pll_kp),                     // KP 指令输出
-    .pll_ki(pll_ki),                     // KI 指令输出
-    .tau_x(tau_x),                       // TAUX 指令输出
-    .tau_y(tau_y),                       // TAUY 指令输出
-    .phase_offset(tx1_phase_word),       // PHAS 指令输出 -> tx1 相位
-    .freq_word_2(tx1_freq_word),         // FRQ2 指令输出 -> tx1 频率
-    .freq_word_3(tx2_freq_word),         // FRQ3 指令输出 -> tx2 频率
-    .send_en(send_en),
-    .send_data(send_data)
-);
-
-
-// =========================================================================
 // ★ 和差频输出 DDS
 // 注意: F1 = pll_freq_ch1, F2 当前仍绑定到 tx2_freq_word;
 //       若要改用 pll_freq_ch2, 请将下面公式中的 tx2_freq_word 替换为 pll_freq_ch2
@@ -811,6 +740,77 @@ wire               dc_valid_ch3;
 iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
     .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_dc_ch3),
     .shift_k(tau_x), .din(cic_dc_ch3), .dout(dc_ch3), .valid_out(dc_valid_ch3)
+);
+
+
+// =========================================================================
+// ★ 上位机回传帧打包 (48 字节 / 384 bit, 大端)
+//   偏移        字段              类型
+//   --------- ----------------- ----------
+//   [ 0.. 3]  0xA5_5A_A5_5A     sync header (魔数)
+//   [ 4.. 7]  dc_x_ch1          int32 (通道1 @ F1 的 X)
+//   [ 8..11]  dc_y_ch1          int32 (通道1 @ F1 的 Y)
+//   [12..15]  dc_x_ch2          int32 (通道2 @ F2 的 X)
+//   [16..19]  dc_y_ch2          int32 (通道2 @ F2 的 Y)
+//   [20..23]  dc_x_ch3_21       int32 (通道3 @ 2F1+F2 的 X)
+//   [24..27]  dc_y_ch3_21       int32 (通道3 @ 2F1+F2 的 Y)
+//   [28..31]  dc_x_ch3_12       int32 (通道3 @ F1+2F2 的 X)
+//   [32..35]  dc_y_ch3_12       int32 (通道3 @ F1+2F2 的 Y)
+//   [36..39]  dc_x_ch3_11       int32 (通道3 @ F1+F2  的 X)
+//   [40..43]  dc_y_ch3_11       int32 (通道3 @ F1+F2  的 Y)
+//   [44..47]  dc_ch3            int32 (通道3 DC 分量)
+//
+//   - 所有 28bit 有符号数据通过符号扩展到 32bit
+//   - 发送顺序: 字节 0 先, 字节 47 后; 每个 int32 高字节先发 (大端)
+//   - 上位机解析: Python `struct.unpack('>4B11i', frame)` 或先匹配头再读数据
+// =========================================================================
+// 28bit -> 32bit 符号扩展
+wire [31:0] s32_x_ch1    = {{4{dc_x_ch1   [27]}}, dc_x_ch1    };
+wire [31:0] s32_y_ch1    = {{4{dc_y_ch1   [27]}}, dc_y_ch1    };
+wire [31:0] s32_x_ch2    = {{4{dc_x_ch2   [27]}}, dc_x_ch2    };
+wire [31:0] s32_y_ch2    = {{4{dc_y_ch2   [27]}}, dc_y_ch2    };
+wire [31:0] s32_x_ch3_21 = {{4{dc_x_ch3_21[27]}}, dc_x_ch3_21 };
+wire [31:0] s32_y_ch3_21 = {{4{dc_y_ch3_21[27]}}, dc_y_ch3_21 };
+wire [31:0] s32_x_ch3_12 = {{4{dc_x_ch3_12[27]}}, dc_x_ch3_12 };
+wire [31:0] s32_y_ch3_12 = {{4{dc_y_ch3_12[27]}}, dc_y_ch3_12 };
+wire [31:0] s32_x_ch3_11 = {{4{dc_x_ch3_11[27]}}, dc_x_ch3_11 };
+wire [31:0] s32_y_ch3_11 = {{4{dc_y_ch3_11[27]}}, dc_y_ch3_11 };
+wire [31:0] s32_dc_ch3   = {{4{dc_ch3     [27]}}, dc_ch3      };
+
+// 拼成 384 bit, 最高 32bit 是同步头, 最低 32bit 是 dc_ch3
+wire [383:0] x_y_fir_packed = {
+    32'hA5_5A_A5_5A,   // [383:352]
+    s32_x_ch1,         // [351:320]
+    s32_y_ch1,         // [319:288]
+    s32_x_ch2,         // [287:256]
+    s32_y_ch2,         // [255:224]
+    s32_x_ch3_21,      // [223:192]
+    s32_y_ch3_21,      // [191:160]
+    s32_x_ch3_12,      // [159:128]
+    s32_y_ch3_12,      // [127: 96]
+    s32_x_ch3_11,      // [ 95: 64]
+    s32_y_ch3_11,      // [ 63: 32]
+    s32_dc_ch3         // [ 31:  0]
+};
+
+usb_commend u_usb_commend (
+    .clk(sys_clk),
+    .rst_n(sys_rst_n),
+    .rec_data(rec_data),
+    .rec_done(rec_done),
+    .tx_done(tx_done),
+    .x_y_fir(x_y_fir_packed),
+    .m_axis_data_tvalid_fir_x(dc_valid_x_ch1),
+    .center_freq(center_freq_uart),      // FREQ 指令输出 (未使用)
+    .pll_kp(pll_kp),                     // KP 指令输出
+    .pll_ki(pll_ki),                     // KI 指令输出
+    .tau_x(tau_x),                       // TAUX 指令输出
+    .tau_y(tau_y),                       // TAUY 指令输出
+    .phase_offset(tx1_phase_word),       // PHAS 指令输出 -> tx1 相位
+    .freq_word_2(tx1_freq_word),         // FRQ2 指令输出 -> tx1 频率
+    .freq_word_3(tx2_freq_word),         // FRQ3 指令输出 -> tx2 频率
+    .send_en(send_en),
+    .send_data(send_data)
 );
 
 
