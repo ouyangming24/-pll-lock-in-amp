@@ -30,12 +30,28 @@ module lock_in_amp(
    output  wire          adc_oeb_b_2   ,
    output  wire          adc_clk_2     ,
 
-   // FT245BL USB 接口
+   // FT245BL USB 接口 (保留作为下行命令通道; 也可作为上行备份)
    inout  wire [7:0] ft_d,
    input  wire       ft_rxf_n,
    output wire       ft_rd_n,
    input  wire       ft_txe_n,
-   output wire       ft_wr
+   output wire       ft_wr,
+
+   // ★ 新增: 千兆以太网 (RTL8211E, RGMII 接 PL 端)
+   //   注: 50 MHz 基准时钟复用现有 sys_clk (XDC = M19)
+   input  wire       eth_rxc,
+   input  wire       eth_rxctl,
+   input  wire [3:0] eth_rxd,
+   output wire       eth_txc,
+   output wire       eth_txctl,
+   output wire [3:0] eth_txd,
+   output wire       eth_nrst,
+   output wire       eth_mdc,
+   inout  wire       eth_mdio,
+
+   // ★ 新增: PL LED 状态指示 (可选, 不接也行)
+   output wire       pl_led1,    // 链路状态: 长亮=1G 已链上
+   output wire       pl_led2     // 帧丢失指示: 闪烁=有帧被丢弃
 );
 
 // =========================================================================
@@ -442,5 +458,66 @@ ila_0 u_ila_0 (
     .probe7  (dc_x_ch3_11),             // 28bit
     .probe8  (dc_ch3)                   // 28bit
 );
+
+
+// =========================================================================
+// ★ 以太网 UDP 上行 (PL 端千兆, 替代 / 并行于 FT245)
+//    - 触发条件: 通道1 锁相 X 路 valid 一拍, 即每帧上传一次
+//    - 数据载荷: 现成的 80 字节 x_y_fir_packed (含 0xA55AA55A sync header)
+//    - 默认网络配置: FPGA=192.168.1.10, 上位机=192.168.1.100, UDP 端口 7777
+//    - 修改 IP/MAC/端口请改下面的 parameter 覆盖值
+// =========================================================================
+wire eth_link_up;
+wire [1:0] eth_link_speed;
+wire eth_frame_dropped;
+
+eth_lockin_top #(
+    .LOCAL_MAC   (48'h02_00_00_00_00_01),
+    .LOCAL_IP    ({8'd192, 8'd168, 8'd1, 8'd10}),
+    .DEST_IP     ({8'd192, 8'd168, 8'd1, 8'd100}),
+    .GATEWAY_IP  ({8'd192, 8'd168, 8'd1, 8'd1}),
+    .SUBNET_MASK ({8'd255, 8'd255, 8'd255, 8'd0}),
+    .SRC_PORT    (16'd1234),
+    .DEST_PORT   (16'd7777),
+    .FRAME_BYTES (80)
+) u_eth_top (
+    .pl_clk_50m         (sys_clk),     // 复用现有 50 MHz 输入 (M19)
+    .sys_rst            (sys_rst),
+
+    // 锁相数据 (65 MHz 域)
+    .lockin_clk         (clk_65M),
+    .lockin_frame_data  (x_y_fir_packed),
+    .lockin_frame_valid (dc_valid_x_ch1),
+
+    // RGMII PHY 引脚
+    .eth_rxc            (eth_rxc),
+    .eth_rxctl          (eth_rxctl),
+    .eth_rxd            (eth_rxd),
+    .eth_txc            (eth_txc),
+    .eth_txctl          (eth_txctl),
+    .eth_txd            (eth_txd),
+    .eth_nrst           (eth_nrst),
+    .eth_mdc            (eth_mdc),
+    .eth_mdio           (eth_mdio),
+
+    // 状态
+    .link_up            (eth_link_up),
+    .link_speed         (eth_link_speed),
+    .frame_dropped      (eth_frame_dropped)
+);
+
+// LED 状态指示 (低有效则在 XDC 里反相, 这里按高亮=指示生效写)
+assign pl_led1 = eth_link_up;       // 链路 1Gbps 已就绪
+// 把 frame_dropped 拉成 ~100 ms 可见的闪烁
+reg [23:0] drop_blink_cnt;
+always @(posedge clk_65M) begin
+    if (!sys_rst_n)
+        drop_blink_cnt <= 24'd0;
+    else if (eth_frame_dropped)
+        drop_blink_cnt <= 24'd6_500_000;  // ~100 ms @ 65MHz
+    else if (drop_blink_cnt != 0)
+        drop_blink_cnt <= drop_blink_cnt - 1'b1;
+end
+assign pl_led2 = (drop_blink_cnt != 0);
 
 endmodule
