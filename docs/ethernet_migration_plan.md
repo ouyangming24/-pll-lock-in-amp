@@ -293,11 +293,53 @@ python eth_recv.py
 | 现象 | 原因 | 排查 |
 |---|---|---|
 | PL_LED1 不亮 | PHY 没复位好 / 链路没建立 | 看 `eth_nrst` 是否拉高、PHY 灯是否亮、网线是否好 |
+| **PL_LED1 亮但 ping 不通 / ARP 不回** | **RGMII RX 数据时序不对（边沿对齐 vs 中心对齐）** | **本工程已加 IDELAY (RX_IDELAY_TAP=24)，若仍不通见下面 §5.1** |
+| **PL_LED2 频繁闪烁** | **RX 帧 CRC 错误 → IDELAY 值不合适** | **改 `lock_in_amp.v` 里 `RX_IDELAY_TAP` 试 0/8/16/24/30** |
 | Wireshark 完全没包 | RGMII 时钟方向错 / IDELAY 没对齐 | 查 `eth_txc` 是不是 ODDR 输出、改用 `clk125_90` 驱动 |
-| 抓到包但 CRC 错 | RX/TX 内部延迟没匹配 | 用 MDIO 写 PHY 寄存器关闭/打开 RGMII delay (RTL8211E 寄存器 0x18 bit 1)，或在 FPGA 端加 IDELAY |
+| 抓到包但 CRC 错 | RX/TX 内部延迟没匹配 | 同上，调 `RX_IDELAY_TAP` |
 | 包长正确但 sync 总是错 | 字节序错 | 检查 `udp_lockin_tx` 是从 MSB 开始串行的 |
-| 偶尔丢包 | 网络环境差 / FIFO 满 | PL_LED2 闪表示 `frame_dropped`，加大 `XPM_FIFO_ASYNC` 深度到 64 |
+| 偶尔丢包 | 网络环境差 / FIFO 满 | PL_LED2 闪表示 `frame_dropped`/`rx_err`，加大 `XPM_FIFO_ASYNC` 深度到 64 |
 | Vivado 报 `eth_mac_1g_rgmii_fifo` 找不到 | verilog-ethernet 没加进工程 | 重新 Add Sources |
+| **PC 收不到 UDP 但 Wireshark 能抓到** | **本机代理软件 (Clash/sing-box) 用 198.18.x.x TUN 劫持** | **退出代理，确认 `ipconfig` 里 Meta 适配器消失** |
+
+### §5.1 RGMII RX 时序问题（最常见!）
+
+**症状**：
+- PL_LED1 常亮（PHY 协商到千兆）
+- PC `ipconfig` 看到 link up
+- `ping 192.168.1.10` 返回 "无法访问目标主机"
+- Wireshark 看到 PC 在不停发 ARP 请求，但 FPGA 完全没回应
+- PL_LED2 可能频繁闪烁（CRC 错误指示）
+
+**根本原因**：
+RTL8211E 的 RX 时钟内部延迟（RXDLY）依赖 boot-strap 引脚电平，
+LXB-ZYNQ 板默认配置常常**没开 RXDLY**，导致 RX 数据相对 RXC 是
+**边沿对齐**。alexforencich 的 `ssio_ddr_in` 模块直接用 RXC 给 IDDR
+打拍，假设数据**中心对齐**。这种情况下 IDDR 在错误位置采样，
+所有以太网帧 CRC 校验失败，被 MAC 静默丢弃。
+
+**解决方法**（已在本工程实施）：
+在 FPGA 端给 `eth_rxd[3:0]` 和 `eth_rxctl` 各加一个 `IDELAYE2`，
+默认延迟 24 tap (≈ 1.87 ns)，把数据从边沿对齐移到中心对齐。
+
+新增依赖：
+- `clk_wiz_eth` 增加 200 MHz 输出（IDELAYCTRL 必须）
+- `IDELAYCTRL` + 5 个 `IDELAYE2`（仅 7 系 FPGA 原语，不需要新 IP）
+- 全部加 `IODELAY_GROUP = "rgmii_idelay_group"` 属性
+
+**调试步骤**：
+1. 跑 `tools/update_clk_wiz_eth_for_idelay.tcl` 给 IP 加 200 MHz 输出
+2. 重新综合 + 实现 + 烧录
+3. 上电后看：
+   - PL_LED1 仍然常亮 ✓
+   - **PL_LED2 是否频繁闪烁**（监测 CRC 错误）
+4. 如果 LED2 仍然闪烁 → 改 `lock_in_amp.v` 里 `RX_IDELAY_TAP` 参数：
+   - 24 不行 → 试 16
+   - 16 不行 → 试 8、0、30、20
+   - 每个 tap = 78 ps，从 0 到 31 共 32 档，覆盖 0~2.4 ns
+5. 如果跑遍 0~31 都不通，**改用 MDIO 配置 PHY**：
+   - 写 RTL8211E ext page 0xa43 reg 24 的 RXDLY/TXDLY bit
+   - 这需要写 MDIO master 状态机，本工程暂未实现
 
 ### 抓包神器: Wireshark 过滤式
 

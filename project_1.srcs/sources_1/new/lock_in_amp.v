@@ -470,18 +470,33 @@ ila_0 u_ila_0 (
 wire eth_link_up;
 wire [1:0] eth_link_speed;
 wire eth_frame_dropped;
+wire eth_rx_err_fcs;
+wire eth_rx_err_frame;
+wire eth_rx_activity;
+wire eth_rxctl_pin_active;
+wire eth_rxd_all_active;
+wire [3:0] eth_rxd_per_bit;
+wire eth_idelay_locked;
+wire eth_idelay_failed;
+wire [4:0] eth_idelay_tap_now;
+wire eth_rx_eth_hdr_activity;
+wire eth_tx_axis_activity;
 
 eth_lockin_top #(
-    .LOCAL_MAC   (48'h02_00_00_00_00_01),
-    .LOCAL_IP    ({8'd192, 8'd168, 8'd1, 8'd10}),
-    .DEST_IP     ({8'd192, 8'd168, 8'd1, 8'd100}),
-    .GATEWAY_IP  ({8'd192, 8'd168, 8'd1, 8'd1}),
-    .SUBNET_MASK ({8'd255, 8'd255, 8'd255, 8'd0}),
-    .SRC_PORT    (16'd1234),
-    .DEST_PORT   (16'd7777),
-    .FRAME_BYTES (80)
+    .LOCAL_MAC      (48'h02_00_00_00_00_01),
+    // ★ 注意: 故意用 192.168.99.x 而不是 1.x, 避免和路由器/Wi-Fi 子网冲突
+    //   PC 上"以太网 5"网卡需手动配 IP=192.168.99.100, 掩码=255.255.255.0
+    .LOCAL_IP       ({8'd192, 8'd168, 8'd99, 8'd10}),
+    .DEST_IP        ({8'd192, 8'd168, 8'd99, 8'd100}),
+    .GATEWAY_IP     ({8'd192, 8'd168, 8'd99, 8'd1}),
+    .SUBNET_MASK    ({8'd255, 8'd255, 8'd255, 8'd0}),
+    .SRC_PORT       (16'd1234),
+    .DEST_PORT      (16'd7777),
+    .FRAME_BYTES    (80),
+    .RX_IDELAY_AUTO (1),    // ★ 1 = 自动扫描 0..31 找到能收帧的 tap
+    .RX_IDELAY_TAP  (24)
 ) u_eth_top (
-    .pl_clk_50m         (sys_clk),     // 复用现有 50 MHz 输入 (M19)
+    .pl_clk_50m         (sys_clk),
     .sys_rst            (sys_rst),
 
     // 锁相数据 (65 MHz 域)
@@ -503,21 +518,41 @@ eth_lockin_top #(
     // 状态
     .link_up            (eth_link_up),
     .link_speed         (eth_link_speed),
-    .frame_dropped      (eth_frame_dropped)
+    .frame_dropped      (eth_frame_dropped),
+    .rx_error_bad_fcs   (eth_rx_err_fcs),
+    .rx_error_bad_frame (eth_rx_err_frame),
+    .rx_frame_activity  (eth_rx_activity),
+    .rxctl_pin_activity (eth_rxctl_pin_active),
+    .rxd_all_active     (eth_rxd_all_active),
+    .rxd_per_bit_active (eth_rxd_per_bit),
+    .idelay_scan_locked (eth_idelay_locked),
+    .idelay_scan_failed (eth_idelay_failed),
+    .idelay_scan_tap_now(eth_idelay_tap_now),
+    .rx_eth_hdr_activity(eth_rx_eth_hdr_activity),
+    .tx_axis_activity   (eth_tx_axis_activity)
 );
 
-// LED 状态指示 (低有效则在 XDC 里反相, 这里按高亮=指示生效写)
-assign pl_led1 = eth_link_up;       // 链路 1Gbps 已就绪
-// 把 frame_dropped 拉成 ~100 ms 可见的闪烁
-reg [23:0] drop_blink_cnt;
-always @(posedge clk_65M) begin
-    if (!sys_rst_n)
-        drop_blink_cnt <= 24'd0;
-    else if (eth_frame_dropped)
-        drop_blink_cnt <= 24'd6_500_000;  // ~100 ms @ 65MHz
-    else if (drop_blink_cnt != 0)
-        drop_blink_cnt <= drop_blink_cnt - 1'b1;
-end
-assign pl_led2 = (drop_blink_cnt != 0);
+// =========================================================================
+// LED 状态指示  (★ IDELAY + RX/TX 协议层活动 双重诊断 ★)
+//
+//   IDELAY 没锁定时 (上电几秒内):
+//     pl_led1 = 灭        (扫描进行中)
+//     pl_led2 = 灭 / 亮   (扫描失败时亮)
+//
+//   IDELAY 锁定后 (LED1 由灭转闪烁/亮):
+//     pl_led1 = RX 协议层活动 (eth_axis_rx 解析出帧)
+//        - 闪 = MAC RX → eth_axis_rx → udp_complete 链路通
+//        - 灭 = MAC 报 good_frame, 但 eth_axis_rx 没解出来 (反压?)
+//     pl_led2 = TX 协议层活动 (FPGA 在发任何帧)
+//        - 闪 = FPGA 在产生 TX (ARP 响应/UDP 数据), 物理 TX 出问题就看这
+//        - 灭 = FPGA 完全没产生 TX (ARP 模块没识别请求 / RX 内容不对)
+//
+//   组合判读 (锁定后):
+//     LED1 闪 + LED2 闪 → 协议层都 OK, 问题在 PHY 物理 TX 层
+//     LED1 闪 + LED2 灭 → ARP 没响应, 检查 LOCAL_IP 或 ARP 模块
+//     LED1 灭 + LED2 灭 → eth_axis_rx 没消费, RX backpress 问题
+// =========================================================================
+assign pl_led1 = eth_idelay_locked ? eth_rx_eth_hdr_activity : 1'b0;
+assign pl_led2 = eth_idelay_locked ? eth_tx_axis_activity    : eth_idelay_failed;
 
 endmodule

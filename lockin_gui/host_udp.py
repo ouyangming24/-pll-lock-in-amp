@@ -9,13 +9,14 @@ host_udp.py
 
 用法:
     1. 把 FT245 配成 VCP 模式 (用于命令), 板上网线接 PC
-    2. PC 网卡静态 IP 设为 192.168.1.100, 子网 255.255.255.0
+    2. PC 网卡静态 IP 设为 192.168.99.100, 子网 255.255.255.0
+       (★ 故意用 99 子网, 避免和家用路由器 192.168.1.x 冲突)
     3. python host_udp.py
     4. 可选: python host_udp.py --save out.csv
 
 调试技巧:
     - 用 Wireshark 过滤 udp.port == 7777 验证 FPGA 是否在发包
-    - 抓不到 ARP, 试试 ping 192.168.1.10 (虽然 FPGA 不响应 ICMP, 但能触发 ARP)
+    - 抓不到 ARP, 试试 ping 192.168.99.10 (虽然 FPGA 不响应 ICMP, 但能触发 ARP)
 """
 
 import argparse
