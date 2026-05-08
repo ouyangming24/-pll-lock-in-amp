@@ -286,6 +286,18 @@ class MainWindow(QMainWindow):
         self.ed_phs = self._mk_param_row(g_phs, 0, "PHAS", "0", "PHAS")
         v.addWidget(gb_phs)
 
+        gb_lock = QGroupBox("PLL 锁定阈值 (按信号强度调)")
+        gb_lock.setToolTip(
+            "信号强 (≥25%满量程) → 800000 / 3000000\n"
+            "中等 / 不知道       → 100000 / 300000  (默认)\n"
+            "信号弱 (<5%满量程)   → 20000  / 50000\n"
+            "若锁出的频率一直在中心频率附近抖动, 通常是阈值太大, 请调小."
+        )
+        g_lock = QGridLayout(gb_lock)
+        self.ed_swy = self._mk_param_row(g_lock, 0, "SWEEP_Y", "100000", "LOCKSWY")
+        self.ed_thx = self._mk_param_row(g_lock, 1, "LOCK_X",  "300000", "LOCKTHX")
+        v.addWidget(gb_lock)
+
         btn_send_all = QPushButton("⟹ 一键下发所有参数")
         btn_send_all.setStyleSheet("background:#3a5; color:white; font-weight:bold; padding:6px;")
         btn_send_all.clicked.connect(self.on_send_all_clicked)
@@ -455,6 +467,8 @@ class MainWindow(QMainWindow):
         self._send_int_cmd("PHAS", self.ed_phs.text())
         self._send_freq_cmd("FRQ2", self.ed_f1.text())
         self._send_freq_cmd("FRQ3", self.ed_f2.text())
+        self._send_int_cmd("LOCKSWY", self.ed_swy.text())
+        self._send_int_cmd("LOCKTHX", self.ed_thx.text())
 
     # ============================================================ 数据接收
     def on_frame(self, data: dict):

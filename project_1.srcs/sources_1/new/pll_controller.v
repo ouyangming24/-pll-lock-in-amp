@@ -14,10 +14,6 @@ module pll_controller #(
     parameter signed [47:0] SWEEP_STEP = 48'd43303,      // 扫频步进：约 10 Hz
     parameter signed [47:0] SWEEP_LIMIT = 48'd433038425, // 扫频范围：±10 kHz (10000 * 4330)
     parameter SWEEP_INTERVAL = 16'd500,                  // 每 500 个 valid 节拍跳频一次
-    
-    // 捕捉与锁定确认阈值 (如果测试时一直在扫频不锁定，请调小这两个值！)
-    parameter signed [IN_WIDTH-1:0] SWEEP_THRES = 28'd5000,   // Y通道捕捉阈值(差频幅度)
-    parameter signed [IN_WIDTH-1:0] LOCK_X_THRES = 28'd8000,  // X通道锁定维持阈值(信号幅度)
     parameter WAIT_LOCK_TIME = 32'd2_000_000             // 锁定等待/防掉线容忍时间 (约2秒)
 )(
     input  wire                 clk,        // 系统时钟
@@ -26,6 +22,13 @@ module pll_controller #(
     input  wire signed [15:0]   pll_kp,     // 比例增益 (从UART来)
     input  wire signed [15:0]   pll_ki,     // 积分增益 (从UART来)
     input  wire signed [47:0]   center_freq,// 中心频率 (从UART来)
+
+    // ★★★ 锁定阈值: 由上位机运行时下发 (原 SWEEP_THRES / LOCK_X_THRES parameter)
+    //     - sweep_thres : Y 通道捕捉阈值 (|dc_y| 超过此值 → 进 LOCK)
+    //     - lock_x_thres: X 通道维持阈值 (LOCK 期间 |dc_x| 持续低于此值 → 退回 SWEEP)
+    input  wire signed [IN_WIDTH-1:0] sweep_thres,
+    input  wire signed [IN_WIDTH-1:0] lock_x_thres,
+
     input  wire signed [IN_WIDTH-1:0] phase_error_in, // 鉴相误差信号 (Y通道滤波输出)
     input  wire signed [IN_WIDTH-1:0] amp_in,         // 锁定指示信号 (X通道滤波幅值)
     input  wire                 valid_in,   // 误差信号有效标志 (作为 PI 节拍)
@@ -75,7 +78,7 @@ module pll_controller #(
                     pi_out   <= 48'd0;
                     lock_timer <= 32'd0;
                     
-                    if (abs_y > SWEEP_THRES) begin
+                    if (abs_y > sweep_thres) begin
                         // Y通道出现了明显的差频拍频，说明进入了低通滤波器的捕捉带宽内！
                         // 立即切换到锁定模式，让 PI 强行拉入
                         state <= STATE_LOCK;
@@ -109,7 +112,7 @@ module pll_controller #(
                         lock_timer <= lock_timer + 1'b1;
                         // 如果 X 通道(幅值)升起来了，说明真正锁住了且信号存在
                         // 我们就一直重置定时器，维持锁定状态不死机
-                        if (abs_x > LOCK_X_THRES) begin
+                        if (abs_x > lock_x_thres) begin
                             lock_timer <= 32'd0; 
                         end
                     end else begin

@@ -87,6 +87,9 @@ wire [47:0] tx1_phase_word;
 wire [47:0] tx1_freq_word;
 wire [47:0] tx2_phase_word = 48'd0;
 wire [47:0] tx2_freq_word;
+// ★ PLL 锁定阈值 (由 USB 命令 LOCKSWY/LOCKTHX 动态下发)
+wire signed [27:0] sweep_thres_uart;
+wire signed [27:0] lock_x_thres_uart;
 
 
 // =========================================================================
@@ -126,18 +129,19 @@ wire                cic_valid_x_ch1, cic_valid_y_ch1;
 wire                dc_valid_x_ch1,  dc_valid_y_ch1;
 wire                is_locked_ch1;
 
-// 锁定阈值说明:
+// ★★★ 锁定阈值现在由上位机运行时下发, 不再是综合时常量 ★★★
+//   命令: LOCKSWY:<n>  → sweep_thres  (Y 进 LOCK 门槛)
+//        LOCKTHX:<n>  → lock_x_thres (X 维持 LOCK 门槛)
+//   默认值在 usb_commend.v 复位时设为 100_000 / 300_000 (折中)
+//
 //   28 bit signed 信号在 14×14 混频 + CIC + IIR 后, 满量程量级 ≈ ±30 M.
-//   旧值 5000/8000 远小于 ADC 噪声本底 (~800 K), 会让系统永远 "假锁".
-//   下面是按"输入信号 ≥ 25% 满量程 (即 ±2000 LSB)"的工况估算:
-//     locked dc_x ≈ 8 M    → 取 30%–50% 作为 LOCK_X_THRES → 3 M
-//     beat dc_y peak ≈ 3 M → 取 ~25% 作为 SWEEP_THRES     → 800 K
-//   如果你的输入信号弱, 把这两个值都按比例下调 (例如信号是 5% 满量程 → 阈值都除 5).
+//   ADC 噪声本底 ~800 K (取决于环境). 调参参考:
+//     - 信号强 (≥ 25% 满量程) → SWEEP=800K, LOCK=3M
+//     - 信号弱 (< 5% 满量程)  → SWEEP=20K,  LOCK=50K
+//     - 不知道 / 中等          → SWEEP=100K, LOCK=300K (默认)
 pll_loop #(
     .KI_FRAC      (16),
-    .IN_WIDTH     (28),
-    .SWEEP_THRES  (28'd800_000),    // ★ 5_000 → 800_000  (Y 进 LOCK 门槛)
-    .LOCK_X_THRES (28'd3_000_000)   // ★ 8_000 → 3_000_000 (X 维持 LOCK 门槛)
+    .IN_WIDTH     (28)
 ) u_pll_ch1 (
     .clk          (clk_65M),
     .rst_n        (sys_rst_n),
@@ -148,6 +152,8 @@ pll_loop #(
     .pll_ki       (pll_ki),
     .tau_x        (tau_x),
     .tau_y        (tau_y),
+    .sweep_thres  (sweep_thres_uart),
+    .lock_x_thres (lock_x_thres_uart),
     .dds_freq_out (pll_freq_ch1),
     .dc_x         (dc_x_ch1),
     .dc_y         (dc_y_ch1),
@@ -170,9 +176,7 @@ wire                is_locked_ch2;
 
 pll_loop #(
     .KI_FRAC      (16),
-    .IN_WIDTH     (28),
-    .SWEEP_THRES  (28'd800_000),    // ★ 与 Ch1 一致
-    .LOCK_X_THRES (28'd3_000_000)
+    .IN_WIDTH     (28)
 ) u_pll_ch2 (
     .clk          (clk_65M),
     .rst_n        (sys_rst_n),
@@ -183,6 +187,8 @@ pll_loop #(
     .pll_ki       (pll_ki),
     .tau_x        (tau_x),
     .tau_y        (tau_y),
+    .sweep_thres  (sweep_thres_uart),    // ★ 两通道共用阈值
+    .lock_x_thres (lock_x_thres_uart),
     .dds_freq_out (pll_freq_ch2),
     .dc_x         (dc_x_ch2),
     .dc_y         (dc_y_ch2),
@@ -438,6 +444,8 @@ usb_commend u_usb_commend (
     .phase_offset(tx1_phase_word),
     .freq_word_2(tx1_freq_word),
     .freq_word_3(tx2_freq_word),
+    .sweep_thres(sweep_thres_uart),     // ★ LOCKSWY 命令下发的值
+    .lock_x_thres(lock_x_thres_uart),   // ★ LOCKTHX 命令下发的值
     .send_en(send_en),
     .send_data(send_data)
 );
@@ -446,18 +454,18 @@ usb_commend u_usb_commend (
 // =========================================================================
 // ★ ILA 探针观察
 // =========================================================================
-ila_0 u_ila_0 (
-    .clk     (sys_clk),
-    .probe0  (adc_ch1),                 // 14bit
-    .probe1  (adc_ch2),                 // 14bit
-    .probe2  (adc_ch3),                 // 14bit
-    .probe3  (pll_freq_ch1),            // 48bit: F1
-    .probe4  (pll_freq_ch2),            // 48bit: F2 ★ 现已闭环
-    .probe5  (dc_x_ch3_21),             // 28bit
-    .probe6  (dc_x_ch3_12),             // 28bit
-    .probe7  (dc_x_ch3_11),             // 28bit
-    .probe8  (dc_ch3)                   // 28bit
-);
+// ila_0 u_ila_0 (
+//     .clk     (sys_clk),
+//     .probe0  (adc_ch1),                 // 14bit
+//     .probe1  (adc_ch2),                 // 14bit
+//     .probe2  (adc_ch3),                 // 14bit
+//     .probe3  (pll_freq_ch1),            // 48bit: F1
+//     .probe4  (pll_freq_ch2),            // 48bit: F2 ★ 现已闭环
+//     .probe5  (dc_x_ch3_21),             // 28bit
+//     .probe6  (dc_x_ch3_12),             // 28bit
+//     .probe7  (dc_x_ch3_11),             // 28bit
+//     .probe8  (dc_ch3)                   // 28bit
+// );
 
 
 // =========================================================================

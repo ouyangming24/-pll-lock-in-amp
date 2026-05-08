@@ -11,16 +11,18 @@
 //  对接 FT245BL 芯片, 本模块保留对外纯字节流接口, 未来替换物理层无需修改。
 //
 //  支持的指令 (ASCII, 以 \r\n 或 \n 结尾):
-//      FREQ:<十进制>   中心频率 (48bit 频率字)
-//      KP:<十进制>     PLL 比例系数 (16bit)
-//      KI:<十进制>     PLL 积分系数 (16bit)
-//      TAUX:<十进制>   X 路 IIR 平滑系数 (5bit)
-//      TAUY:<十进制>   Y 路 IIR 平滑系数 (5bit)
-//      PHAS:<十进制>   tx1 相位偏移 (48bit)
-//      FRQ2:<十进制>   tx1 频率字 (48bit)
-//      FRQ3:<十进制>   tx2 频率字 (48bit)
-//      XYOUT           开启 48 字节数据帧周期性回传
-//      stop            关闭数据帧回传
+//      FREQ:<十进制>     中心频率 (48bit 频率字)
+//      KP:<十进制>       PLL 比例系数 (16bit)
+//      KI:<十进制>       PLL 积分系数 (16bit)
+//      TAUX:<十进制>     X 路 IIR 平滑系数 (5bit)
+//      TAUY:<十进制>     Y 路 IIR 平滑系数 (5bit)
+//      PHAS:<十进制>     tx1 相位偏移 (48bit)
+//      FRQ2:<十进制>     tx1 频率字 (48bit)
+//      FRQ3:<十进制>     tx2 频率字 (48bit)
+//      LOCKSWY:<十进制>  ★ PLL 锁定: Y 通道捕捉阈值 (28bit, 进 LOCK 门槛)
+//      LOCKTHX:<十进制>  ★ PLL 锁定: X 通道维持阈值 (28bit, 退出 LOCK 门槛)
+//      XYOUT             开启数据帧周期性回传
+//      stop              关闭数据帧回传
 //
 //  回传数据帧 (80 字节 / 640 bit, 大端):
 //      [0..3]    0xA5_5A_A5_5A             同步头
@@ -45,6 +47,8 @@ module usb_commend(
     output reg [47:0] phase_offset,
     output reg [47:0] freq_word_2,
     output reg [47:0] freq_word_3,
+    output reg signed [27:0] sweep_thres,    // ★ PLL Y 进 LOCK 门槛 (LOCKSWY)
+    output reg signed [27:0] lock_x_thres,   // ★ PLL X 维持 LOCK 门槛 (LOCKTHX)
     output reg send_en,
     output reg [7:0] send_data
 );
@@ -58,16 +62,18 @@ module usb_commend(
     parameter WAIT_XYDATA = 3'd6;
     parameter WAIT_DELAY = 3'd7;
 
-    parameter CMD_FREQ = 4'd1;
-    parameter CMD_KP   = 4'd2;
-    parameter CMD_KI   = 4'd3;
-    parameter CMD_TAUX = 4'd4;
-    parameter CMD_TAUY = 4'd5;
-    parameter CMD_PHAS = 4'd6;
-    parameter CMD_XYOUT= 4'd7;
-    parameter CMD_STOP = 4'd8;
-    parameter CMD_FRQ2 = 4'd9;
-    parameter CMD_FRQ3 = 4'd10;
+    parameter CMD_FREQ    = 4'd1;
+    parameter CMD_KP      = 4'd2;
+    parameter CMD_KI      = 4'd3;
+    parameter CMD_TAUX    = 4'd4;
+    parameter CMD_TAUY    = 4'd5;
+    parameter CMD_PHAS    = 4'd6;
+    parameter CMD_XYOUT   = 4'd7;
+    parameter CMD_STOP    = 4'd8;
+    parameter CMD_FRQ2    = 4'd9;
+    parameter CMD_FRQ3    = 4'd10;
+    parameter CMD_LOCKSWY = 4'd11;   // ★ Y 通道捕捉阈值 (SWEEP_THRES)
+    parameter CMD_LOCKTHX = 4'd12;   // ★ X 通道维持阈值 (LOCK_X_THRES)
 
     reg [2:0] curr_state;
     reg [3:0] cmd_type;
@@ -149,6 +155,9 @@ module usb_commend(
             tau_y <= 5'd8;
             phase_offset <= 48'd0;
             freq_word_2 <= 48'd433038425708 + 48'd433038425;
+            // ★ PLL 锁定阈值默认值 (折中, 适合大多数实验工况)
+            sweep_thres  <= 28'd100_000;   // |dc_y| > 100K → 进 LOCK
+            lock_x_thres <= 28'd300_000;   // LOCK 期间 |dc_x| 须 > 300K 维持
 
             send_en <= 1'b0;
             send_data <= 8'd0;
@@ -246,6 +255,24 @@ module usb_commend(
                                 cmd_cnt <= cmd_cnt + 1'b1;
                             end
                         end
+                        else if (cmd_cnt == 4'd7) begin
+                            // 8 字节命令: LOCKSWY: / LOCKTHX:
+                            if (cmd_buffer[0] == "L" && cmd_buffer[1] == "O" && cmd_buffer[2] == "C" && cmd_buffer[3] == "K"
+                             && cmd_buffer[4] == "S" && cmd_buffer[5] == "W" && cmd_buffer[6] == "Y" && rec_data == ":") begin
+                                cmd_type <= CMD_LOCKSWY;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "L" && cmd_buffer[1] == "O" && cmd_buffer[2] == "C" && cmd_buffer[3] == "K"
+                                  && cmd_buffer[4] == "T" && cmd_buffer[5] == "H" && cmd_buffer[6] == "X" && rec_data == ":") begin
+                                cmd_type <= CMD_LOCKTHX;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else begin
+                                cmd_cnt <= cmd_cnt + 1'b1;
+                            end
+                        end
                         else if (rec_data == "\r" || rec_data == "\n") begin
                             cmd_type <= 4'd0;
                             curr_state <= SEND_RESPONSE;
@@ -293,6 +320,12 @@ module usb_commend(
                             end
                             else if (cmd_type == CMD_FRQ3) begin
                                 freq_word_3 <= value_buffer;
+                            end
+                            else if (cmd_type == CMD_LOCKSWY) begin
+                                sweep_thres <= value_buffer[27:0];
+                            end
+                            else if (cmd_type == CMD_LOCKTHX) begin
+                                lock_x_thres <= value_buffer[27:0];
                             end
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;

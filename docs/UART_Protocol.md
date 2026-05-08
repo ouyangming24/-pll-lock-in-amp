@@ -308,6 +308,8 @@ github  → https://github.com/ouyangming24/-pll-lock-in-amp.git   (镜像)
 | `PHAS` | 4 字符 | 48 bit | 测试 DDS `tx1` 相位偏移 | `0` |
 | `FRQ2` | 4 字符 | 48 bit | 测试 DDS `tx1` 频率控制字 | `433471464133` |
 | `FRQ3` | 4 字符 | 48 bit | 测试 DDS `tx2` 频率控制字 | `0` |
+| `LOCKSWY` ★ | 7 字符 | 28 bit | **PLL Y 通道捕捉阈值** (Ch1/Ch2 共用)，越小越容易进 LOCK | `100000` |
+| `LOCKTHX` ★ | 7 字符 | 28 bit | **PLL X 通道维持阈值** (Ch1/Ch2 共用)，越小越不容易掉出 LOCK | `300000` |
 | `XYOUT` | 5 字符 | —  | 启动 X/Y 直流量连续回传 | 关闭 |
 | `stop` | 4 字符 | — | 停止 X/Y 连续回传 | — |
 
@@ -371,12 +373,52 @@ github  → https://github.com/ouyangming24/-pll-lock-in-amp.git   (镜像)
 - 作用：测试 DDS `tx2` 的频率字（与 `FRQ2` 独立）。
 - 换算方法同 `FRQ2`。
 
-#### 6.3.9 `XYOUT`
+#### 6.3.9 `LOCKSWY:<value>\r\n` ★ PLL Y 通道捕捉阈值
+
+- 位宽：28 bit (无符号，0 ~ 268435455)
+- 示例：`LOCKSWY:100000\r\n`
+- 作用：PLL 状态机判断是否从 SWEEP 切到 LOCK 的门槛 (`|dc_y| > sweep_thres` → 进 LOCK)。
+- **两个 PLL 通道共用同一阈值**。
+- **调参指南**：
+
+  | 信号强度 | 推荐 `LOCKSWY` | 推荐 `LOCKTHX` |
+  |---|---|---|
+  | 强 (≥25% 满量程) | `800000` | `3000000` |
+  | 中等 / 不知道  | `100000` | `300000` (默认) |
+  | 弱 (<5% 满量程)  | `20000`  | `50000` |
+
+- **典型故障与对策**：
+
+  | 现象 | 阈值方向 |
+  |---|---|
+  | 上电就"假锁"（一直显示 locked, 频率不真的跟踪） | 调大 |
+  | 频率一直在中心频率附近抖、根本锁不住 | **调小** (本次重构主要原因) |
+  | 真锁定后偶尔抖一下又恢复 | `LOCKTHX` 调小一些 |
+
+- **数据通路换算 (用 ILA 实测后再调最准)**：
+  ```
+  14 bit ADC × 14 bit DDS = 28 bit 混频积
+              ↓ CIC 抽取 + IIR 平滑
+        |dc_x|, |dc_y|  ∈ [-30M, +30M]
+        ADC 噪声本底       ≈ 800K
+  ```
+  阈值取真实锁定值的 25% ~ 50% 是安全区。
+
+#### 6.3.10 `LOCKTHX:<value>\r\n` ★ PLL X 通道维持阈值
+
+- 位宽：28 bit (无符号)
+- 示例：`LOCKTHX:300000\r\n`
+- 作用：PLL 锁定后用来"判定锁定真伪"——若 LOCK 期间 `|dc_x|` 持续 < `lock_x_thres` 达 ~2 秒，则认为是噪声触发的假锁，状态机自动退回 SWEEP。
+- **两个 PLL 通道共用**。
+- 调参方法与 `LOCKSWY` 相同，参考上表。
+- **常见经验值关系**：`LOCKTHX ≈ 3 × LOCKSWY` (X 通道是相干幅值，量级比 Y 拍频大)。
+
+#### 6.3.11 `XYOUT`
 - 格式：`XYOUT`（**无冒号、无 `\r\n` 结尾**，最后一个字节是 `T`）
 - 作用：启动通道1 的 X/Y 直流量连续回传（见 §6.4）。
 - 发送成功后 FPGA 会回 `Command Success!\r\n`，随后开始持续输出数据帧。
 
-#### 6.3.10 `stop`
+#### 6.3.12 `stop`
 - 格式：`stop`（**全小写**，末字节为 `p`）
 - 作用：停止连续数据回传，FPGA 回到空闲状态并返回 `Command Success!\r\n`。
 - 注意：该指令与上面的指令不同，**指令字符必须完全小写**。
@@ -478,6 +520,8 @@ send_cmd('TAUY:8')
 send_cmd('FRQ2:433038425708')   # tx1 = 100 kHz
 send_cmd('FRQ3:0')              # tx2 关闭
 send_cmd('PHAS:0')
+send_cmd('LOCKSWY:100000')      # ★ PLL Y 进 LOCK 门槛
+send_cmd('LOCKTHX:300000')      # ★ PLL X 维持 LOCK 门槛
 
 # --- 2. 启动数据流 ---
 ser.write(b'XYOUT')             # 注意 XYOUT 不带 \r\n
@@ -500,10 +544,11 @@ ser.write(b'stop\r\n')
 
 ### 6.6 容错与注意事项
 
-1. **指令大小写敏感**：除 `stop` 是全小写，其他指令（`KP`/`KI`/`FREQ`/`TAUX`/`TAUY`/`PHAS`/`FRQ2`/`FRQ3`/`XYOUT`）都必须**全大写**。
+1. **指令大小写敏感**：除 `stop` 是全小写，其他指令（`KP`/`KI`/`FREQ`/`TAUX`/`TAUY`/`PHAS`/`FRQ2`/`FRQ3`/`LOCKSWY`/`LOCKTHX`/`XYOUT`）都必须**全大写**。
 2. **数值仅支持十进制**：`value_buffer` 解析逻辑是 `value * 10 + (ascii - '0')`，
    暂不支持 `0x` 十六进制、负号、小数点。
 3. **指令超长**：若指令字符数累计 ≥ 9 还未匹配任何已知指令，会返回 `Command Error!\r\n` 并丢弃。
+   注意：`LOCKSWY:` / `LOCKTHX:` 本身就是 8 字节，是当前协议中最长的指令。
 4. **换行容错**：只要遇到 `\r` 或 `\n` 就认为本次输入结束。可以单独用 `\n`，也可以 `\r\n`。
 5. **`XYOUT` 期间收到任何字节**：会立即打断当前数据帧，进入指令解析流程（可用于紧急中断）。
 6. **FPGA 复位**：`sys_rst_n` 拉低后所有寄存器恢复默认值（见 §6.2.1 默认值列）。
@@ -514,7 +559,7 @@ ser.write(b'stop\r\n')
 
 | 协议元素 | 定位关键字 | 文件 |
 |---|---|---|
-| 指令枚举 `CMD_FREQ` ... `CMD_FRQ3` | 搜 `parameter CMD_` | `usb_commend.v` |
+| 指令枚举 `CMD_FREQ` ... `CMD_FRQ3` / `CMD_LOCKSWY` / `CMD_LOCKTHX` | 搜 `parameter CMD_` | `usb_commend.v` |
 | 复位默认值 (`center_freq` / `pll_kp` / ...) | 搜 `center_freq <= 48'd` | `usb_commend.v` |
 | 指令解析状态机 | 搜 `REC_CMD:` | `usb_commend.v` |
 | 数值解析 / 参数赋值 | 搜 `REC_DATA:` | `usb_commend.v` |

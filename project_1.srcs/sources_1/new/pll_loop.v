@@ -32,9 +32,7 @@
 // =============================================================================
 module pll_loop #(
     parameter        KI_FRAC      = 16,
-    parameter        IN_WIDTH     = 28,
-    parameter [27:0] SWEEP_THRES  = 28'd5000,
-    parameter [27:0] LOCK_X_THRES = 28'd8000
+    parameter        IN_WIDTH     = 28
 )(
     input                                clk,         // 主工作时钟 (clk_65M)
     input                                rst_n,
@@ -49,6 +47,10 @@ module pll_loop #(
     input  [15:0]                        pll_ki,
     input  [4:0]                         tau_x,       // X 路 IIR 平滑 (幅值)
     input  [4:0]                         tau_y,       // Y 路 IIR 平滑 (反馈)
+
+    // ★ 锁定阈值 (由上位机运行时下发, 原来是 parameter)
+    input  signed [IN_WIDTH-1:0]         sweep_thres,
+    input  signed [IN_WIDTH-1:0]         lock_x_thres,
 
     // 输出
     output [47:0]                        dds_freq_out,// 锁定的 DDS 频率字
@@ -161,9 +163,7 @@ module pll_loop #(
     // ========================================================================
     pll_controller #(
         .KI_FRAC      (KI_FRAC),
-        .IN_WIDTH     (IN_WIDTH),
-        .SWEEP_THRES  (SWEEP_THRES),
-        .LOCK_X_THRES (LOCK_X_THRES)
+        .IN_WIDTH     (IN_WIDTH)
     ) u_pll_ctrl (
         .clk            (clk),
         .rst_n          (rst_n),
@@ -171,6 +171,8 @@ module pll_loop #(
         .pll_kp         (pll_kp),
         .pll_ki         (pll_ki),
         .center_freq    (center_freq),
+        .sweep_thres    (sweep_thres),
+        .lock_x_thres   (lock_x_thres),
         .phase_error_in (dc_y),
         .amp_in         (dc_x),
         .valid_in       (cic_valid_y),

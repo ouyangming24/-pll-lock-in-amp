@@ -414,6 +414,8 @@ class MockDevice(QObject):
             "PHAS": 0,
             "FRQ2": hz_to_freq_word(50000),
             "FRQ3": hz_to_freq_word(40000),
+            "LOCKSWY": 100_000,
+            "LOCKTHX": 300_000,
         }
         # 模拟数据生成定时器 (~50 fps; 真实硬件帧率 ≤ 10 fps, 这里足够看动效)
         self._timer = QTimer()
