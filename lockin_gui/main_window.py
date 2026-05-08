@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
 )
 
 from device import (
-    LockinDevice, MockDevice, list_serial_ports,
+    LockinDevice, UdpLockinDevice, MockDevice, list_serial_ports,
     hz_to_freq_word, FIELD_NAMES,
 )
 
@@ -144,12 +144,17 @@ class PlotPanel(QFrame):
 # 主窗口
 # ============================================================================
 class MainWindow(QMainWindow):
-    def __init__(self, demo_mode: bool = False):
+    def __init__(self, demo_mode: bool = False, udp_mode: bool = False):
         super().__init__()
         self.setWindowTitle("数字锁相放大器 · 双通道 · 三谐波检测")
         self.resize(1500, 900)
 
-        self.dev = MockDevice() if demo_mode else LockinDevice()
+        if demo_mode:
+            self.dev = MockDevice()
+        elif udp_mode:
+            self.dev = UdpLockinDevice()
+        else:
+            self.dev = LockinDevice()
         self.dev.frame_received.connect(self.on_frame)
         self.dev.log_message.connect(self.on_log)
         self.dev.connection_changed.connect(self.on_conn_changed)
@@ -211,8 +216,14 @@ class MainWindow(QMainWindow):
         self.btn_record.clicked.connect(self.on_record_clicked)
         top_bar.addWidget(self.btn_record)
         top_bar.addStretch()
-        self.lbl_mode = QLabel("DEMO 模式" if isinstance(self.dev, MockDevice) else "硬件模式")
-        self.lbl_mode.setStyleSheet("color: #ff9; font-weight: bold;")
+        if isinstance(self.dev, MockDevice):
+            mode_text, mode_color = "DEMO 模式", "#ff9"
+        elif isinstance(self.dev, UdpLockinDevice):
+            mode_text, mode_color = "以太网 UDP 模式", "#5df"
+        else:
+            mode_text, mode_color = "串口模式 (FT245)", "#ff9"
+        self.lbl_mode = QLabel(mode_text)
+        self.lbl_mode.setStyleSheet(f"color: {mode_color}; font-weight: bold;")
         top_bar.addWidget(self.lbl_mode)
 
         # 左侧参数面板 / 右侧绘图区

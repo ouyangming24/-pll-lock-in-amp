@@ -2,10 +2,12 @@
 device.py
 ─────────
 设备抽象层:
-  - LockinDevice: 真实 FPGA 通信 (FT245BL VCP 模式, pyserial)
-  - MockDevice  : 离线模拟器, 产生伪锁相数据 (用于无硬件时调试 GUI)
+  - LockinDevice    : 真实 FPGA 通信 (FT245BL VCP 模式, pyserial), 上下行都走串口
+  - UdpLockinDevice : ★ 新版 ★ 命令走 FT245 串口, 数据走以太网 UDP
+                     (FPGA PL 端千兆 RGMII 直接发 UDP, 见 docs/ethernet_migration_plan.md)
+  - MockDevice      : 离线模拟器, 产生伪锁相数据 (用于无硬件时调试 GUI)
 
-两者都是 QObject, 发出相同的 Qt 信号供 main_window 订阅:
+三个类都是 QObject, 发出相同的 Qt 信号供 main_window 订阅:
   - frame_received(dict)
   - log_message(str)
   - connection_changed(bool)
@@ -13,6 +15,7 @@ device.py
 """
 
 import math
+import socket
 import struct
 import threading
 import time
@@ -229,6 +232,163 @@ class LockinDevice(QObject):
                     buf = buf[-2048:]
         finally:
             # 即使被异常打断, 也确保流标志被清掉
+            self._streaming = False
+
+
+# ============================================================================
+# 以太网 UDP 设备 (FPGA PL 端 千兆 RGMII 直接发 UDP)
+#   - 数据通道: UDP socket, 监听 7777 端口
+#   - 命令通道: 仍走 FT245 串口 (FPGA 端 usb_commend 模块没有 UDP 输入)
+#   - 一旦 FPGA 端实现 UDP 命令解析, 就可以彻底甩掉 USB
+# ============================================================================
+UDP_LISTEN_IP   = "0.0.0.0"     # 监听所有网卡
+UDP_LISTEN_PORT = 7777          # 与 eth_lockin_top.v 的 DEST_PORT 一致
+UDP_RECV_BUFSZ  = 1 << 20       # 1 MiB socket 内核缓冲
+UDP_SOCK_TIMEOUT = 0.5          # recvfrom 超时 (s), 让 rx 线程能定期检查退出标志
+
+
+class UdpLockinDevice(QObject):
+    """命令走 FT245 串口, 数据走以太网 UDP (FPGA PL 端千兆 RGMII)"""
+    frame_received = pyqtSignal(dict)
+    log_message = pyqtSignal(str)
+    connection_changed = pyqtSignal(bool)
+    cmd_response = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.ser: serial.Serial | None = None
+        self.sock: socket.socket | None = None
+        self._streaming = False
+        self._thread: threading.Thread | None = None
+        self._cmd_lock = threading.Lock()
+        self._stat_total = 0       # 已收帧数
+        self._stat_bad   = 0       # 解析失败帧数
+
+    # --- 连接管理 ----------------------------------------------------------
+    def connect(self, port: str, baud: int = 3_000_000) -> bool:
+        """打开命令串口 + 创建 UDP socket. 任意一步失败都回滚."""
+        # 1) 命令串口
+        try:
+            self.ser = serial.Serial(port, baud, timeout=0.05)
+        except Exception as e:
+            self.log_message.emit(f"[!] 命令串口 {port} 打开失败: {e}")
+            return False
+
+        # 2) UDP socket
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, UDP_RECV_BUFSZ)
+            # SO_REUSEADDR 让程序异常退出后, 端口能立刻被重新 bind
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind((UDP_LISTEN_IP, UDP_LISTEN_PORT))
+            self.sock.settimeout(UDP_SOCK_TIMEOUT)
+        except Exception as e:
+            self.log_message.emit(f"[!] UDP 监听 {UDP_LISTEN_PORT} 失败: {e}")
+            # 回滚串口
+            try: self.ser.close()
+            except Exception: pass
+            self.ser = None
+            self.sock = None
+            return False
+
+        self.connection_changed.emit(True)
+        self.log_message.emit(
+            f"[+] 命令串口 {port} 已打开; UDP 监听 {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}")
+        return True
+
+    def disconnect(self):
+        self.stop_streaming()
+        if self.ser:
+            try: self.ser.close()
+            except Exception: pass
+            self.ser = None
+        if self.sock:
+            try: self.sock.close()
+            except Exception: pass
+            self.sock = None
+        self.connection_changed.emit(False)
+        self.log_message.emit("[+] 已断开")
+
+    @property
+    def is_connected(self) -> bool:
+        # UDP 模式下, "连接" 等价于 "命令串口已开 + UDP socket 已绑定"
+        return (self.ser is not None and self.ser.is_open
+                and self.sock is not None)
+
+    # --- 命令收发 (走 FT245 串口) -----------------------------------------
+    def send_command(self, cmd: str) -> str:
+        """UDP 模式下命令走串口, 数据走 UDP, 没有 read 冲突,
+        所以可以直接 write + 读响应 (不用像 LockinDevice 那样区分流模式).
+        """
+        if not self.is_connected:
+            self.log_message.emit(f"[!] 未连接, 无法发送: {cmd}")
+            return ""
+        with self._cmd_lock:
+            try:
+                self.ser.write((cmd + "\r\n").encode("ascii"))
+                time.sleep(0.05)
+                resp = self.ser.read(256).decode("ascii", errors="replace").strip()
+                self.log_message.emit(f"  >> {cmd:18s} ← {resp}")
+                self.cmd_response.emit(resp)
+                return resp
+            except Exception as e:
+                self.log_message.emit(f"[!] 命令异常: {e}")
+                return ""
+
+    # --- 数据流 (走 UDP socket) -------------------------------------------
+    def start_streaming(self):
+        """UDP 端不需要发 XYOUT — FPGA 端 udp_lockin_tx 是被
+        dc_valid 自动触发的, 上电后就一直在发包. 我们只要打开
+        socket 接收就行.
+        """
+        if self._streaming or not self.sock:
+            return
+        self._streaming = True
+        self._stat_total = 0
+        self._stat_bad   = 0
+        self._thread = threading.Thread(target=self._rx_loop, daemon=True)
+        self._thread.start()
+        self.log_message.emit("[+] UDP 数据流已启动")
+
+    def stop_streaming(self):
+        if not self._streaming:
+            return
+        self._streaming = False
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        self.log_message.emit(
+            f"[+] UDP 数据流已停止 (共收 {self._stat_total} 帧, "
+            f"解析失败 {self._stat_bad})")
+
+    @property
+    def is_streaming(self) -> bool:
+        return self._streaming
+
+    def _rx_loop(self):
+        """后台线程: 持续 recvfrom UDP, 每个 datagram 必为 80 字节一帧."""
+        try:
+            while self._streaming and self.sock:
+                try:
+                    payload, _addr = self.sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    # socket 被 close 时这里会抛, 直接退出
+                    break
+                except Exception as e:
+                    if self._streaming:
+                        self.log_message.emit(f"[!] UDP 接收异常: {e}")
+                    break
+
+                self._stat_total += 1
+                try:
+                    data = parse_frame(payload)
+                except ValueError:
+                    self._stat_bad += 1
+                    continue
+                self.frame_received.emit(data)
+        finally:
             self._streaming = False
 
 
