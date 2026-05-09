@@ -38,7 +38,8 @@ module lockin_psd #(
     input  signed [13:0]                 adc_in,
     input  [47:0]                        ref_freq,    // 参考频率字 (直接喂给 DDS)
     input  [47:0]                        ref_phase,   // 参考相位 (默认接 48'd0 即可)
-    input  [4:0]                         tau,         // IIR 平滑系数 (X/Y 共用)
+    input  [4:0]                         tau_x,       // X 路 IIR 平滑系数
+    input  [4:0]                         tau_y,       // Y 路 IIR 平滑系数
 
     // 输出
     output signed [IN_WIDTH-1:0]         dc_x,
@@ -110,7 +111,7 @@ module lockin_psd #(
         .clk        (clk),
         .rst_n      (rst_n),
         .en         (cic_valid_x),
-        .shift_k    (tau),
+        .shift_k    (tau_x),
         .din        (cic_x),
         .dout       (dc_x),
         .valid_out  (dc_valid_x)
@@ -123,7 +124,7 @@ module lockin_psd #(
         .clk        (clk),
         .rst_n      (rst_n),
         .en         (cic_valid_y),
-        .shift_k    (tau),
+        .shift_k    (tau_y),
         .din        (cic_y),
         .dout       (dc_y),
         .valid_out  (dc_valid_y)

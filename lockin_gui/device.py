@@ -410,7 +410,12 @@ class MockDevice(QObject):
         # 内部状态(被命令修改)
         self.params = {
             "KP": 500, "KI": 50,
-            "TAUX": 20, "TAUY": 8,
+            "TAU1X": 20, "TAU1Y": 8,
+            "TAU2X": 20, "TAU2Y": 8,
+            "TAU21X": 2, "TAU21Y": 2,
+            "TAU12X": 2, "TAU12Y": 2,
+            "TAU11X": 2, "TAU11Y": 2,
+            "TAUDC": 2,
             "PHAS": 0,
             "FRQ2": hz_to_freq_word(50000),
             "FRQ3": hz_to_freq_word(40000),

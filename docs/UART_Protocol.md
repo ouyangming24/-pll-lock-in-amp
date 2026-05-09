@@ -303,8 +303,17 @@ github  → https://github.com/ouyangming24/-pll-lock-in-amp.git   (镜像)
 | `FREQ` | 4 字符 | 48 bit | 设置中心频率寄存器（FPGA 里目前未实际使用，保留） | `433038425708` |
 | `KP` | 2 字符 | 16 bit | PLL 比例系数 | `500` |
 | `KI` | 2 字符 | 16 bit | PLL 积分系数 | `50` |
-| `TAUX` | 4 字符 | 5 bit | 通道1 X 方向 IIR 时间常数（越大越慢）| `20` |
-| `TAUY` | 4 字符 | 5 bit | 通道1 Y 方向 IIR 时间常数 | `8` |
+| `TAU1X` | 5 字符 | 5 bit | 通道1 (PLL) X方向 IIR 时间常数（越大越慢）| `20` |
+| `TAU1Y` | 5 字符 | 5 bit | 通道1 (PLL) Y方向 IIR 时间常数 | `8` |
+| `TAU2X` | 5 字符 | 5 bit | 通道2 (PLL) X方向 IIR 时间常数 | `20` |
+| `TAU2Y` | 5 字符 | 5 bit | 通道2 (PLL) Y方向 IIR 时间常数 | `8` |
+| `TAU21X` ★ | 6 字符 | 5 bit | 通道3 谐波 `2F1+F2` X 路 IIR 时间常数 | `2` |
+| `TAU21Y` ★ | 6 字符 | 5 bit | 通道3 谐波 `2F1+F2` Y 路 IIR 时间常数 | `2` |
+| `TAU12X` ★ | 6 字符 | 5 bit | 通道3 谐波 `F1+2F2` X 路 IIR 时间常数 | `2` |
+| `TAU12Y` ★ | 6 字符 | 5 bit | 通道3 谐波 `F1+2F2` Y 路 IIR 时间常数 | `2` |
+| `TAU11X` ★ | 6 字符 | 5 bit | 通道3 谐波 `F1+F2`  X 路 IIR 时间常数 | `2` |
+| `TAU11Y` ★ | 6 字符 | 5 bit | 通道3 谐波 `F1+F2`  Y 路 IIR 时间常数 | `2` |
+| `TAUDC`  ★ | 5 字符 | 5 bit | 通道3 DC 通路（无混频）IIR 时间常数 | `2` |
 | `PHAS` | 4 字符 | 48 bit | 测试 DDS `tx1` 相位偏移 | `0` |
 | `FRQ2` | 4 字符 | 48 bit | 测试 DDS `tx1` 频率控制字 | `433471464133` |
 | `FRQ3` | 4 字符 | 48 bit | 测试 DDS `tx2` 频率控制字 | `0` |
@@ -333,18 +342,33 @@ github  → https://github.com/ouyangming24/-pll-lock-in-amp.git   (镜像)
 - 示例：`KI:50\r\n`
 - 作用：PLL 控制器的**积分系数**。建议取值 `KP` 的 1/5 ~ 1/10。
 
-#### 6.3.4 `TAUX:<value>\r\n`
+#### 6.3.4 `TAU1X:<value>\r\n`
 - 位宽：5 bit（0 ~ 31）
-- 示例：`TAUX:20\r\n`
-- 作用：X 支路（同相幅值）IIR 滤波器的指数移动平均**位移量**。
+- 示例：`TAU1X:20\r\n`
+- 作用：通道1 (PLL) X 支路（同相幅值）IIR 滤波器的指数移动平均**位移量**。
 - 效果：值越大滤波越慢、直流分量越平滑，但响应越慢。
 
-#### 6.3.5 `TAUY:<value>\r\n`
+#### 6.3.5 `TAU1Y:<value>\r\n`
 - 位宽：5 bit （0 ~ 31）
-- 示例：`TAUY:8\r\n`
-- 作用：Y 支路（正交相位误差）IIR 滤波器的位移量。
-- 调参建议：`TAUY` 一般要比 `TAUX` 小一些（响应更快），
+- 示例：`TAU1Y:8\r\n`
+- 作用：通道1 (PLL) Y 支路（正交相位误差）IIR 滤波器的位移量。
+- 调参建议：`TAU1Y` 一般要比 `TAU1X` 小一些（响应更快），
   因为 Y 直接接入 PLL 做反馈，过度滤波会降低环路带宽。
+
+*(注：`TAU2X`, `TAU2Y` 作用于通道2 PLL，同理。)*
+
+#### 6.3.5b 通道3 谐波 / DC 时间常数 (`TAU21X/Y` … `TAUDC`)
+- 位宽：均为 5 bit (0 ~ 31)
+- 通道3 是开环锁相放大器（不参与相位反馈），共有 4 路独立的 X/Y 输出：
+  - `2F1+F2`、`F1+2F2`、`F1+F2` 三路谐波各对应一组 `TAU2?X` / `TAU2?Y`
+  - DC 通路（直接 CIC + IIR，无混频）只有一路 `TAUDC`
+- 示例：
+  - `TAU21X:2\r\n`、`TAU21Y:2\r\n` —— 设置 `2F1+F2` 谐波的 X/Y 滤波器
+  - `TAUDC:4\r\n`                  —— 设置 DC 通路的 IIR
+- 调参建议：
+  - 为了**实时抓取快速变化的幅值**，建议谐波/DC 的 `tau` 设为 `0 ~ 3`
+  - 同一谐波路的 X/Y 通常设相同值（保持带宽一致），但若只关心幅值或只关心相位也可单独调整
+  - 若信号噪声较大，可逐步加大到 `4 ~ 6` 换取信噪比
 
 #### 6.3.6 `PHAS:<value>\r\n`
 - 位宽：48 bit
@@ -515,8 +539,15 @@ def send_cmd(cmd: str):
 # --- 1. 配置参数 ---
 send_cmd('KP:800')
 send_cmd('KI:80')
-send_cmd('TAUX:20')
-send_cmd('TAUY:8')
+send_cmd('TAU1X:20')
+send_cmd('TAU1Y:8')
+send_cmd('TAU2X:20')
+send_cmd('TAU2Y:8')
+# 通道3 谐波/DC 4 路独立时间常数
+send_cmd('TAU21X:2');  send_cmd('TAU21Y:2')
+send_cmd('TAU12X:2');  send_cmd('TAU12Y:2')
+send_cmd('TAU11X:2');  send_cmd('TAU11Y:2')
+send_cmd('TAUDC:2')
 send_cmd('FRQ2:433038425708')   # tx1 = 100 kHz
 send_cmd('FRQ3:0')              # tx2 关闭
 send_cmd('PHAS:0')
@@ -544,7 +575,7 @@ ser.write(b'stop\r\n')
 
 ### 6.6 容错与注意事项
 
-1. **指令大小写敏感**：除 `stop` 是全小写，其他指令（`KP`/`KI`/`FREQ`/`TAUX`/`TAUY`/`PHAS`/`FRQ2`/`FRQ3`/`LOCKSWY`/`LOCKTHX`/`XYOUT`）都必须**全大写**。
+1. **指令大小写敏感**：除 `stop` 是全小写，其他指令（`KP`/`KI`/`FREQ`/`TAU1X`/`TAU1Y`/`TAU2X`/`TAU2Y`/`TAU21X`/`TAU21Y`/`TAU12X`/`TAU12Y`/`TAU11X`/`TAU11Y`/`TAUDC`/`PHAS`/`FRQ2`/`FRQ3`/`LOCKSWY`/`LOCKTHX`/`XYOUT`）都必须**全大写**。
 2. **数值仅支持十进制**：`value_buffer` 解析逻辑是 `value * 10 + (ascii - '0')`，
    暂不支持 `0x` 十六进制、负号、小数点。
 3. **指令超长**：若指令字符数累计 ≥ 9 还未匹配任何已知指令，会返回 `Command Error!\r\n` 并丢弃。

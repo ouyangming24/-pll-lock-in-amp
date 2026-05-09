@@ -81,8 +81,18 @@ wire pll_en = 1'b1;
 wire [47:0] center_freq_uart;
 wire [15:0] pll_kp;
 wire [15:0] pll_ki;
-wire [4:0]  tau_x;
-wire [4:0]  tau_y;
+wire [4:0]  tau1_x_uart;
+wire [4:0]  tau1_y_uart;
+wire [4:0]  tau2_x_uart;
+wire [4:0]  tau2_y_uart;
+// ch3 谐波/DC 各自独立的 IIR 时间常数
+wire [4:0]  tau21_x_uart;   // ch3 @ 2F1+F2  X 路
+wire [4:0]  tau21_y_uart;   // ch3 @ 2F1+F2  Y 路
+wire [4:0]  tau12_x_uart;   // ch3 @ F1+2F2  X 路
+wire [4:0]  tau12_y_uart;   // ch3 @ F1+2F2  Y 路
+wire [4:0]  tau11_x_uart;   // ch3 @ F1+F2   X 路
+wire [4:0]  tau11_y_uart;   // ch3 @ F1+F2   Y 路
+wire [4:0]  tau_dc_uart;    // ch3 DC 通路
 wire [47:0] tx1_phase_word;
 wire [47:0] tx1_freq_word;
 wire [47:0] tx2_phase_word = 48'd0;
@@ -150,8 +160,8 @@ pll_loop #(
     .center_freq  (tx1_freq_word),
     .pll_kp       (pll_kp),
     .pll_ki       (pll_ki),
-    .tau_x        (tau_x),
-    .tau_y        (tau_y),
+    .tau_x        (tau1_x_uart),
+    .tau_y        (tau1_y_uart),
     .sweep_thres  (sweep_thres_uart),
     .lock_x_thres (lock_x_thres_uart),
     .dds_freq_out (pll_freq_ch1),
@@ -185,8 +195,8 @@ pll_loop #(
     .center_freq  (tx2_freq_word),     // 扫频起点 (FRQ3 指令设置)
     .pll_kp       (pll_kp),
     .pll_ki       (pll_ki),
-    .tau_x        (tau_x),
-    .tau_y        (tau_y),
+    .tau_x        (tau2_x_uart),
+    .tau_y        (tau2_y_uart),
     .sweep_thres  (sweep_thres_uart),    // ★ 两通道共用阈值
     .lock_x_thres (lock_x_thres_uart),
     .dds_freq_out (pll_freq_ch2),
@@ -254,7 +264,8 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
     .adc_in      (adc_ch3),
     .ref_freq    (f_2f1_plus_f2),
     .ref_phase   (48'd0),
-    .tau         (tau_x),
+    .tau_x       (tau21_x_uart),
+    .tau_y       (tau21_y_uart),
     .dc_x        (dc_x_ch3_21),
     .dc_y        (dc_y_ch3_21),
     .cic_valid_x (),
@@ -273,7 +284,8 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
     .adc_in      (adc_ch3),
     .ref_freq    (f_f1_plus_2f2),
     .ref_phase   (48'd0),
-    .tau         (tau_x),
+    .tau_x       (tau12_x_uart),
+    .tau_y       (tau12_y_uart),
     .dc_x        (dc_x_ch3_12),
     .dc_y        (dc_y_ch3_12),
     .cic_valid_x (),
@@ -292,7 +304,8 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
     .adc_in      (adc_ch3),
     .ref_freq    (f_f1_plus_f2),
     .ref_phase   (48'd0),
-    .tau         (tau_x),
+    .tau_x       (tau11_x_uart),
+    .tau_y       (tau11_y_uart),
     .dc_x        (dc_x_ch3_11),
     .dc_y        (dc_y_ch3_11),
     .cic_valid_x (),
@@ -315,7 +328,7 @@ wire signed [27:0] dc_ch3;
 wire               dc_valid_ch3;
 iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
     .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_dc_ch3),
-    .shift_k(tau_x), .din(cic_dc_ch3), .dout(dc_ch3), .valid_out(dc_valid_ch3)
+    .shift_k(tau_dc_uart), .din(cic_dc_ch3), .dout(dc_ch3), .valid_out(dc_valid_ch3)
 );
 
 
@@ -439,8 +452,17 @@ usb_commend u_usb_commend (
     .center_freq(center_freq_uart),
     .pll_kp(pll_kp),
     .pll_ki(pll_ki),
-    .tau_x(tau_x),
-    .tau_y(tau_y),
+    .tau1_x(tau1_x_uart),
+    .tau1_y(tau1_y_uart),
+    .tau2_x(tau2_x_uart),
+    .tau2_y(tau2_y_uart),
+    .tau21_x(tau21_x_uart),
+    .tau21_y(tau21_y_uart),
+    .tau12_x(tau12_x_uart),
+    .tau12_y(tau12_y_uart),
+    .tau11_x(tau11_x_uart),
+    .tau11_y(tau11_y_uart),
+    .tau_dc(tau_dc_uart),
     .phase_offset(tx1_phase_word),
     .freq_word_2(tx1_freq_word),
     .freq_word_3(tx2_freq_word),

@@ -4,15 +4,16 @@ main_window.py
 PyQt5 主窗口 ── 商用锁相放大器风格 GUI
 
 布局 (2x2):
-┌───────────────────────────┬───────────────────────────┐
-│ 通道1 ADC 波形            │ 通道2 ADC 波形            │
-│ F1 = 1234.567 Hz  [🟢锁定]│ F2 = 5678.901 Hz  [🟢锁定]│
-├───────────────────────────┼───────────────────────────┤
-│ 通道3 谐波 (3X+DC)         │ 通道3 ADC 波形            │
-└───────────────────────────┴───────────────────────────┘
+┌────────────────────────────────┬────────────────────────────────┐
+│ 通道1 PLL 锁定频率 F1(t)        │ 通道2 PLL 锁定频率 F2(t)        │
+│ F1 = 1234.567 Hz  [🟢锁定]     │ F2 = 5678.901 Hz  [🟢锁定]     │
+├────────────────────────────────┼────────────────────────────────┤
+│ 通道3 谐波 (3X + DC)           │ 通道3 ADC 输入波形             │
+└────────────────────────────────┴────────────────────────────────┘
 """
 
 import csv
+import math
 import time
 from collections import deque
 
@@ -38,6 +39,47 @@ from device import (
 PLOT_BUF = 1000           # 每条曲线显示点数 (2000 → 1000, 减半绘图压力)
 REFRESH_HZ = 15           # 绘图刷新率 (20 → 15, GUI 不再卡)
 PEN_W = 1.2               # 线宽稍降, 配合关闭抗锯齿后视觉差别极小
+
+# CIC 降采样后 IIR 实际工作的采样率 (Hz). 与 lock_in_amp.v 中
+# cic_compiler_0 的 Fixed_Or_Initial_Rate=65 + 输入 65MHz 一致 → 1 MHz
+IIR_FS_HZ = 1_000_000
+
+TAU_MIN = 0
+TAU_MAX = 31              # shift_k 是 5bit, 硬件支持上限
+
+
+def tau_to_fc_hz(k: int, fs: float = IIR_FS_HZ) -> float:
+    """tau (shift_k) → 一阶 IIR EMA 的 -3dB 截止频率 (Hz).
+    精确公式: cos(ω) = 1 − α²/(2(1−α)),  α = 2^-k,  fc = ω·fs/(2π).
+    """
+    if k <= 0:
+        return float("inf")
+    alpha = 2.0 ** (-k)
+    cos_w = 1.0 - alpha * alpha / (2.0 * (1.0 - alpha))
+    cos_w = max(-1.0, min(1.0, cos_w))
+    return math.acos(cos_w) * fs / (2.0 * math.pi)
+
+
+def tau_to_fc_label(text: str) -> tuple[str, bool]:
+    """根据用户输入的 tau 字符串返回 (显示文本, 是否合法).
+    合法范围: 0 ~ 31 的整数. 0 = 无滤波, 越大截止频率越低.
+    """
+    try:
+        k = int(text.strip())
+    except (ValueError, AttributeError):
+        return ("非法", False)
+    if k < TAU_MIN or k > TAU_MAX:
+        return (f"超范围 ({TAU_MIN}~{TAU_MAX})", False)
+    if k == 0:
+        return ("≈ 全通 (无滤波)", True)
+    fc = tau_to_fc_hz(k)
+    if fc >= 1000:
+        return (f"fc ≈ {fc/1000:7.2f} kHz", True)
+    if fc >= 1:
+        return (f"fc ≈ {fc:7.2f} Hz", True)
+    if fc >= 0.001:
+        return (f"fc ≈ {fc*1000:7.2f} mHz", True)
+    return (f"fc ≈ {fc*1e6:7.2f} µHz", True)
 
 # pyqtgraph 全局 - 关闭抗锯齿 + (可选)启用 OpenGL 硬件加速
 pg.setConfigOption("background", "#1e1e1e")
@@ -160,7 +202,10 @@ class MainWindow(QMainWindow):
         self.dev.connection_changed.connect(self.on_conn_changed)
 
         # 数据缓冲区
+        # FIELD_NAMES 是 80 字节帧的原始字段; 这里再额外存两个派生的 Hz 频率轨迹
         self.buf = {k: deque(maxlen=PLOT_BUF) for k in FIELD_NAMES}
+        self.buf["pll_freq_ch1_hz"] = deque(maxlen=PLOT_BUF)
+        self.buf["pll_freq_ch2_hz"] = deque(maxlen=PLOT_BUF)
         self.t_buf = deque(maxlen=PLOT_BUF)
         self.frame_count = 0
         self._fps_t0 = time.time()
@@ -171,6 +216,7 @@ class MainWindow(QMainWindow):
         self._latest_freq_ch2 = 0.0
         self._latest_locked_ch1 = False
         self._latest_locked_ch2 = False
+        self._last_frame: dict | None = None    # 最近一帧解析结果, 供诊断按钮使用
 
         self.csv_writer = None
         self.csv_file = None
@@ -269,10 +315,25 @@ class MainWindow(QMainWindow):
         self.ed_ki = self._mk_param_row(g_pll, 1, "KI", "50", "KI")
         v.addWidget(gb_pll)
 
-        gb_tau = QGroupBox("IIR 滤波时间常数")
+        gb_tau = QGroupBox(f"IIR 滤波时间常数  (k = {TAU_MIN} ~ {TAU_MAX}, fs = {IIR_FS_HZ/1e6:.0f} MHz)")
+        gb_tau.setToolTip(
+            "k 是 IIR 一阶 EMA 的位移量 (shift_k), 滤波器系数 α = 2^-k.\n"
+            f"采样率 fs = {IIR_FS_HZ/1e6:.0f} MHz (CIC 降采样后).\n"
+            "k 越大 → 截止频率 fc 越低, 滤波越慢, 噪声越小.\n"
+            "k = 0 表示无滤波 (全通), k 范围 0~31."
+        )
         g_tau = QGridLayout(gb_tau)
-        self.ed_tx = self._mk_param_row(g_tau, 0, "TAU_X", "20", "TAUX")
-        self.ed_ty = self._mk_param_row(g_tau, 1, "TAU_Y", "8", "TAUY")
+        self.ed_t1x  = self._mk_tau_row(g_tau, 0,  "CH1_X (PLL)",       "20", "TAU1X")
+        self.ed_t1y  = self._mk_tau_row(g_tau, 1,  "CH1_Y (PLL)",       "8",  "TAU1Y")
+        self.ed_t2x  = self._mk_tau_row(g_tau, 2,  "CH2_X (PLL)",       "20", "TAU2X")
+        self.ed_t2y  = self._mk_tau_row(g_tau, 3,  "CH2_Y (PLL)",       "8",  "TAU2Y")
+        self.ed_t21x = self._mk_tau_row(g_tau, 4,  "2F1+F2 X (谐波)",   "2",  "TAU21X")
+        self.ed_t21y = self._mk_tau_row(g_tau, 5,  "2F1+F2 Y (谐波)",   "2",  "TAU21Y")
+        self.ed_t12x = self._mk_tau_row(g_tau, 6,  "F1+2F2 X (谐波)",   "2",  "TAU12X")
+        self.ed_t12y = self._mk_tau_row(g_tau, 7,  "F1+2F2 Y (谐波)",   "2",  "TAU12Y")
+        self.ed_t11x = self._mk_tau_row(g_tau, 8,  "F1+F2  X (谐波)",   "2",  "TAU11X")
+        self.ed_t11y = self._mk_tau_row(g_tau, 9,  "F1+F2  Y (谐波)",   "2",  "TAU11Y")
+        self.ed_tdc  = self._mk_tau_row(g_tau, 10, "DC (无混频)",       "2",  "TAUDC")
         v.addWidget(gb_tau)
 
         gb_freq = QGroupBox("通道频率扫频起点 (Hz)")
@@ -303,6 +364,12 @@ class MainWindow(QMainWindow):
         btn_send_all.clicked.connect(self.on_send_all_clicked)
         v.addWidget(btn_send_all)
 
+        # 调试: 打印当前帧的全部诊断信息 (用于定位 PLL 是否真锁定 / 解析是否对齐)
+        btn_diag = QPushButton("🔍 打印当前帧诊断")
+        btn_diag.setStyleSheet("background:#356; color:white; padding:5px;")
+        btn_diag.clicked.connect(self.on_diag_clicked)
+        v.addWidget(btn_diag)
+
         v.addWidget(QLabel("日志"))
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -323,6 +390,45 @@ class MainWindow(QMainWindow):
         grid.addWidget(btn, row, 2)
         return ed
 
+    def _mk_tau_row(self, grid, row, label, default, cmd):
+        """专用于 TAU 参数: 比 _mk_param_row 多一个实时 -3dB 截止频率提示标签.
+        布局:  [Label]  [LineEdit]  [fc ≈ XXX Hz]  [▶]
+        """
+        grid.addWidget(QLabel(label), row, 0)
+        ed = QLineEdit(default)
+        ed.setMaximumWidth(60)
+        ed.setToolTip(
+            f"k = {TAU_MIN} ~ {TAU_MAX} 整数.\n"
+            "α = 2^-k, IIR 一阶 EMA 系数.\n"
+            f"fs = {IIR_FS_HZ/1e6:.0f} MHz (CIC 降采样后)."
+        )
+        grid.addWidget(ed, row, 1)
+
+        fc_lbl = QLabel("")
+        fc_lbl.setMinimumWidth(140)
+        fc_lbl.setStyleSheet("color: #4a8; font-family: Consolas, monospace;")
+        grid.addWidget(fc_lbl, row, 2)
+
+        btn = QPushButton("▶")
+        btn.setMaximumWidth(28)
+        btn.clicked.connect(lambda: self._send_int_cmd(cmd, ed.text()))
+        grid.addWidget(btn, row, 3)
+
+        def _refresh_fc():
+            text, ok = tau_to_fc_label(ed.text())
+            fc_lbl.setText(text)
+            if ok:
+                fc_lbl.setStyleSheet(
+                    "color: #4a8; font-family: Consolas, monospace;")
+            else:
+                fc_lbl.setStyleSheet(
+                    "color: #c33; font-family: Consolas, monospace;"
+                    " font-weight: bold;")
+
+        ed.textChanged.connect(_refresh_fc)
+        _refresh_fc()
+        return ed
+
     def _mk_freq_row(self, grid, row, label, default, cmd):
         grid.addWidget(QLabel(label), row, 0)
         ed = QLineEdit(default)
@@ -337,26 +443,73 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- 绘图区
     def _build_plot_area(self) -> QWidget:
         # 4 个独立绘图面板, 每个带自己的 header
-        # 上左: 通道1 ADC 波形 + F1 锁定灯
-        self.panel_ch1 = PlotPanel("通道1 输入波形", freq_label="F1", y_label="ADC")
-        self.curve_adc_ch1 = self.panel_ch1.plot.plot(
-            pen=pg.mkPen("#4af", width=PEN_W), name="adc_ch1")
+        # 上左: 通道1 PLL 锁定频率 F1 随时间变化 + F1 锁定灯
+        self.panel_ch1 = PlotPanel("通道1 PLL 锁定频率 F1(t)", freq_label="F1", y_label="频率 (Hz)")
+        self.curve_freq_ch1 = self.panel_ch1.plot.plot(
+            pen=pg.mkPen("#4af", width=PEN_W), name="f1_hz")
 
-        # 上右: 通道2 ADC 波形 + F2 锁定灯
-        self.panel_ch2 = PlotPanel("通道2 输入波形", freq_label="F2", y_label="ADC")
-        self.curve_adc_ch2 = self.panel_ch2.plot.plot(
-            pen=pg.mkPen("#fa6", width=PEN_W), name="adc_ch2")
+        # 上右: 通道2 PLL 锁定频率 F2 随时间变化 + F2 锁定灯
+        self.panel_ch2 = PlotPanel("通道2 PLL 锁定频率 F2(t)", freq_label="F2", y_label="频率 (Hz)")
+        self.curve_freq_ch2 = self.panel_ch2.plot.plot(
+            pen=pg.mkPen("#fa6", width=PEN_W), name="f2_hz")
 
-        # 下左: 通道3 三谐波 X + DC
-        self.panel_ch3_har = PlotPanel("通道3 谐波 X 分量 + DC", y_label="幅值")
-        self.curve_x_21 = self.panel_ch3_har.plot.plot(
-            pen=pg.mkPen("#5d5", width=PEN_W), name="2F1+F2")
-        self.curve_x_12 = self.panel_ch3_har.plot.plot(
-            pen=pg.mkPen("#f5c", width=PEN_W), name="F1+2F2")
-        self.curve_x_11 = self.panel_ch3_har.plot.plot(
-            pen=pg.mkPen("#fc4", width=PEN_W), name="F1+F2")
-        self.curve_dc = self.panel_ch3_har.plot.plot(
-            pen=pg.mkPen("#fff", width=PEN_W, style=Qt.DashLine), name="DC")
+        # 下左: 通道3 谐波分量 + DC
+        self.panel_ch3_har = PlotPanel("通道3 谐波分量 + DC", y_label="幅值")
+        
+        # 顶部加一个下拉框和值显示区域
+        har_ctrl_layout = QHBoxLayout()
+        har_ctrl_layout.setContentsMargins(10, 0, 10, 0)
+        
+        self.cb_har_select = QComboBox()
+        self.cb_har_select.addItems(["2F1+F2", "F1+2F2", "F1+F2", "DC"])
+        self.cb_har_select.setMinimumWidth(100)
+        self.cb_har_select.currentIndexChanged.connect(self._on_har_select_changed)
+        
+        self.cb_comp_select = QComboBox()
+        self.cb_comp_select.addItems(["X (同相)", "Y (正交)", "R (幅值)", "Θ (相位)"])
+        self.cb_comp_select.setMinimumWidth(80)
+        self.cb_comp_select.currentIndexChanged.connect(self._on_har_select_changed)
+        
+        har_ctrl_layout.addWidget(QLabel("信号:"))
+        har_ctrl_layout.addWidget(self.cb_har_select)
+        har_ctrl_layout.addWidget(QLabel("分量:"))
+        har_ctrl_layout.addWidget(self.cb_comp_select)
+        
+        har_ctrl_layout.addStretch()
+
+        # 把控制栏插入到 panel 的顶部
+        self.panel_ch3_har.layout().insertLayout(1, har_ctrl_layout)
+
+        # ── 实时值显示 (4 路同时显示, 与波形选择无关) ──
+        # 三路谐波: X / Y / R / Θ ;  DC 只有幅值. 电压 mV, 相位保留 3 位小数.
+        VAL_STYLE = ("color:#ddd; background:#1a1a1a; padding:2px 6px;"
+                     " font-family:Consolas, monospace; font-size:9pt;")
+        VAL_DEFAULT = "X: ---.--- mV  Y: ---.--- mV  R: ---.--- mV  Θ: ---.---°"
+
+        self.lbl_har_21 = QLabel(f"2F1+F2 │ {VAL_DEFAULT}")
+        self.lbl_har_12 = QLabel(f"F1+2F2 │ {VAL_DEFAULT}")
+        self.lbl_har_11 = QLabel(f"F1+F2  │ {VAL_DEFAULT}")
+        self.lbl_har_dc = QLabel( "DC     │ ---.--- mV")
+        for lbl in (self.lbl_har_21, self.lbl_har_12,
+                    self.lbl_har_11, self.lbl_har_dc):
+            lbl.setStyleSheet(VAL_STYLE)
+            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        har_val_grid = QGridLayout()
+        har_val_grid.setContentsMargins(10, 0, 10, 2)
+        har_val_grid.setHorizontalSpacing(8)
+        har_val_grid.setVerticalSpacing(1)
+        har_val_grid.addWidget(self.lbl_har_21, 0, 0)
+        har_val_grid.addWidget(self.lbl_har_12, 0, 1)
+        har_val_grid.addWidget(self.lbl_har_11, 1, 0)
+        har_val_grid.addWidget(self.lbl_har_dc, 1, 1)
+        self.panel_ch3_har.layout().insertLayout(2, har_val_grid)
+
+        # 只保留一条曲线用于动态显示 (由下拉框控制画哪一路)
+        self.curve_har = self.panel_ch3_har.plot.plot(
+            pen=pg.mkPen("#5d5", width=PEN_W), name="Harmonic")
+
+        self._on_har_select_changed(0)  # 初始化显示状态
 
         # 下右: 通道3 ADC 波形
         self.panel_ch3_adc = PlotPanel("通道3 输入波形", y_label="ADC")
@@ -437,7 +590,7 @@ class MainWindow(QMainWindow):
             self.btn_record.setEnabled(True)
             self.frame_count = 0
             self._fps_t0 = time.time()
-            for k in FIELD_NAMES:
+            for k in self.buf:
                 self.buf[k].clear()
             self.t_buf.clear()
 
@@ -462,13 +615,127 @@ class MainWindow(QMainWindow):
     def on_send_all_clicked(self):
         self._send_int_cmd("KP", self.ed_kp.text())
         self._send_int_cmd("KI", self.ed_ki.text())
-        self._send_int_cmd("TAUX", self.ed_tx.text())
-        self._send_int_cmd("TAUY", self.ed_ty.text())
+        self._send_int_cmd("TAU1X",  self.ed_t1x.text())
+        self._send_int_cmd("TAU1Y",  self.ed_t1y.text())
+        self._send_int_cmd("TAU2X",  self.ed_t2x.text())
+        self._send_int_cmd("TAU2Y",  self.ed_t2y.text())
+        self._send_int_cmd("TAU21X", self.ed_t21x.text())
+        self._send_int_cmd("TAU21Y", self.ed_t21y.text())
+        self._send_int_cmd("TAU12X", self.ed_t12x.text())
+        self._send_int_cmd("TAU12Y", self.ed_t12y.text())
+        self._send_int_cmd("TAU11X", self.ed_t11x.text())
+        self._send_int_cmd("TAU11Y", self.ed_t11y.text())
+        self._send_int_cmd("TAUDC",  self.ed_tdc.text())
         self._send_int_cmd("PHAS", self.ed_phs.text())
         self._send_freq_cmd("FRQ2", self.ed_f1.text())
         self._send_freq_cmd("FRQ3", self.ed_f2.text())
         self._send_int_cmd("LOCKSWY", self.ed_swy.text())
         self._send_int_cmd("LOCKTHX", self.ed_thx.text())
+
+    def on_diag_clicked(self):
+        """点击 [打印当前帧诊断] 按钮: 把最近一帧的全部解析结果 dump 到日志,
+        用于定位 PLL 是否真锁定, 以及解析是否对齐."""
+        d = self._last_frame
+        if d is None:
+            self.on_log("[!] 还没收到任何数据帧, 先 [开始数据流] 再点诊断")
+            return
+        # 计算最近 N 帧的频率统计 (锁定后越稳越好)
+        N = 50
+        f1_buf = list(self.buf["pll_freq_ch1_hz"])[-N:]
+        f2_buf = list(self.buf["pll_freq_ch2_hz"])[-N:]
+        import statistics
+        def stat(buf):
+            if len(buf) < 2:
+                return ("--", "--")
+            return (f"{statistics.mean(buf):.3f}",
+                    f"{statistics.stdev(buf):.3f}")
+        f1_mean, f1_std = stat(f1_buf)
+        f2_mean, f2_std = stat(f2_buf)
+
+        lines = [
+            "─" * 56,
+            f"[诊断] 帧序号 {self.frame_count}",
+            "─── 锁定状态 ────────────────────────────",
+            f"  ch1 LOCKED = {d['locked_ch1']}    ch2 LOCKED = {d['locked_ch2']}",
+            f"  lock_flags raw = 0b{d['lock_flags']:02b}",
+            "─── PLL 频率字 (raw 48-bit) ─────────────",
+            f"  ch1 word = {d['pll_freq_ch1_word']:>15d}  → {d['pll_freq_ch1_hz']:.3f} Hz",
+            f"  ch2 word = {d['pll_freq_ch2_word']:>15d}  → {d['pll_freq_ch2_hz']:.3f} Hz",
+            f"  最近 {len(f1_buf)} 帧 F1 均值={f1_mean} Hz, σ={f1_std} Hz   (σ大=没锁/PI抖)",
+            f"  最近 {len(f2_buf)} 帧 F2 均值={f2_mean} Hz, σ={f2_std} Hz",
+            "─── 锁相 X/Y (28-bit, 锁定时 |X| 大, |Y|→0) ─",
+            f"  ch1: X = {d['ch1_x']:>+12d}    Y = {d['ch1_y']:>+12d}",
+            f"  ch2: X = {d['ch2_x']:>+12d}    Y = {d['ch2_y']:>+12d}",
+            "─── ADC 原始 (锁定时应有相干信号) ────────",
+            f"  adc_ch1 = {d['adc_ch1']:>+8d}   adc_ch2 = {d['adc_ch2']:>+8d}   adc_ch3 = {d['adc_ch3']:>+8d}",
+            "─── 判读 ─────────────────────────────────",
+        ]
+        # 自动判读
+        verdict = []
+        if not d['locked_ch1']:
+            verdict.append("  ✗ ch1 未锁定 → 看 |Y| 是否大 (找信号失败) 或 |X| 是否小 (信号弱)")
+        else:
+            try:
+                std1 = float(f1_std)
+                if std1 > 5.0:
+                    verdict.append(f"  ⚠ ch1 已锁定但 σ={std1:.2f}Hz 偏大, PI 可能轻微振荡 (减小 KI)")
+                elif std1 > 1.0:
+                    verdict.append(f"  ✓ ch1 锁定, σ={std1:.2f}Hz, 正常")
+                else:
+                    verdict.append(f"  ✓ ch1 锁定稳定, σ={std1:.2f}Hz")
+            except ValueError:
+                pass
+        if abs(d['ch1_y']) > abs(d['ch1_x']):
+            verdict.append("  ⚠ |Y|>|X| 异常: 还在拍频中, PLL 没真锁 (PI 没拉动?)")
+        if d['locked_ch1'] and abs(d['ch1_x']) < 100_000:
+            verdict.append(f"  ⚠ 已锁定但 |X|={abs(d['ch1_x'])} < 100K, 接近噪声本底, 容易掉锁")
+        lines += verdict if verdict else ["  (无明显异常)"]
+        lines.append("─" * 56)
+        for ln in lines:
+            self.on_log(ln)
+
+    def _on_har_select_changed(self, index):
+        """下拉框 (信号 / 分量) 切换时立即重绘一次, 否则要等下一个
+        定时器周期 (~67 ms). 实时数值显示是 4 路同显, 与下拉框无关.
+        """
+        self.refresh_plots()
+
+    # 谐波 X/Y 数据键名映射 (顺序与 lbl_har_21/12/11 对应)
+    _HAR_KEYS = (
+        ("2F1+F2", "ch3_x_21", "ch3_y_21"),
+        ("F1+2F2", "ch3_x_12", "ch3_y_12"),
+        ("F1+F2 ", "ch3_x_11", "ch3_y_11"),
+    )
+
+    def _update_har_text(self, *_):
+        """每一帧把 4 路 (3 谐波 + DC) 的实时值全部刷新.
+        与下拉框选择无关 (下拉框只控制波形画哪一路).
+        电压单位 mV, 相位保留 3 位小数.
+        """
+        d = self._last_frame
+        if d is None:
+            return
+
+        # 1 LSB = 1 V / 2^24 = 0.0596 µV  →  转为 mV 系数
+        MV_PER_LSB = 1000.0 / (1 << 24)
+
+        # 3 路谐波: 各自显示 X / Y / R / Θ
+        for lbl, (name, kx, ky) in zip(
+            (self.lbl_har_21, self.lbl_har_12, self.lbl_har_11),
+            self._HAR_KEYS,
+        ):
+            x_mv = d.get(kx, 0) * MV_PER_LSB
+            y_mv = d.get(ky, 0) * MV_PER_LSB
+            r_mv = math.sqrt(x_mv * x_mv + y_mv * y_mv)
+            theta_deg = math.degrees(math.atan2(y_mv, x_mv))
+            lbl.setText(
+                f"{name} │ X: {x_mv:>+10.3f} mV  Y: {y_mv:>+10.3f} mV  "
+                f"R: {r_mv:>10.3f} mV  Θ: {theta_deg:>+8.3f}°"
+            )
+
+        # DC: 只有幅值
+        dc_mv = d.get("ch3_dc", 0) * MV_PER_LSB
+        self.lbl_har_dc.setText(f"DC     │ {dc_mv:>+10.3f} mV   (无 Y/Θ)")
 
     # ============================================================ 数据接收
     def on_frame(self, data: dict):
@@ -482,6 +749,17 @@ class MainWindow(QMainWindow):
         self._latest_freq_ch2 = data.get("pll_freq_ch2_hz", 0.0)
         self._latest_locked_ch1 = data.get("locked_ch1", False)
         self._latest_locked_ch2 = data.get("locked_ch2", False)
+
+        # 保存最近一帧 (供 "打印当前帧诊断" 按钮使用)
+        self._last_frame = data
+        
+        # 更新 4 路谐波/DC 实时文本 (与下拉框选择无关, 全部同时刷新)
+        if hasattr(self, 'lbl_har_dc'):
+            self._update_har_text()
+
+        # 派生频率轨迹也存进缓冲, 用于上行两个频率曲线
+        self.buf["pll_freq_ch1_hz"].append(self._latest_freq_ch1)
+        self.buf["pll_freq_ch2_hz"].append(self._latest_freq_ch2)
 
         if self.csv_writer:
             try:
@@ -497,19 +775,52 @@ class MainWindow(QMainWindow):
         t = np.array(self.t_buf)
         t = t - t[-1]   # 显示成"距离最新一帧多久"
 
-        # 上行 ADC 波形
-        self.curve_adc_ch1.setData(t, np.array(self.buf["adc_ch1"]))
-        self.curve_adc_ch2.setData(t, np.array(self.buf["adc_ch2"]))
+        # 上行: PLL 锁定频率随时间变化 (取代原 ADC 原始波形)
+        self.curve_freq_ch1.setData(t, np.array(self.buf["pll_freq_ch1_hz"]))
+        self.curve_freq_ch2.setData(t, np.array(self.buf["pll_freq_ch2_hz"]))
 
         # 上行 header 频率/锁定灯
         self.panel_ch1.header.update(self._latest_freq_ch1, self._latest_locked_ch1)
         self.panel_ch2.header.update(self._latest_freq_ch2, self._latest_locked_ch2)
 
-        # 下左: 通道3 谐波 X + DC
-        self.curve_x_21.setData(t, np.array(self.buf["ch3_x_21"]))
-        self.curve_x_12.setData(t, np.array(self.buf["ch3_x_12"]))
-        self.curve_x_11.setData(t, np.array(self.buf["ch3_x_11"]))
-        self.curve_dc.setData(t, np.array(self.buf["ch3_dc"]))
+        # 下左: 通道3 谐波动态显示
+        har_idx = self.cb_har_select.currentIndex()
+        comp_idx = self.cb_comp_select.currentIndex()
+
+        if har_idx == 0:
+            arr_x = np.array(self.buf["ch3_x_21"])
+            arr_y = np.array(self.buf["ch3_y_21"])
+        elif har_idx == 1:
+            arr_x = np.array(self.buf["ch3_x_12"])
+            arr_y = np.array(self.buf["ch3_y_12"])
+        elif har_idx == 2:
+            arr_x = np.array(self.buf["ch3_x_11"])
+            arr_y = np.array(self.buf["ch3_y_11"])
+        else: # DC
+            arr_x = np.array(self.buf["ch3_dc"])
+            arr_y = np.zeros_like(arr_x)
+
+        # 电压换算系数 (需要根据实际硬件标定, 这里暂定一个比例)
+        # 假设 ADC 满量程是 1V, 14bit. 经过混频和 CIC 放大后, 需要一个系数转回电压
+        VOLT_PER_LSB = 1.0 / (1 << 24) 
+
+        arr_x_v = arr_x * VOLT_PER_LSB
+        arr_y_v = arr_y * VOLT_PER_LSB
+
+        if comp_idx == 0:   # X
+            y_data = arr_x_v
+            self.panel_ch3_har.plot.setLabel("left", "电压 (V)")
+        elif comp_idx == 1: # Y
+            y_data = arr_y_v
+            self.panel_ch3_har.plot.setLabel("left", "电压 (V)")
+        elif comp_idx == 2: # R
+            y_data = np.sqrt(arr_x_v**2 + arr_y_v**2)
+            self.panel_ch3_har.plot.setLabel("left", "幅值 (V)")
+        else:               # Θ
+            y_data = np.degrees(np.arctan2(arr_y_v, arr_x_v))
+            self.panel_ch3_har.plot.setLabel("left", "相位 (°)")
+
+        self.curve_har.setData(t, y_data)
 
         # 下右: 通道3 ADC 波形
         self.curve_adc_ch3.setData(t, np.array(self.buf["adc_ch3"]))

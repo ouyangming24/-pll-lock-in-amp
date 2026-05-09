@@ -1,35 +1,35 @@
 `timescale 1ns / 1ps
 // =============================================================================
-//  usb_commend.v  (原 uart_commend.v 改名而来)
+//  usb_commend.v  (???uart_commend.v ????????)
 //
-//  字节流级指令/数据协议解析器。
-//  本模块 *不* 关心物理层, 只处理字节流:
-//      - 输入: rec_data[7:0] + rec_done 脉冲  (每到一字节)
-//      - 输出: send_en / send_data[7:0]       (等 tx_done 脉冲确认)
+//  ???????????/????????????????
+//  ??????*?? ???????????? ???????????:
+//      - ?????: rec_data[7:0] + rec_done ??????  (???????????)
+//      - ?????: send_en / send_data[7:0]       (??tx_done ????????)
 //
-//  因此它对 UART / FT245BL USB-FIFO 都适用。当前工程通过 ft245_rx/ft245_tx
-//  对接 FT245BL 芯片, 本模块保留对外纯字节流接口, 未来替换物理层无需修改。
+//  ??????? UART / FT245BL USB-FIFO ????????????????????????? ft245_rx/ft245_tx
+//  ???? FT245BL ??????, ????????????????????????? ????????????????????????????
 //
-//  支持的指令 (ASCII, 以 \r\n 或 \n 结尾):
-//      FREQ:<十进制>     中心频率 (48bit 频率字)
-//      KP:<十进制>       PLL 比例系数 (16bit)
-//      KI:<十进制>       PLL 积分系数 (16bit)
-//      TAUX:<十进制>     X 路 IIR 平滑系数 (5bit)
-//      TAUY:<十进制>     Y 路 IIR 平滑系数 (5bit)
-//      PHAS:<十进制>     tx1 相位偏移 (48bit)
-//      FRQ2:<十进制>     tx1 频率字 (48bit)
-//      FRQ3:<十进制>     tx2 频率字 (48bit)
-//      LOCKSWY:<十进制>  ★ PLL 锁定: Y 通道捕捉阈值 (28bit, 进 LOCK 门槛)
-//      LOCKTHX:<十进制>  ★ PLL 锁定: X 通道维持阈值 (28bit, 退出 LOCK 门槛)
-//      XYOUT             开启数据帧周期性回传
-//      stop              关闭数据帧回传
+//  ??????????????(ASCII, ??\r\n ???\n ???):
+//      FREQ:<??????     ???????? (48bit ???????
+//      KP:<??????       PLL ???????? (16bit)
+//      KI:<??????       PLL ???????? (16bit)
+//      TAUX:<??????     X ??IIR ??????? (5bit)
+//      TAUY:<??????     Y ??IIR ??????? (5bit)
+//      PHAS:<??????     tx1 ?????? (48bit)
+//      FRQ2:<??????     tx1 ???????(48bit)
+//      FRQ3:<??????     tx2 ???????(48bit)
+//      LOCKSWY:<??????  ???PLL ?????: Y ???????????????(28bit, ??LOCK ?????)
+//      LOCKTHX:<??????  ???PLL ?????: X ???????????????(28bit, ??????LOCK ?????)
+//      XYOUT             ??????????????????????
+//      stop              ????????????????
 //
-//  回传数据帧 (80 字节 / 640 bit, 大端):
-//      [0..3]    0xA5_5A_A5_5A             同步头
-//      [4..47]   11 × int32 (通道1/2/3 的各路 X/Y/DC)
-//      [48..59]  3 × int32  (原始 ADC 采样 ch1/ch2/ch3)
-//      [60..75]  2 × uint64 (PLL 锁定频率字 ch1/ch2)
-//      [76..79]  1 × int32  (lock_flags: bit0=ch1, bit1=ch2)
+//  ??????????(80 ????? / 640 bit, ??):
+//      [0..3]    0xA5_5A_A5_5A             ?????
+//      [4..47]   11 ?? int32 (?????1/2/3 ???????X/Y/DC)
+//      [48..59]  3 ?? int32  (????? ADC ???? ch1/ch2/ch3)
+//      [60..75]  2 ?? uint64 (PLL ????????????ch1/ch2)
+//      [76..79]  1 ?? int32  (lock_flags: bit0=ch1, bit1=ch2)
 // =============================================================================
 module usb_commend(
     input wire clk,
@@ -37,18 +37,27 @@ module usb_commend(
     input wire [7:0] rec_data,
     input wire rec_done,
     input wire tx_done,
-    input wire [639:0] x_y_fir,    // 80字节完整回传帧
+    input wire [639:0] x_y_fir,    // 80????????????????
     input wire m_axis_data_tvalid_fir_x,
     output reg [47:0] center_freq,
     output reg [15:0] pll_kp,
     output reg [15:0] pll_ki,
-    output reg [4:0]  tau_x,
-    output reg [4:0]  tau_y,
+    output reg [4:0]  tau1_x,
+    output reg [4:0]  tau1_y,
+    output reg [4:0]  tau2_x,
+    output reg [4:0]  tau2_y,
+    output reg [4:0]  tau21_x,
+    output reg [4:0]  tau21_y,
+    output reg [4:0]  tau12_x,
+    output reg [4:0]  tau12_y,
+    output reg [4:0]  tau11_x,
+    output reg [4:0]  tau11_y,
+    output reg [4:0]  tau_dc,
     output reg [47:0] phase_offset,
     output reg [47:0] freq_word_2,
     output reg [47:0] freq_word_3,
-    output reg signed [27:0] sweep_thres,    // ★ PLL Y 进 LOCK 门槛 (LOCKSWY)
-    output reg signed [27:0] lock_x_thres,   // ★ PLL X 维持 LOCK 门槛 (LOCKTHX)
+    output reg signed [27:0] sweep_thres,    // ???PLL Y ??LOCK ????? (LOCKSWY)
+    output reg signed [27:0] lock_x_thres,   // ???PLL X ???? LOCK ????? (LOCKTHX)
     output reg send_en,
     output reg [7:0] send_data
 );
@@ -65,29 +74,40 @@ module usb_commend(
     parameter CMD_FREQ    = 4'd1;
     parameter CMD_KP      = 4'd2;
     parameter CMD_KI      = 4'd3;
-    parameter CMD_TAUX    = 4'd4;
-    parameter CMD_TAUY    = 4'd5;
+    // parameter CMD_TAUX    = 4'd4; // ????
+    // parameter CMD_TAUY    = 4'd5; // ????
     parameter CMD_PHAS    = 4'd6;
     parameter CMD_XYOUT   = 4'd7;
     parameter CMD_STOP    = 4'd8;
     parameter CMD_FRQ2    = 4'd9;
     parameter CMD_FRQ3    = 4'd10;
-    parameter CMD_LOCKSWY = 4'd11;   // ★ Y 通道捕捉阈值 (SWEEP_THRES)
-    parameter CMD_LOCKTHX = 4'd12;   // ★ X 通道维持阈值 (LOCK_X_THRES)
+    parameter CMD_LOCKSWY = 4'd11;   // ???Y ???????????????(SWEEP_THRES)
+    parameter CMD_LOCKTHX = 4'd12;   // ???X ???????????????(LOCK_X_THRES)
+    parameter CMD_TAU1X   = 5'd13;
+    parameter CMD_TAU1Y   = 5'd14;
+    parameter CMD_TAU2X   = 5'd15;
+    parameter CMD_TAU2Y   = 5'd16;
+    parameter CMD_TAU21X  = 5'd17;   // ch3 @ 2F1+F2  X ? IIR
+    parameter CMD_TAU21Y  = 5'd18;   // ch3 @ 2F1+F2  Y ? IIR
+    parameter CMD_TAU12X  = 5'd19;   // ch3 @ F1+2F2  X ? IIR
+    parameter CMD_TAU12Y  = 5'd20;   // ch3 @ F1+2F2  Y ? IIR
+    parameter CMD_TAU11X  = 5'd21;   // ch3 @ F1+F2   X ? IIR
+    parameter CMD_TAU11Y  = 5'd22;   // ch3 @ F1+F2   Y ? IIR
+    parameter CMD_TAUDC   = 5'd23;   // ch3 DC ?? IIR (???)
 
     reg [2:0] curr_state;
-    reg [3:0] cmd_type;
+    reg [4:0] cmd_type;  // ??????????5 bit
     reg [7:0] cmd_buffer[0:9];
     reg [3:0] cmd_cnt;
     reg [47:0] value_buffer;
 
     reg xy_data_enable;
     reg [7:0] byte_cnt;
-    reg [639:0] xy_data_reg;       // 80 字节帧缓存
+    reg [639:0] xy_data_reg;       // 80 ??????????
     reg new_data_ready;
     reg data_sending;
 
-    // 帧长度 (字节), 随 x_y_fir 宽度一起调整
+    // ??????(?????), ???x_y_fir ??????????
     localparam [7:0] FRAME_BYTES = 8'd80;
 
     reg [31:0] delay_cnt;
@@ -142,7 +162,7 @@ module usb_commend(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             curr_state <= IDLE;
-            cmd_type <= 4'd0;
+            cmd_type <= 5'd0;
             cmd_cnt <= 4'd0;
             value_buffer <= 48'd0;        
             msg_cnt <= 5'd0;
@@ -151,13 +171,22 @@ module usb_commend(
             center_freq <= 48'd433038425708;
             pll_kp <= 16'd500;
             pll_ki <= 16'd50;
-            tau_x <= 5'd20;
-            tau_y <= 5'd8;
+            tau1_x <= 5'd20;
+            tau1_y <= 5'd8;
+            tau2_x <= 5'd20;
+            tau2_y <= 5'd8;
+            tau21_x <= 5'd2;
+            tau21_y <= 5'd2;
+            tau12_x <= 5'd2;
+            tau12_y <= 5'd2;
+            tau11_x <= 5'd2;
+            tau11_y <= 5'd2;
+            tau_dc  <= 5'd2;
             phase_offset <= 48'd0;
             freq_word_2 <= 48'd433038425708 + 48'd433038425;
-            // ★ PLL 锁定阈值默认值 (折中, 适合大多数实验工况)
-            sweep_thres  <= 28'd100_000;   // |dc_y| > 100K → 进 LOCK
-            lock_x_thres <= 28'd300_000;   // LOCK 期间 |dc_x| 须 > 300K 维持
+            // ???PLL ?????????????????(????, ???????????????????
+            sweep_thres  <= 28'd100_000;   // |dc_y| > 100K ?????LOCK
+            lock_x_thres <= 28'd300_000;   // LOCK ?????? |dc_x| ??> 300K ????
 
             send_en <= 1'b0;
             send_data <= 8'd0;
@@ -214,18 +243,9 @@ module usb_commend(
                             end
                         end
                         else if (cmd_cnt == 4'd4) begin
+                            // 5 ????: FREQ: PHAS: FRQ2: FRQ3: XYOUT
                             if (cmd_buffer[0] == "F" && cmd_buffer[1] == "R" && cmd_buffer[2] == "E" && cmd_buffer[3] == "Q" && rec_data == ":") begin
                                 cmd_type <= CMD_FREQ;
-                                value_buffer <= 48'd0;
-                                curr_state <= REC_DATA;
-                            end
-                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "X" && rec_data == ":") begin
-                                cmd_type <= CMD_TAUX;
-                                value_buffer <= 48'd0;
-                                curr_state <= REC_DATA;
-                            end
-                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "Y" && rec_data == ":") begin
-                                cmd_type <= CMD_TAUY;
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
@@ -255,8 +275,81 @@ module usb_commend(
                                 cmd_cnt <= cmd_cnt + 1'b1;
                             end
                         end
+                        else if (cmd_cnt == 4'd5) begin
+                            // 6 ????: TAU1X: TAU1Y: TAU2X: TAU2Y: TAUDC:
+                            if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "1" && cmd_buffer[4] == "X" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU1X;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "1" && cmd_buffer[4] == "Y" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU1Y;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "2" && cmd_buffer[4] == "X" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU2X;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "2" && cmd_buffer[4] == "Y" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU2Y;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "D" && cmd_buffer[4] == "C" && rec_data == ":") begin
+                                cmd_type <= CMD_TAUDC;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else begin
+                                cmd_cnt <= cmd_cnt + 1'b1;
+                            end
+                        end
+                        else if (cmd_cnt == 4'd6) begin
+                            // 7 ????: TAU21X: TAU21Y: TAU12X: TAU12Y: TAU11X: TAU11Y:
+                            if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U"
+                             && cmd_buffer[3] == "2" && cmd_buffer[4] == "1" && cmd_buffer[5] == "X" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU21X;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U"
+                                  && cmd_buffer[3] == "2" && cmd_buffer[4] == "1" && cmd_buffer[5] == "Y" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU21Y;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U"
+                                  && cmd_buffer[3] == "1" && cmd_buffer[4] == "2" && cmd_buffer[5] == "X" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU12X;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U"
+                                  && cmd_buffer[3] == "1" && cmd_buffer[4] == "2" && cmd_buffer[5] == "Y" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU12Y;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U"
+                                  && cmd_buffer[3] == "1" && cmd_buffer[4] == "1" && cmd_buffer[5] == "X" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU11X;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U"
+                                  && cmd_buffer[3] == "1" && cmd_buffer[4] == "1" && cmd_buffer[5] == "Y" && rec_data == ":") begin
+                                cmd_type <= CMD_TAU11Y;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else begin
+                                cmd_cnt <= cmd_cnt + 1'b1;
+                            end
+                        end
                         else if (cmd_cnt == 4'd7) begin
-                            // 8 字节命令: LOCKSWY: / LOCKTHX:
+                            // 8 ?????????: LOCKSWY: / LOCKTHX:
                             if (cmd_buffer[0] == "L" && cmd_buffer[1] == "O" && cmd_buffer[2] == "C" && cmd_buffer[3] == "K"
                              && cmd_buffer[4] == "S" && cmd_buffer[5] == "W" && cmd_buffer[6] == "Y" && rec_data == ":") begin
                                 cmd_type <= CMD_LOCKSWY;
@@ -274,13 +367,13 @@ module usb_commend(
                             end
                         end
                         else if (rec_data == "\r" || rec_data == "\n") begin
-                            cmd_type <= 4'd0;
+                            cmd_type <= 5'd0;
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;
                             msg_len <= 5'd16;  
                         end
                         else if (cmd_cnt >= 4'd8) begin
-                            cmd_type <= 4'd0;
+                            cmd_type <= 5'd0;
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;
                             msg_len <= 5'd16;  
@@ -306,11 +399,38 @@ module usb_commend(
                             else if (cmd_type == CMD_KI) begin
                                 pll_ki <= value_buffer[15:0];
                             end
-                            else if (cmd_type == CMD_TAUX) begin
-                                tau_x <= value_buffer[4:0];
+                            else if (cmd_type == CMD_TAU1X) begin
+                                tau1_x <= value_buffer[4:0];
                             end
-                            else if (cmd_type == CMD_TAUY) begin
-                                tau_y <= value_buffer[4:0];
+                            else if (cmd_type == CMD_TAU1Y) begin
+                                tau1_y <= value_buffer[4:0];
+                            end
+                            else if (cmd_type == CMD_TAU2X) begin
+                                tau2_x <= value_buffer[4:0];
+                            end
+                            else if (cmd_type == CMD_TAU2Y) begin
+                                tau2_y <= value_buffer[4:0];
+                            end
+                            else if (cmd_type == CMD_TAU21X) begin
+                                tau21_x <= value_buffer[4:0];
+                            end
+                            else if (cmd_type == CMD_TAU21Y) begin
+                                tau21_y <= value_buffer[4:0];
+                            end
+                            else if (cmd_type == CMD_TAU12X) begin
+                                tau12_x <= value_buffer[4:0];
+                            end
+                            else if (cmd_type == CMD_TAU12Y) begin
+                                tau12_y <= value_buffer[4:0];
+                            end
+                            else if (cmd_type == CMD_TAU11X) begin
+                                tau11_x <= value_buffer[4:0];
+                            end
+                            else if (cmd_type == CMD_TAU11Y) begin
+                                tau11_y <= value_buffer[4:0];
+                            end
+                            else if (cmd_type == CMD_TAUDC) begin
+                                tau_dc <= value_buffer[4:0];
                             end
                             else if (cmd_type == CMD_PHAS) begin
                                 phase_offset <= value_buffer;
@@ -357,7 +477,7 @@ module usb_commend(
                         else begin
                             curr_state <= IDLE;
                             cmd_cnt <= 4'd0;
-                            cmd_type <= 4'd0;
+                            cmd_type <= 5'd0;
                             value_buffer <= 48'd0;    
                         end
                     end
@@ -380,7 +500,7 @@ module usb_commend(
                     else if (!send_en && !tx_done) begin
                         send_en <= 1'b1;
                         data_sending <= 1'b1;
-                        // byte_cnt = 0 -> 最高字节 (同步头 0xA5) 先发
+                        // byte_cnt = 0 -> ??????????(?????0xA5) ?????
                         send_data <= xy_data_reg[639-byte_cnt*8 -: 8];
                         curr_state <= WAIT_XYDATA;
                     end
