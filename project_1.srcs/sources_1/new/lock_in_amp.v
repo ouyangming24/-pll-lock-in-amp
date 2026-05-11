@@ -85,18 +85,27 @@ wire [4:0]  tau1_x_uart;
 wire [4:0]  tau1_y_uart;
 wire [4:0]  tau2_x_uart;
 wire [4:0]  tau2_y_uart;
-// ch3 谐波/DC 各自独立的 IIR 时间常数
-wire [4:0]  tau21_x_uart;   // ch3 @ 2F1+F2  X 路
-wire [4:0]  tau21_y_uart;   // ch3 @ 2F1+F2  Y 路
-wire [4:0]  tau12_x_uart;   // ch3 @ F1+2F2  X 路
-wire [4:0]  tau12_y_uart;   // ch3 @ F1+2F2  Y 路
-wire [4:0]  tau11_x_uart;   // ch3 @ F1+F2   X 路
-wire [4:0]  tau11_y_uart;   // ch3 @ F1+F2   Y 路
+// ch3 谐波/DC IIR 时间常数 (X/Y 共用, 与商用 SR830 等保持一致)
+wire [4:0]  tau21_uart;     // ch3 @ 2F1+F2
+wire [4:0]  tau12_uart;     // ch3 @ F1+2F2
+wire [4:0]  tau11_uart;     // ch3 @ F1+F2
 wire [4:0]  tau_dc_uart;    // ch3 DC 通路
 wire [47:0] tx1_phase_word;
 wire [47:0] tx1_freq_word;
 wire [47:0] tx2_phase_word = 48'd0;
 wire [47:0] tx2_freq_word;
+// ★ 通道3 三路 lockin_psd 的 ref_freq (由 USB 命令 FRQ21/FRQ12/FRQ11 动态下发)
+//   PLL 注释期间手动给定, 后续 PLL 恢复后可改回 pll_freq_ch1/ch2 运算
+wire [47:0] freq_word_21_uart;   // ch3 @ 2F1+F2
+wire [47:0] freq_word_12_uart;   // ch3 @ F1+2F2
+wire [47:0] freq_word_11_uart;   // ch3 @ F1+F2
+// ★ 通道3 ref_freq 来源选择信号 (REFMODE 命令: 0=手动 / 1=PLL 硬件自动)
+wire        ref_freq_auto_uart;
+// ★ 通道3 4 路 IIR 阶数 (各路独立, ORD21/ORD12/ORD11/ORDDC 命令: 1..4)
+wire [2:0]  order21_uart;       // ch3 @ 2F1+F2  PSD
+wire [2:0]  order12_uart;       // ch3 @ F1+2F2  PSD
+wire [2:0]  order11_uart;       // ch3 @ F1+F2   PSD
+wire [2:0]  order_dc_uart;      // ch3 DC 通路   IIR
 // ★ PLL 锁定阈值 (由 USB 命令 LOCKSWY/LOCKTHX 动态下发)
 wire signed [27:0] sweep_thres_uart;
 wire signed [27:0] lock_x_thres_uart;
@@ -135,124 +144,156 @@ ad_wave_rec u_ad_wave_rec_2 (
 // =========================================================================
 wire [47:0]         pll_freq_ch1;
 wire signed [27:0]  dc_x_ch1, dc_y_ch1;
-wire                cic_valid_x_ch1, cic_valid_y_ch1;
-wire                dc_valid_x_ch1,  dc_valid_y_ch1;
+// wire                cic_valid_x_ch1, cic_valid_y_ch1;
+// wire                dc_valid_x_ch1,  dc_valid_y_ch1;
 wire                is_locked_ch1;
 
-// ★★★ 锁定阈值现在由上位机运行时下发, 不再是综合时常量 ★★★
-//   命令: LOCKSWY:<n>  → sweep_thres  (Y 进 LOCK 门槛)
-//        LOCKTHX:<n>  → lock_x_thres (X 维持 LOCK 门槛)
-//   默认值在 usb_commend.v 复位时设为 100_000 / 300_000 (折中)
-//
-//   28 bit signed 信号在 14×14 混频 + CIC + IIR 后, 满量程量级 ≈ ±30 M.
-//   ADC 噪声本底 ~800 K (取决于环境). 调参参考:
-//     - 信号强 (≥ 25% 满量程) → SWEEP=800K, LOCK=3M
-//     - 信号弱 (< 5% 满量程)  → SWEEP=20K,  LOCK=50K
-//     - 不知道 / 中等          → SWEEP=100K, LOCK=300K (默认)
-pll_loop #(
-    .KI_FRAC      (16),
-    .IN_WIDTH     (28)
-) u_pll_ch1 (
-    .clk          (clk_65M),
-    .rst_n        (sys_rst_n),
-    .pll_en       (pll_en),
-    .adc_in       (adc_ch1),
-    .center_freq  (tx1_freq_word),
-    .pll_kp       (pll_kp),
-    .pll_ki       (pll_ki),
-    .tau_x        (tau1_x_uart),
-    .tau_y        (tau1_y_uart),
-    .sweep_thres  (sweep_thres_uart),
-    .lock_x_thres (lock_x_thres_uart),
-    .dds_freq_out (pll_freq_ch1),
-    .dc_x         (dc_x_ch1),
-    .dc_y         (dc_y_ch1),
-    .cic_valid_x  (cic_valid_x_ch1),
-    .cic_valid_y  (cic_valid_y_ch1),
-    .dc_valid_x   (dc_valid_x_ch1),
-    .dc_valid_y   (dc_valid_y_ch1),
-    .is_locked    (is_locked_ch1)
-);
+// // ★★★ 锁定阈值现在由上位机运行时下发, 不再是综合时常量 ★★★
+// //   命令: LOCKSWY:<n>  → sweep_thres  (Y 进 LOCK 门槛)
+// //        LOCKTHX:<n>  → lock_x_thres (X 维持 LOCK 门槛)
+// //   默认值在 usb_commend.v 复位时设为 100_000 / 300_000 (折中)
+// //
+// //   28 bit signed 信号在 14×14 混频 + CIC + IIR 后, 满量程量级 ≈ ±30 M.
+// //   ADC 噪声本底 ~800 K (取决于环境). 调参参考:
+// //     - 信号强 (≥ 25% 满量程) → SWEEP=800K, LOCK=3M
+// //     - 信号弱 (< 5% 满量程)  → SWEEP=20K,  LOCK=50K
+// //     - 不知道 / 中等          → SWEEP=100K, LOCK=300K (默认)
+// pll_loop #(
+//     .KI_FRAC      (16),
+//     .IN_WIDTH     (28)
+// ) u_pll_ch1 (
+//     .clk          (clk_65M),
+//     .rst_n        (sys_rst_n),
+//     .pll_en       (pll_en),
+//     .adc_in       (adc_ch1),
+//     .center_freq  (tx1_freq_word),
+//     .pll_kp       (pll_kp),
+//     .pll_ki       (pll_ki),
+//     .tau_x        (tau1_x_uart),
+//     .tau_y        (tau1_y_uart),
+//     .sweep_thres  (sweep_thres_uart),
+//     .lock_x_thres (lock_x_thres_uart),
+//     .dds_freq_out (pll_freq_ch1),
+//     .dc_x         (dc_x_ch1),
+//     .dc_y         (dc_y_ch1),
+//     .cic_valid_x  (cic_valid_x_ch1),
+//     .cic_valid_y  (cic_valid_y_ch1),
+//     .dc_valid_x   (dc_valid_x_ch1),
+//     .dc_valid_y   (dc_valid_y_ch1),
+//     .is_locked    (is_locked_ch1)
+// );
 
 
-// =========================================================================
-// ★ 通道2: 锁相环 (闭环 PLL)  —— ★ 跟踪 adc_ch2 → 输出 F2 = pll_freq_ch2
-// =========================================================================
+// // =========================================================================
+// // ★ 通道2: 锁相环 (闭环 PLL)  —— ★ 跟踪 adc_ch2 → 输出 F2 = pll_freq_ch2
+// // =========================================================================
 wire [47:0]         pll_freq_ch2;
 wire signed [27:0]  dc_x_ch2, dc_y_ch2;
-wire                cic_valid_x_ch2, cic_valid_y_ch2;
-wire                dc_valid_x_ch2,  dc_valid_y_ch2;
+// wire                cic_valid_x_ch2, cic_valid_y_ch2;
+// wire                dc_valid_x_ch2,  dc_valid_y_ch2;
 wire                is_locked_ch2;
 
-pll_loop #(
-    .KI_FRAC      (16),
-    .IN_WIDTH     (28)
-) u_pll_ch2 (
-    .clk          (clk_65M),
-    .rst_n        (sys_rst_n),
-    .pll_en       (pll_en),
-    .adc_in       (adc_ch2),
-    .center_freq  (tx2_freq_word),     // 扫频起点 (FRQ3 指令设置)
-    .pll_kp       (pll_kp),
-    .pll_ki       (pll_ki),
-    .tau_x        (tau2_x_uart),
-    .tau_y        (tau2_y_uart),
-    .sweep_thres  (sweep_thres_uart),    // ★ 两通道共用阈值
-    .lock_x_thres (lock_x_thres_uart),
-    .dds_freq_out (pll_freq_ch2),
-    .dc_x         (dc_x_ch2),
-    .dc_y         (dc_y_ch2),
-    .cic_valid_x  (cic_valid_x_ch2),
-    .cic_valid_y  (cic_valid_y_ch2),
-    .dc_valid_x   (dc_valid_x_ch2),
-    .dc_valid_y   (dc_valid_y_ch2),
-    .is_locked    (is_locked_ch2)
-);
+// pll_loop #(
+//     .KI_FRAC      (16),
+//     .IN_WIDTH     (28)
+// ) u_pll_ch2 (
+//     .clk          (clk_65M),
+//     .rst_n        (sys_rst_n),
+//     .pll_en       (pll_en),
+//     .adc_in       (adc_ch2),
+//     .center_freq  (tx2_freq_word),     // 扫频起点 (FRQ3 指令设置)
+//     .pll_kp       (pll_kp),
+//     .pll_ki       (pll_ki),
+//     .tau_x        (tau2_x_uart),
+//     .tau_y        (tau2_y_uart),
+//     .sweep_thres  (sweep_thres_uart),    // ★ 两通道共用阈值
+//     .lock_x_thres (lock_x_thres_uart),
+//     .dds_freq_out (pll_freq_ch2),
+//     .dc_x         (dc_x_ch2),
+//     .dc_y         (dc_y_ch2),
+//     .cic_valid_x  (cic_valid_x_ch2),
+//     .cic_valid_y  (cic_valid_y_ch2),
+//     .dc_valid_x   (dc_valid_x_ch2),
+//     .dc_valid_y   (dc_valid_y_ch2),
+//     .is_locked    (is_locked_ch2)
+// );
 
 
 // =========================================================================
 // ★ 测试信号 DDS (tx1 / tx2)
 //    输出可送 DAC, 频率即跟随 PLL 锁定结果
 // =========================================================================
-wire [95:0]        dds_tx1_config = {tx1_phase_word, pll_freq_ch1};
-wire signed [31:0] tx1_sine_cos;
-wire signed [13:0] sine_tx1 = tx1_sine_cos[29:16];
-wire signed [13:0] cos_tx1  = tx1_sine_cos[13:0];
+// wire [95:0]        dds_tx1_config = {tx1_phase_word, pll_freq_ch1};
+// wire signed [31:0] tx1_sine_cos;
+// wire signed [13:0] sine_tx1 = tx1_sine_cos[29:16];
+// wire signed [13:0] cos_tx1  = tx1_sine_cos[13:0];
 
-dds_compiler_1 u_dds_tx1 (
-    .aclk                  (clk_65M),
-    .s_axis_config_tvalid  (1'b1),
-    .s_axis_config_tdata   (dds_tx1_config),
-    .m_axis_data_tvalid    (),
-    .m_axis_data_tdata     (tx1_sine_cos),
-    .m_axis_phase_tvalid   (),
-    .m_axis_phase_tdata    ()
-);
+// dds_compiler_1 u_dds_tx1 (
+//     .aclk                  (clk_65M),
+//     .s_axis_config_tvalid  (1'b1),
+//     .s_axis_config_tdata   (dds_tx1_config),
+//     .m_axis_data_tvalid    (),
+//     .m_axis_data_tdata     (tx1_sine_cos),
+//     .m_axis_phase_tvalid   (),
+//     .m_axis_phase_tdata    ()
+// );
 
-wire [95:0]        dds_tx2_config = {tx2_phase_word, pll_freq_ch2};
-wire signed [31:0] tx2_sine_cos;
-wire signed [13:0] sine_tx2 = tx2_sine_cos[29:16];
-wire signed [13:0] cos_tx2  = tx2_sine_cos[13:0];
+// wire [95:0]        dds_tx2_config = {tx2_phase_word, pll_freq_ch2};
+// wire signed [31:0] tx2_sine_cos;
+// wire signed [13:0] sine_tx2 = tx2_sine_cos[29:16];
+// wire signed [13:0] cos_tx2  = tx2_sine_cos[13:0];
 
-dds_compiler_1 u_dds_tx2 (
-    .aclk                  (clk_65M),
-    .s_axis_config_tvalid  (1'b1),
-    .s_axis_config_tdata   (dds_tx2_config),
-    .m_axis_data_tvalid    (),
-    .m_axis_data_tdata     (tx2_sine_cos),
-    .m_axis_phase_tvalid   (),
-    .m_axis_phase_tdata    ()
-);
+// dds_compiler_1 u_dds_tx2 (
+//     .aclk                  (clk_65M),
+//     .s_axis_config_tvalid  (1'b1),
+//     .s_axis_config_tdata   (dds_tx2_config),
+//     .m_axis_data_tvalid    (),
+//     .m_axis_data_tdata     (tx2_sine_cos),
+//     .m_axis_phase_tvalid   (),
+//     .m_axis_phase_tdata    ()
+// );
 
 
 // =========================================================================
 // ★ 通道3: 三路开环锁相放大器 (lockin_psd) + 一路 DC 通路
-//    参考频率全部使用 PLL 锁定后的 pll_freq_ch1 / pll_freq_ch2
-//    ★ F2 现在通过 adc_ch2 闭环, 不再用 tx2_freq_word
 // =========================================================================
+
+// =========================================================================
+// ★ 通道3 ref_freq 来源 mux: 自动 (PLL 硬件实时) / 手动 (USB 下发)
+//
+//   REFMODE = 0 (默认, 手动): ref_freq = FRQ21 / FRQ12 / FRQ11 (上位机算好下发)
+//   REFMODE = 1 (自动)      : ref_freq 由 pll_freq_ch1/ch2 在硬件层实时运算
+//                             (无软件每帧下发, 完全跟随 PLL 锁定结果)
+//
+//   ★★★ 当前 pll_loop u_pll_ch1 / u_pll_ch2 已被注释 ★★★
+//     pll_freq_ch1 / pll_freq_ch2 是悬空 wire, "自动"支路不可用.
+//     因此 mux 暂时【强制走手动支路】(REFMODE 命令仍可下发, 但当前不生效).
+//
+//   ★ PLL 恢复时怎么改:
+//     1) 取消注释下方 "PLL 恢复后启用" 的 3 行 assign
+//     2) 删除/注释 "PLL 注释期间" 的 3 行 assign (本意是强制走手动)
+//     3) 这样 REFMODE 命令就能切换"自动/手动"两种模式
+// =========================================================================
+
+// 组合频率 (PLL 锁定后) — 暂时悬空, 等 PLL 恢复后才有效
 wire [47:0] f_2f1_plus_f2 = pll_freq_ch1 * 2 + pll_freq_ch2;
 wire [47:0] f_f1_plus_2f2 = pll_freq_ch1 + 2 * pll_freq_ch2;
 wire [47:0] f_f1_plus_f2  = pll_freq_ch1 + pll_freq_ch2;
+
+// 真正送进 lockin_psd 的三路参考频率
+wire [47:0] ref_freq_21_to_psd;
+wire [47:0] ref_freq_12_to_psd;
+wire [47:0] ref_freq_11_to_psd;
+
+// 【PLL 注释期间】强制走手动支路, REFMODE 命令暂不生效
+assign ref_freq_21_to_psd = freq_word_21_uart;
+assign ref_freq_12_to_psd = freq_word_12_uart;
+assign ref_freq_11_to_psd = freq_word_11_uart;
+
+// 【PLL 恢复后启用】取消下面 3 行注释, 同时把上面 3 行 assign 删除/注释
+// assign ref_freq_21_to_psd = ref_freq_auto_uart ? f_2f1_plus_f2 : freq_word_21_uart;
+// assign ref_freq_12_to_psd = ref_freq_auto_uart ? f_f1_plus_2f2 : freq_word_12_uart;
+// assign ref_freq_11_to_psd = ref_freq_auto_uart ? f_f1_plus_f2  : freq_word_11_uart;
 
 // ---- 通道3 @ 2F1+F2 -----------------------------------------------------
 wire signed [27:0] dc_x_ch3_21, dc_y_ch3_21;
@@ -262,10 +303,10 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
     .clk         (clk_65M),
     .rst_n       (sys_rst_n),
     .adc_in      (adc_ch3),
-    .ref_freq    (f_2f1_plus_f2),
+    .ref_freq    (ref_freq_21_to_psd),
     .ref_phase   (48'd0),
-    .tau_x       (tau21_x_uart),
-    .tau_y       (tau21_y_uart),
+    .tau         (tau21_uart),
+    .iir_order   (order21_uart),
     .dc_x        (dc_x_ch3_21),
     .dc_y        (dc_y_ch3_21),
     .cic_valid_x (),
@@ -282,10 +323,10 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
     .clk         (clk_65M),
     .rst_n       (sys_rst_n),
     .adc_in      (adc_ch3),
-    .ref_freq    (f_f1_plus_2f2),
+    .ref_freq    (ref_freq_12_to_psd),
     .ref_phase   (48'd0),
-    .tau_x       (tau12_x_uart),
-    .tau_y       (tau12_y_uart),
+    .tau         (tau12_uart),
+    .iir_order   (order12_uart),
     .dc_x        (dc_x_ch3_12),
     .dc_y        (dc_y_ch3_12),
     .cic_valid_x (),
@@ -302,10 +343,10 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
     .clk         (clk_65M),
     .rst_n       (sys_rst_n),
     .adc_in      (adc_ch3),
-    .ref_freq    (f_f1_plus_f2),
+    .ref_freq    (ref_freq_11_to_psd),
     .ref_phase   (48'd0),
-    .tau_x       (tau11_x_uart),
-    .tau_y       (tau11_y_uart),
+    .tau         (tau11_uart),
+    .iir_order   (order11_uart),
     .dc_x        (dc_x_ch3_11),
     .dc_y        (dc_y_ch3_11),
     .cic_valid_x (),
@@ -326,9 +367,11 @@ cic_compiler_0 u_cic_dc_ch3 (
 
 wire signed [27:0] dc_ch3;
 wire               dc_valid_ch3;
-iir_lpf_ema #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
+// DC 通路同样使用 cascade, 但阶数独立 (ORDDC 命令), 与三路谐波 (ORD21/12/11) 各自独立
+iir_lpf_cascade #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
     .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_dc_ch3),
-    .shift_k(tau_dc_uart), .din(cic_dc_ch3), .dout(dc_ch3), .valid_out(dc_valid_ch3)
+    .shift_k(tau_dc_uart), .order(order_dc_uart),
+    .din(cic_dc_ch3), .dout(dc_ch3), .valid_out(dc_valid_ch3)
 );
 
 
@@ -448,7 +491,10 @@ usb_commend u_usb_commend (
     .rec_done(rec_done),
     .tx_done(tx_done),
     .x_y_fir(x_y_fir_packed),
-    .m_axis_data_tvalid_fir_x(dc_valid_x_ch1),
+    // ★ PLL 注释期间, 数据帧触发信号改用 ch3 @ 2F1+F2 的 dc_valid_x
+    //   (原本是 PLL ch1 的 dc_valid_x_ch1, 但 pll_loop u_pll_ch1 已被注释)
+    //   恢复 PLL 后改回 dc_valid_x_ch1 即可.
+    .m_axis_data_tvalid_fir_x(dc_valid_x_ch3_21),
     .center_freq(center_freq_uart),
     .pll_kp(pll_kp),
     .pll_ki(pll_ki),
@@ -456,18 +502,27 @@ usb_commend u_usb_commend (
     .tau1_y(tau1_y_uart),
     .tau2_x(tau2_x_uart),
     .tau2_y(tau2_y_uart),
-    .tau21_x(tau21_x_uart),
-    .tau21_y(tau21_y_uart),
-    .tau12_x(tau12_x_uart),
-    .tau12_y(tau12_y_uart),
-    .tau11_x(tau11_x_uart),
-    .tau11_y(tau11_y_uart),
+    // ★ 通道3 三路谐波 IIR 时间常数 (X/Y 共用, 商用做法)
+    .tau21(tau21_uart),
+    .tau12(tau12_uart),
+    .tau11(tau11_uart),
     .tau_dc(tau_dc_uart),
     .phase_offset(tx1_phase_word),
     .freq_word_2(tx1_freq_word),
     .freq_word_3(tx2_freq_word),
+    // ★ 通道3 三路 ref_freq (FRQ21 / FRQ12 / FRQ11)
+    .freq_word_21(freq_word_21_uart),
+    .freq_word_12(freq_word_12_uart),
+    .freq_word_11(freq_word_11_uart),
     .sweep_thres(sweep_thres_uart),     // ★ LOCKSWY 命令下发的值
     .lock_x_thres(lock_x_thres_uart),   // ★ LOCKTHX 命令下发的值
+    // ★ 通道3 ref_freq 来源开关 (REFMODE 命令: 0=手动 / 1=PLL 硬件自动)
+    .ref_freq_auto(ref_freq_auto_uart),
+    // ★ 通道3 4 路 IIR 阶数 (ORD21/ORD12/ORD11/ORDDC 命令各自独立: 1..4)
+    .order21 (order21_uart),
+    .order12 (order12_uart),
+    .order11 (order11_uart),
+    .order_dc(order_dc_uart),
     .send_en(send_en),
     .send_data(send_data)
 );
@@ -476,18 +531,18 @@ usb_commend u_usb_commend (
 // =========================================================================
 // ★ ILA 探针观察
 // =========================================================================
-// ila_0 u_ila_0 (
-//     .clk     (sys_clk),
-//     .probe0  (adc_ch1),                 // 14bit
-//     .probe1  (adc_ch2),                 // 14bit
-//     .probe2  (adc_ch3),                 // 14bit
-//     .probe3  (pll_freq_ch1),            // 48bit: F1
-//     .probe4  (pll_freq_ch2),            // 48bit: F2 ★ 现已闭环
-//     .probe5  (dc_x_ch3_21),             // 28bit
-//     .probe6  (dc_x_ch3_12),             // 28bit
-//     .probe7  (dc_x_ch3_11),             // 28bit
-//     .probe8  (dc_ch3)                   // 28bit
-// );
+ila_0 u_ila_0 (
+    .clk     (sys_clk),
+    .probe0  (adc_ch1),                 // 14bit
+    .probe1  (adc_ch2),                 // 14bit
+    .probe2  (adc_ch3),                 // 14bit
+    // .probe3  (pll_freq_ch1),            // 48bit: F1
+    // .probe4  (pll_freq_ch2),            // 48bit: F2 ★ 现已闭环
+    .probe3  (dc_x_ch3_21),             // 28bit
+    .probe4  (dc_x_ch3_12),             // 28bit
+    .probe5  (dc_x_ch3_11),             // 28bit
+    .probe6  (dc_ch3)                   // 28bit
+);
 
 
 // =========================================================================
@@ -497,92 +552,92 @@ usb_commend u_usb_commend (
 //    - 默认网络配置: FPGA=192.168.1.10, 上位机=192.168.1.100, UDP 端口 7777
 //    - 修改 IP/MAC/端口请改下面的 parameter 覆盖值
 // =========================================================================
-wire eth_link_up;
-wire [1:0] eth_link_speed;
-wire eth_frame_dropped;
-wire eth_rx_err_fcs;
-wire eth_rx_err_frame;
-wire eth_rx_activity;
-wire eth_rxctl_pin_active;
-wire eth_rxd_all_active;
-wire [3:0] eth_rxd_per_bit;
-wire eth_idelay_locked;
-wire eth_idelay_failed;
-wire [4:0] eth_idelay_tap_now;
-wire eth_rx_eth_hdr_activity;
-wire eth_tx_axis_activity;
+// wire eth_link_up;
+// wire [1:0] eth_link_speed;
+// wire eth_frame_dropped;
+// wire eth_rx_err_fcs;
+// wire eth_rx_err_frame;
+// wire eth_rx_activity;
+// wire eth_rxctl_pin_active;
+// wire eth_rxd_all_active;
+// wire [3:0] eth_rxd_per_bit;
+// wire eth_idelay_locked;
+// wire eth_idelay_failed;
+// wire [4:0] eth_idelay_tap_now;
+// wire eth_rx_eth_hdr_activity;
+// wire eth_tx_axis_activity;
 
-eth_lockin_top #(
-    .LOCAL_MAC      (48'h02_00_00_00_00_01),
-    // ★ 注意: 故意用 192.168.99.x 而不是 1.x, 避免和路由器/Wi-Fi 子网冲突
-    //   PC 上"以太网 5"网卡需手动配 IP=192.168.99.100, 掩码=255.255.255.0
-    .LOCAL_IP       ({8'd192, 8'd168, 8'd99, 8'd10}),
-    .DEST_IP        ({8'd192, 8'd168, 8'd99, 8'd100}),
-    .GATEWAY_IP     ({8'd192, 8'd168, 8'd99, 8'd1}),
-    .SUBNET_MASK    ({8'd255, 8'd255, 8'd255, 8'd0}),
-    .SRC_PORT       (16'd1234),
-    .DEST_PORT      (16'd7777),
-    .FRAME_BYTES    (80),
-    .RX_IDELAY_AUTO (1),    // ★ 1 = 自动扫描 0..31 找到能收帧的 tap
-    .RX_IDELAY_TAP  (24)
-) u_eth_top (
-    .pl_clk_50m         (sys_clk),
-    .sys_rst            (sys_rst),
+// eth_lockin_top #(
+//     .LOCAL_MAC      (48'h02_00_00_00_00_01),
+//     // ★ 注意: 故意用 192.168.99.x 而不是 1.x, 避免和路由器/Wi-Fi 子网冲突
+//     //   PC 上"以太网 5"网卡需手动配 IP=192.168.99.100, 掩码=255.255.255.0
+//     .LOCAL_IP       ({8'd192, 8'd168, 8'd99, 8'd10}),
+//     .DEST_IP        ({8'd192, 8'd168, 8'd99, 8'd100}),
+//     .GATEWAY_IP     ({8'd192, 8'd168, 8'd99, 8'd1}),
+//     .SUBNET_MASK    ({8'd255, 8'd255, 8'd255, 8'd0}),
+//     .SRC_PORT       (16'd1234),
+//     .DEST_PORT      (16'd7777),
+//     .FRAME_BYTES    (80),
+//     .RX_IDELAY_AUTO (1),    // ★ 1 = 自动扫描 0..31 找到能收帧的 tap
+//     .RX_IDELAY_TAP  (24)
+// ) u_eth_top (
+//     .pl_clk_50m         (sys_clk),
+//     .sys_rst            (sys_rst),
 
-    // 锁相数据 (65 MHz 域)
-    .lockin_clk         (clk_65M),
-    .lockin_frame_data  (x_y_fir_packed),
-    .lockin_frame_valid (dc_valid_x_ch1),
+//     // 锁相数据 (65 MHz 域)
+//     .lockin_clk         (clk_65M),
+//     .lockin_frame_data  (x_y_fir_packed),
+//     .lockin_frame_valid (dc_valid_x_ch1),
 
-    // RGMII PHY 引脚
-    .eth_rxc            (eth_rxc),
-    .eth_rxctl          (eth_rxctl),
-    .eth_rxd            (eth_rxd),
-    .eth_txc            (eth_txc),
-    .eth_txctl          (eth_txctl),
-    .eth_txd            (eth_txd),
-    .eth_nrst           (eth_nrst),
-    .eth_mdc            (eth_mdc),
-    .eth_mdio           (eth_mdio),
+//     // RGMII PHY 引脚
+//     .eth_rxc            (eth_rxc),
+//     .eth_rxctl          (eth_rxctl),
+//     .eth_rxd            (eth_rxd),
+//     .eth_txc            (eth_txc),
+//     .eth_txctl          (eth_txctl),
+//     .eth_txd            (eth_txd),
+//     .eth_nrst           (eth_nrst),
+//     .eth_mdc            (eth_mdc),
+//     .eth_mdio           (eth_mdio),
 
-    // 状态
-    .link_up            (eth_link_up),
-    .link_speed         (eth_link_speed),
-    .frame_dropped      (eth_frame_dropped),
-    .rx_error_bad_fcs   (eth_rx_err_fcs),
-    .rx_error_bad_frame (eth_rx_err_frame),
-    .rx_frame_activity  (eth_rx_activity),
-    .rxctl_pin_activity (eth_rxctl_pin_active),
-    .rxd_all_active     (eth_rxd_all_active),
-    .rxd_per_bit_active (eth_rxd_per_bit),
-    .idelay_scan_locked (eth_idelay_locked),
-    .idelay_scan_failed (eth_idelay_failed),
-    .idelay_scan_tap_now(eth_idelay_tap_now),
-    .rx_eth_hdr_activity(eth_rx_eth_hdr_activity),
-    .tx_axis_activity   (eth_tx_axis_activity)
-);
+//     // 状态
+//     .link_up            (eth_link_up),
+//     .link_speed         (eth_link_speed),
+//     .frame_dropped      (eth_frame_dropped),
+//     .rx_error_bad_fcs   (eth_rx_err_fcs),
+//     .rx_error_bad_frame (eth_rx_err_frame),
+//     .rx_frame_activity  (eth_rx_activity),
+//     .rxctl_pin_activity (eth_rxctl_pin_active),
+//     .rxd_all_active     (eth_rxd_all_active),
+//     .rxd_per_bit_active (eth_rxd_per_bit),
+//     .idelay_scan_locked (eth_idelay_locked),
+//     .idelay_scan_failed (eth_idelay_failed),
+//     .idelay_scan_tap_now(eth_idelay_tap_now),
+//     .rx_eth_hdr_activity(eth_rx_eth_hdr_activity),
+//     .tx_axis_activity   (eth_tx_axis_activity)
+// );
 
-// =========================================================================
-// LED 状态指示  (★ IDELAY + RX/TX 协议层活动 双重诊断 ★)
-//
-//   IDELAY 没锁定时 (上电几秒内):
-//     pl_led1 = 灭        (扫描进行中)
-//     pl_led2 = 灭 / 亮   (扫描失败时亮)
-//
-//   IDELAY 锁定后 (LED1 由灭转闪烁/亮):
-//     pl_led1 = RX 协议层活动 (eth_axis_rx 解析出帧)
-//        - 闪 = MAC RX → eth_axis_rx → udp_complete 链路通
-//        - 灭 = MAC 报 good_frame, 但 eth_axis_rx 没解出来 (反压?)
-//     pl_led2 = TX 协议层活动 (FPGA 在发任何帧)
-//        - 闪 = FPGA 在产生 TX (ARP 响应/UDP 数据), 物理 TX 出问题就看这
-//        - 灭 = FPGA 完全没产生 TX (ARP 模块没识别请求 / RX 内容不对)
-//
-//   组合判读 (锁定后):
-//     LED1 闪 + LED2 闪 → 协议层都 OK, 问题在 PHY 物理 TX 层
-//     LED1 闪 + LED2 灭 → ARP 没响应, 检查 LOCAL_IP 或 ARP 模块
-//     LED1 灭 + LED2 灭 → eth_axis_rx 没消费, RX backpress 问题
-// =========================================================================
-assign pl_led1 = eth_idelay_locked ? eth_rx_eth_hdr_activity : 1'b0;
-assign pl_led2 = eth_idelay_locked ? eth_tx_axis_activity    : eth_idelay_failed;
+// // =========================================================================
+// // LED 状态指示  (★ IDELAY + RX/TX 协议层活动 双重诊断 ★)
+// //
+// //   IDELAY 没锁定时 (上电几秒内):
+// //     pl_led1 = 灭        (扫描进行中)
+// //     pl_led2 = 灭 / 亮   (扫描失败时亮)
+// //
+// //   IDELAY 锁定后 (LED1 由灭转闪烁/亮):
+// //     pl_led1 = RX 协议层活动 (eth_axis_rx 解析出帧)
+// //        - 闪 = MAC RX → eth_axis_rx → udp_complete 链路通
+// //        - 灭 = MAC 报 good_frame, 但 eth_axis_rx 没解出来 (反压?)
+// //     pl_led2 = TX 协议层活动 (FPGA 在发任何帧)
+// //        - 闪 = FPGA 在产生 TX (ARP 响应/UDP 数据), 物理 TX 出问题就看这
+// //        - 灭 = FPGA 完全没产生 TX (ARP 模块没识别请求 / RX 内容不对)
+// //
+// //   组合判读 (锁定后):
+// //     LED1 闪 + LED2 闪 → 协议层都 OK, 问题在 PHY 物理 TX 层
+// //     LED1 闪 + LED2 灭 → ARP 没响应, 检查 LOCAL_IP 或 ARP 模块
+// //     LED1 灭 + LED2 灭 → eth_axis_rx 没消费, RX backpress 问题
+// // =========================================================================
+// assign pl_led1 = eth_idelay_locked ? eth_rx_eth_hdr_activity : 1'b0;
+// assign pl_led2 = eth_idelay_locked ? eth_tx_axis_activity    : eth_idelay_failed;
 
 endmodule

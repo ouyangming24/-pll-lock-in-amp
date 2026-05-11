@@ -412,15 +412,24 @@ class MockDevice(QObject):
             "KP": 500, "KI": 50,
             "TAU1X": 20, "TAU1Y": 8,
             "TAU2X": 20, "TAU2Y": 8,
-            "TAU21X": 2, "TAU21Y": 2,
-            "TAU12X": 2, "TAU12Y": 2,
-            "TAU11X": 2, "TAU11Y": 2,
+            # 通道3 三路谐波 X/Y 共用 TC (与商用做法一致)
+            "TAU21": 2, "TAU12": 2, "TAU11": 2,
             "TAUDC": 2,
             "PHAS": 0,
             "FRQ2": hz_to_freq_word(50000),
             "FRQ3": hz_to_freq_word(40000),
+            # 通道3 三路 ref_freq (PLL 注释期间手动下发)
+            "FRQ21": hz_to_freq_word(160_000),   # 2F1+F2
+            "FRQ12": hz_to_freq_word(170_000),   # F1+2F2
+            "FRQ11": hz_to_freq_word(110_000),   # F1+F2
             "LOCKSWY": 100_000,
             "LOCKTHX": 300_000,
+            "REFMODE": 0,   # 0=手动 (FRQ21/12/11), 1=PLL 硬件自动 (PLL 恢复后启用)
+            # 通道3 4 路 IIR 阶数 (各路独立, 1..4 = 6/12/18/24 dB/oct)
+            "ORD21":   1,
+            "ORD12":   1,
+            "ORD11":   1,
+            "ORDDC":   1,
         }
         # 模拟数据生成定时器 (~50 fps; 真实硬件帧率 ≤ 10 fps, 这里足够看动效)
         self._timer = QTimer()

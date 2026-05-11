@@ -307,18 +307,23 @@ github  → https://github.com/ouyangming24/-pll-lock-in-amp.git   (镜像)
 | `TAU1Y` | 5 字符 | 5 bit | 通道1 (PLL) Y方向 IIR 时间常数 | `8` |
 | `TAU2X` | 5 字符 | 5 bit | 通道2 (PLL) X方向 IIR 时间常数 | `20` |
 | `TAU2Y` | 5 字符 | 5 bit | 通道2 (PLL) Y方向 IIR 时间常数 | `8` |
-| `TAU21X` ★ | 6 字符 | 5 bit | 通道3 谐波 `2F1+F2` X 路 IIR 时间常数 | `2` |
-| `TAU21Y` ★ | 6 字符 | 5 bit | 通道3 谐波 `2F1+F2` Y 路 IIR 时间常数 | `2` |
-| `TAU12X` ★ | 6 字符 | 5 bit | 通道3 谐波 `F1+2F2` X 路 IIR 时间常数 | `2` |
-| `TAU12Y` ★ | 6 字符 | 5 bit | 通道3 谐波 `F1+2F2` Y 路 IIR 时间常数 | `2` |
-| `TAU11X` ★ | 6 字符 | 5 bit | 通道3 谐波 `F1+F2`  X 路 IIR 时间常数 | `2` |
-| `TAU11Y` ★ | 6 字符 | 5 bit | 通道3 谐波 `F1+F2`  Y 路 IIR 时间常数 | `2` |
-| `TAUDC`  ★ | 5 字符 | 5 bit | 通道3 DC 通路（无混频）IIR 时间常数 | `2` |
+| `TAU21` ★ | 5 字符 | 5 bit | 通道3 谐波 `2F1+F2` IIR 时间常数（X/Y 共用）| `2` |
+| `TAU12` ★ | 5 字符 | 5 bit | 通道3 谐波 `F1+2F2` IIR 时间常数（X/Y 共用）| `2` |
+| `TAU11` ★ | 5 字符 | 5 bit | 通道3 谐波 `F1+F2`  IIR 时间常数（X/Y 共用）| `2` |
+| `TAUDC` ★ | 5 字符 | 5 bit | 通道3 DC 通路（无混频）IIR 时间常数 | `2` |
 | `PHAS` | 4 字符 | 48 bit | 测试 DDS `tx1` 相位偏移 | `0` |
 | `FRQ2` | 4 字符 | 48 bit | 测试 DDS `tx1` 频率控制字 | `433471464133` |
 | `FRQ3` | 4 字符 | 48 bit | 测试 DDS `tx2` 频率控制字 | `0` |
+| `FRQ21` ★ | 5 字符 | 48 bit | 通道3 锁相参考频率 `2F1+F2` (PLL 关闭期间手动下发) | `692861481134` (160 kHz) |
+| `FRQ12` ★ | 5 字符 | 48 bit | 通道3 锁相参考频率 `F1+2F2` (PLL 关闭期间手动下发) | `736165323705` (170 kHz) |
+| `FRQ11` ★ | 5 字符 | 48 bit | 通道3 锁相参考频率 `F1+F2`  (PLL 关闭期间手动下发) | `476342268280` (110 kHz) |
 | `LOCKSWY` ★ | 7 字符 | 28 bit | **PLL Y 通道捕捉阈值** (Ch1/Ch2 共用)，越小越容易进 LOCK | `100000` |
 | `LOCKTHX` ★ | 7 字符 | 28 bit | **PLL X 通道维持阈值** (Ch1/Ch2 共用)，越小越不容易掉出 LOCK | `300000` |
+| `REFMODE` ★ | 7 字符 | 1 bit  | 通道3 ref_freq 来源开关：`0`=手动 (用 FRQ21/12/11) / `1`=PLL 硬件自动跟随 | `0` |
+| `ORD21` ★ | 5 字符 | 3 bit  | 通道3 谐波 `2F1+F2` IIR 阶数 (1..4 = 6/12/18/24 dB/oct) | `1` |
+| `ORD12` ★ | 5 字符 | 3 bit  | 通道3 谐波 `F1+2F2` IIR 阶数 (1..4) | `1` |
+| `ORD11` ★ | 5 字符 | 3 bit  | 通道3 谐波 `F1+F2`  IIR 阶数 (1..4) | `1` |
+| `ORDDC` ★ | 5 字符 | 3 bit  | 通道3 DC 通路       IIR 阶数 (1..4) | `1` |
 | `XYOUT` | 5 字符 | —  | 启动 X/Y 直流量连续回传 | 关闭 |
 | `stop` | 4 字符 | — | 停止 X/Y 连续回传 | — |
 
@@ -357,18 +362,22 @@ github  → https://github.com/ouyangming24/-pll-lock-in-amp.git   (镜像)
 
 *(注：`TAU2X`, `TAU2Y` 作用于通道2 PLL，同理。)*
 
-#### 6.3.5b 通道3 谐波 / DC 时间常数 (`TAU21X/Y` … `TAUDC`)
+#### 6.3.5b 通道3 谐波 / DC 时间常数 (`TAU21` / `TAU12` / `TAU11` / `TAUDC`)
 - 位宽：均为 5 bit (0 ~ 31)
-- 通道3 是开环锁相放大器（不参与相位反馈），共有 4 路独立的 X/Y 输出：
-  - `2F1+F2`、`F1+2F2`、`F1+F2` 三路谐波各对应一组 `TAU2?X` / `TAU2?Y`
-  - DC 通路（直接 CIC + IIR，无混频）只有一路 `TAUDC`
+- 通道3 是开环锁相放大器（不参与相位反馈），共有 4 路输出：
+  - `2F1+F2`、`F1+2F2`、`F1+F2` 三路谐波各对应一个 `TAU2?`
+  - DC 通路（直接 CIC + IIR，无混频）一路 `TAUDC`
+- ★ **X/Y 共用一个时间常数**（与商用 Stanford SR830 / Zurich MFLI 等做法一致）：
+  - 锁相放大器输出复数信号 `Z = X + jY`，X 和 Y 必须经过完全对称的滤波器
+  - 若 X/Y 用不同 TC，会引入"伪相位"误差且难以察觉，故合并为单一参数
+  - 若需对比性实验（X/Y 分开调），可临时修改 `lockin_psd.v` 端口
 - 示例：
-  - `TAU21X:2\r\n`、`TAU21Y:2\r\n` —— 设置 `2F1+F2` 谐波的 X/Y 滤波器
-  - `TAUDC:4\r\n`                  —— 设置 DC 通路的 IIR
+  - `TAU21:2\r\n`  —— 设置 `2F1+F2` 谐波的 X/Y 滤波器（同步生效）
+  - `TAUDC:4\r\n` —— 设置 DC 通路的 IIR
 - 调参建议：
   - 为了**实时抓取快速变化的幅值**，建议谐波/DC 的 `tau` 设为 `0 ~ 3`
-  - 同一谐波路的 X/Y 通常设相同值（保持带宽一致），但若只关心幅值或只关心相位也可单独调整
   - 若信号噪声较大，可逐步加大到 `4 ~ 6` 换取信噪比
+  - 与 PLL 的 `TAU1X/Y / TAU2X/Y` 完全独立，互不影响
 
 #### 6.3.6 `PHAS:<value>\r\n`
 - 位宽：48 bit
@@ -396,6 +405,77 @@ github  → https://github.com/ouyangming24/-pll-lock-in-amp.git   (镜像)
 - 示例：`FRQ3:2165192128540\r\n`
 - 作用：测试 DDS `tx2` 的频率字（与 `FRQ2` 独立）。
 - 换算方法同 `FRQ2`。
+
+#### 6.3.8b `FRQ21:<value>\r\n` / `FRQ12:<value>\r\n` / `FRQ11:<value>\r\n` ★ 通道3 锁相参考频率
+- 位宽：48 bit
+- 示例：
+  - `FRQ21:692861481134\r\n` —— 通道 3 `2F1+F2` 参考频率（160 kHz）
+  - `FRQ12:736165323705\r\n` —— 通道 3 `F1+2F2` 参考频率（170 kHz）
+  - `FRQ11:476342268280\r\n` —— 通道 3 `F1+F2`  参考频率（110 kHz）
+- 作用：直接指定 `lockin_psd` 三个开环锁相通道的参考频率（送入混频 DDS）。
+- 适用场景：
+  - **PLL 模块被注释 / 单独验证锁相放大器** 时，没有 `pll_freq_ch1/ch2` 可用，必须手动给定参考频率；
+  - 也可用于扫描单一谐波灵敏度等特殊实验（即使 PLL 启用，亦可强制锁某个固定频点）。
+- 换算方法同 `FRQ2`（`PINC = Hz × 2^48 / 65_000_000`）。
+- 默认值对应 `F1 = 50 kHz, F2 = 60 kHz`，即 160 / 170 / 110 kHz。
+
+#### 6.3.8c `REFMODE:<0|1>\r\n` ★ 通道3 ref_freq 来源开关
+- 位宽：1 bit（只取 value 的最低位）
+- 示例：
+  - `REFMODE:0\r\n` —— 手动模式（默认）：三路 ref_freq = `FRQ21` / `FRQ12` / `FRQ11`
+  - `REFMODE:1\r\n` —— 自动模式：三路 ref_freq 由 `pll_freq_ch1` / `pll_freq_ch2` 在硬件层实时运算
+    - `2F1+F2 = 2·pll_freq_ch1 + pll_freq_ch2`
+    - `F1+2F2 = pll_freq_ch1 + 2·pll_freq_ch2`
+    - `F1+F2  = pll_freq_ch1 + pll_freq_ch2`
+- 适用场景：
+  - **自动模式**（`REFMODE:1`）：PLL 启用并已锁定时使用，软件无需每帧重算 + 下发 FRQxx，
+    硬件实时跟随 PLL 锁定的频率波动，相位误差最小、延迟最低。
+  - **手动模式**（`REFMODE:0`）：PLL 未启用、或需要锁定与 F1/F2 无关的特殊频点时使用。
+- ⚠ 当前 RTL 状态：
+  - `pll_loop u_pll_ch1 / u_pll_ch2` 模块被注释（单独验证锁相放大器阶段），
+    `pll_freq_ch1/ch2` 是悬空 wire，**`REFMODE` 命令解析就绪但 mux 强制走手动支路**，
+    `REFMODE:1` 暂时不生效。
+  - PLL 恢复后：在 `lock_in_amp.v` 中取消注释 mux 的"自动支路" 3 行 assign，
+    删除"强制手动"3 行，`REFMODE` 即可正常工作。
+
+#### 6.3.8d `ORD21` / `ORD12` / `ORD11` / `ORDDC` ★ 通道3 各路 IIR 阶数 (各路独立)
+
+- 位宽：3 bit（实际只有效 1..4）
+- 4 条命令一一对应**通道3 的 4 个 IIR 滤波器**（**各路独立设置**，与 SR860 / Zurich
+  MFLI 每通道独立 slope 一致）：
+
+  | 命令 | 对应模块 | 物理含义 |
+  |---|---|---|
+  | `ORD21` | `u_psd_ch3_21` (X/Y) | 谐波 `2F1+F2` IIR 阶数 |
+  | `ORD12` | `u_psd_ch3_12` (X/Y) | 谐波 `F1+2F2` IIR 阶数 |
+  | `ORD11` | `u_psd_ch3_11` (X/Y) | 谐波 `F1+F2`  IIR 阶数 |
+  | `ORDDC` | `u_iir_dc_ch3`       | DC 通路       IIR 阶数 |
+
+- 示例：
+  - `ORD21:1\r\n` —— 1 阶 = 6 dB/oct（默认，行为完全等价于原 `iir_lpf_ema`）
+  - `ORD21:2\r\n` —— 2 阶 = 12 dB/oct
+  - `ORD21:3\r\n` —— 3 阶 = 18 dB/oct
+  - `ORD21:4\r\n` —— 4 阶 = 24 dB/oct
+- 实现原理：
+  - RTL 模块 `iir_lpf_cascade.v` 内部例化 **4 个相同时间常数 (tau) 的一阶 EMA**
+    级联，运行时用 mux 选择第 `order` 级的输出作为最终输出。
+  - 同一路 PSD 的 X 和 Y 共享同一个 `order`（保证复数信号 X+jY 对称滤波，避免引入伪相位偏差）。
+  - 时域响应：单调收敛、无过冲（vs 巴特沃斯 / 切比雪夫会有振铃）。
+  - 频域响应：每加一阶，阻带衰减斜率 +6 dB/oct。
+  - **建立时间** ≈ `N · τ_单阶`（阶数越高，到达稳态越慢）。
+- 范围钳位：`usb_commend.v` 在解析时若收到 `<1` 或 `>4` 的值，会一律视为 1 阶。
+- 资源代价：相对原 1 阶版，每路 lockin_psd 多消耗 3 个 EMA 实例（~600 LUT / 180 FF）。
+  全工程总增量 ≈ 4200 LUT + 1300 FF，Zynq-7020 完全够用。
+- ⚠ 与 `TAUxx` 的关系：
+  - `TAUxx`：控制单阶 EMA 的"带宽"（截止频率 fc）。
+  - `ORDxx`：控制级联阶数（"陡峭度"，dB/oct）。
+  - 两者**正交**：可以独立调，调任意一个不影响另一个语义。
+- 注意 **PLL 通道 (CH1/CH2) 不参与**：
+  - `pll_loop` 内部仍使用 1 阶 `iir_lpf_ema`，因为 PLL 反馈环路对相位裕度敏感，
+    多阶级联会显著增加环路延迟，可能引发振荡。
+  - 若 PLL 恢复后想给 PLL 也提供 ORDER 控制，需要单独引入 `pll_iir_order` 参数。
+- GUI 便捷功能：主窗口"IIR 阶数"分组提供"快捷统一"下拉框 + ▶ 按钮，选一档后会
+  把 4 路 (`ORD21/ORD12/ORD11/ORDDC`) 全部设为相同阶数并立即下发（节省统一档时的点击次数）。
 
 #### 6.3.9 `LOCKSWY:<value>\r\n` ★ PLL Y 通道捕捉阈值
 
@@ -544,12 +624,14 @@ send_cmd('TAU1Y:8')
 send_cmd('TAU2X:20')
 send_cmd('TAU2Y:8')
 # 通道3 谐波/DC 4 路独立时间常数
-send_cmd('TAU21X:2');  send_cmd('TAU21Y:2')
-send_cmd('TAU12X:2');  send_cmd('TAU12Y:2')
-send_cmd('TAU11X:2');  send_cmd('TAU11Y:2')
+send_cmd('TAU21:2');  send_cmd('TAU12:2');  send_cmd('TAU11:2')
 send_cmd('TAUDC:2')
 send_cmd('FRQ2:433038425708')   # tx1 = 100 kHz
 send_cmd('FRQ3:0')              # tx2 关闭
+# PLL 注释期间手动下发通道3 三路 ref_freq (PLL 恢复后可改回由 pll_freq_chx 运算驱动)
+send_cmd('FRQ21:692861481134')  # ch3 @ 2F1+F2 = 160 kHz
+send_cmd('FRQ12:736165323705')  # ch3 @ F1+2F2 = 170 kHz
+send_cmd('FRQ11:476342268280')  # ch3 @ F1+F2  = 110 kHz
 send_cmd('PHAS:0')
 send_cmd('LOCKSWY:100000')      # ★ PLL Y 进 LOCK 门槛
 send_cmd('LOCKTHX:300000')      # ★ PLL X 维持 LOCK 门槛
@@ -575,7 +657,7 @@ ser.write(b'stop\r\n')
 
 ### 6.6 容错与注意事项
 
-1. **指令大小写敏感**：除 `stop` 是全小写，其他指令（`KP`/`KI`/`FREQ`/`TAU1X`/`TAU1Y`/`TAU2X`/`TAU2Y`/`TAU21X`/`TAU21Y`/`TAU12X`/`TAU12Y`/`TAU11X`/`TAU11Y`/`TAUDC`/`PHAS`/`FRQ2`/`FRQ3`/`LOCKSWY`/`LOCKTHX`/`XYOUT`）都必须**全大写**。
+1. **指令大小写敏感**：除 `stop` 是全小写，其他指令（`KP`/`KI`/`FREQ`/`TAU1X`/`TAU1Y`/`TAU2X`/`TAU2Y`/`TAU21`/`TAU12`/`TAU11`/`TAUDC`/`PHAS`/`FRQ2`/`FRQ3`/`FRQ21`/`FRQ12`/`FRQ11`/`LOCKSWY`/`LOCKTHX`/`REFMODE`/`ORD21`/`ORD12`/`ORD11`/`ORDDC`/`XYOUT`）都必须**全大写**。
 2. **数值仅支持十进制**：`value_buffer` 解析逻辑是 `value * 10 + (ascii - '0')`，
    暂不支持 `0x` 十六进制、负号、小数点。
 3. **指令超长**：若指令字符数累计 ≥ 9 还未匹配任何已知指令，会返回 `Command Error!\r\n` 并丢弃。

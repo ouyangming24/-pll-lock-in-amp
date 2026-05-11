@@ -72,26 +72,51 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G15} [get_ports adc_oeb_b]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G16} [get_ports adc_clk]
 
 
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y18}  [get_ports adc_oeb_b_2]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA18} [get_ports adc_clk_2]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB16} [get_ports {adc_data_2[0]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA16} [get_ports {adc_data_2[1]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA19} [get_ports {adc_data_2[2]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y19}  [get_ports {adc_data_2[3]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB19} [get_ports {adc_data_2[4]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB20} [get_ports {adc_data_2[5]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB21} [get_ports {adc_data_2[6]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA21} [get_ports {adc_data_2[7]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB22} [get_ports {adc_data_2[8]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA22} [get_ports {adc_data_2[9]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y21} [get_ports {adc_data_2[10]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y20} [get_ports {adc_data_2[11]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN W22} [get_ports {adc_data_2[12]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN V22} [get_ports {adc_data_2[13]}]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN U22}  [get_ports adc_pdn_2]
-set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN T22}  [get_ports adc_otr_2]
+# --- 弃用 (2026-05) ----------------------------------------------------------
+# 旧引脚分配: adc_clk_2 在 AA18, 14 根 data 散布在 AB16~V22 (跨度 16~22 行).
+# 现象: ch3 ADC 采样波形带规律性"锯齿", 推测是 PCB 走线长度差/14 位
+#       数据线 setup-hold 边缘紊乱所致 (ch1/2 用同一份 ad_wave_rec 代码无锯齿).
+# 修复: 改用集中在右上角 (V13~AB17) 的一片相邻 IO, 走线短、长度差小, 波形干净.
+# 保留以下注释作为历史参考, 不要再启用.
+# -----------------------------------------------------------------------------
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y18}  [get_ports adc_oeb_b_2]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA18} [get_ports adc_clk_2]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB16} [get_ports {adc_data_2[0]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA16} [get_ports {adc_data_2[1]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA19} [get_ports {adc_data_2[2]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y19}  [get_ports {adc_data_2[3]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB19} [get_ports {adc_data_2[4]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB20} [get_ports {adc_data_2[5]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB21} [get_ports {adc_data_2[6]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA21} [get_ports {adc_data_2[7]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB22} [get_ports {adc_data_2[8]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA22} [get_ports {adc_data_2[9]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y21} [get_ports {adc_data_2[10]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y20} [get_ports {adc_data_2[11]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN W22} [get_ports {adc_data_2[12]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN V22} [get_ports {adc_data_2[13]}]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN U22}  [get_ports adc_pdn_2]
+# set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN T22}  [get_ports adc_otr_2]
 
 
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN V15}  [get_ports adc_oeb_b_2]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN V14} [get_ports adc_clk_2]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y14} [get_ports {adc_data_2[0]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA14} [get_ports {adc_data_2[1]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN W16} [get_ports {adc_data_2[2]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y16}  [get_ports {adc_data_2[3]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA17} [get_ports {adc_data_2[4]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB17} [get_ports {adc_data_2[5]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN W18} [get_ports {adc_data_2[6]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN W17} [get_ports {adc_data_2[7]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN V13} [get_ports {adc_data_2[8]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN W13} [get_ports {adc_data_2[9]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y13} [get_ports {adc_data_2[10]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA13} [get_ports {adc_data_2[11]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB14} [get_ports {adc_data_2[12]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB15} [get_ports {adc_data_2[13]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y18}  [get_ports adc_pdn_2]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA18}  [get_ports adc_otr_2]
 
 
 
