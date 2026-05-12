@@ -66,7 +66,7 @@ TAU_MAX = 31              # shift_k 是 5bit, 硬件支持上限
 # 电压换算 (锁相 dc_x / dc_y / dc_dc 码值 → 物理电压)
 # ============================================================================
 # 信号链:
-#   V_in (峰值 V0, ±10V 量程) ──ADC──▶ 14bit (±2^13 = ±8192 对应 ±V_FS)
+#   V_in (峰值 V0) ──ADC──▶ 14bit signed (±2^13 对应 ±V_FS, V_FS 见下方实测标定)
 #   adc_code = V_in × 2^13 / V_FS
 #         ──× DDS(14b sin/cos, 满振幅 2^13)──▶ 28bit mix (signed)
 #         ──CIC(R=65,M=1,N=5, Truncation)──▶ 28bit cic
@@ -84,10 +84,16 @@ TAU_MAX = 31              # shift_k 是 5bit, 硬件支持上限
 #
 # 对幅度为 V0 的正弦输入, 锁定后 R = sqrt(X²+Y²) = V0 × G_total
 #   → V0 = R / G_total   (V0 是输入信号的"峰值幅度", 不是峰峰值, 也不是 rms)
-ADC_FS_V = 10.0         # ADC 模拟输入满量程 (±10V, 即峰峰值 20V).
-                        # 依据: ad_wave_rec.v 注释 "(ADC_DATA - 8192) * (20/16384)",
-                        # 14bit unsigned, 0~16383 对应 -10V~+10V (offset binary 或 2's complement
-                        # 取决于硬件 SPI 配置; 两种格式下 G_total 推导结果完全一致).
+ADC_FS_V = 9.75         # ADC 芯片侧"等效满量程"电压 (★ 实测标定, 不是面板量程!)
+                        # ---------------------------------------------------
+                        # 标定实验: 输入正弦 V₀ = 5V (峰值, 即面板 ±5V 满输入)
+                        #   → ADC 码值峰值 ≈ ±4200 LSB (满码值 ±8192)
+                        #   → ADC 芯片侧增益 = 4200 / 5 = 840 LSB/V
+                        #   → 反推 V_FS = 2^13 / 840 ≈ 9.75 V
+                        # 物理解释: 面板 ±5V 输入只占 ADC 动态范围的 ~50%,
+                        # 模拟前端 (差分驱动 / Vref / 衰减比) 决定了这个比例.
+                        # 这是硬件设计选择 (留 6 dB 余量), GUI 端只负责把
+                        # 实际"码值/电压"映射用对.
 ADC_BITS = 14           # ADC 位宽 (signed, 振幅 ±2^13)
 DDS_BITS = 14           # DDS 输出位宽 (signed, 振幅 ±2^13)
 CIC_R = 65              # CIC 抽取率
@@ -105,13 +111,30 @@ G_TOTAL = (
 )
 # 例: V_FS=5V, ADC/DDS 14bit, CIC(65,1,5) → G_TOTAL ≈ 3,626,240
 
-# 实测标定系数: 用已知幅度正弦波 (如 100 mV 峰值 @ 50 kHz) 注入 ADC,
-# 计算 CALIB_K = (实际 V0 mV) / (GUI 显示的 R mV), 然后改下面这个常数.
-# 默认 1.0 表示用理论值, 实测后微调以补偿 ADC 增益误差/前端电路偏差等.
-CALIB_K = 1.0
+# 实测标定系数 = (真实电压) / (GUI 当前显示值).
+# K 拆成两组, 各自独立, 因为 X/Y/R (有混频) 和 DC (无混频) 走两条完全不同
+# 的硬件路径, 标定偏差不一定相等.
+#
+# 标定记录:
+#   2026-05-12  K_HAR: 用 Zurich Instruments 锁相测同一交流信号做交叉比对,
+#                       本 GUI 比 Zurich 大 ~0.34% → × 0.9966 后一致.
+#                       差异来源: ADC 模拟前端增益 / Vref / 电阻分压工艺误差.
+#   2026-05-12  K_DC : 默认 1.0; 需要用万用表测 DC 输入后单独标定.
+CALIB_K_HAR = 0.9966         # 谐波 X/Y/R 通路 (有混频)
+CALIB_K_DC  = 1.0            # DC 通路 (无混频)
 
-V_PER_LSB = CALIB_K / G_TOTAL              # 码值 → V
-MV_PER_LSB = V_PER_LSB * 1000.0            # 码值 → mV (≈ 2.758e-4 mV)
+V_PER_LSB  = CALIB_K_HAR / G_TOTAL          # 码值 → V (X/Y/R 通路)
+MV_PER_LSB = V_PER_LSB * 1000.0             # ≈ 5.38e-4 mV/LSB
+
+# ----------------------------------------------------------------------------
+# 通道3 DC 通路 (无混频, 无 DDS, 直接 ADC → CIC → IIR) 的端到端增益:
+#       G_DC = (2^13 / V_FS) × G_cic
+# 比 X/Y 通道 (有混频) 少了一个 (2^13 × 0.5) = 4096 倍因子.
+# 所以 DC 通道必须用独立的 V_PER_LSB_DC, 否则显示会偏小 4096 倍.
+G_DC = (1 << (ADC_BITS - 1)) / ADC_FS_V * CIC_GAIN_EFF       # ≈ 454 LSB/V
+
+V_PER_LSB_DC  = CALIB_K_DC / G_DC          # 码值 → V (DC 通路, K_DC 独立)
+MV_PER_LSB_DC = V_PER_LSB_DC * 1000.0      # ≈ 2.20 mV/LSB
 
 
 def tau_to_fc_hz(k: int, fs: float = IIR_FS_HZ) -> float:
@@ -283,6 +306,17 @@ class MainWindow(QMainWindow):
         self._latest_locked_ch1 = False
         self._latest_locked_ch2 = False
         self._last_frame: dict | None = None    # 最近一帧解析结果, 供诊断按钮使用
+
+        # 运行时电压标定 (用户可在 GUI 上随时改). K 拆成两组独立:
+        #   _calib_k_har → 只影响 X/Y/R (有混频) 通路 → _v_per_lsb / _mv_per_lsb
+        #   _calib_k_dc  → 只影响 DC    (无混频) 通路 → _v_per_lsb_dc / _mv_per_lsb_dc
+        # DC 通路换算因子比 X/Y 大 4096 倍 (因为 DC 通路没有 ×DDS×0.5 这一段增益).
+        self._calib_k_har    = CALIB_K_HAR
+        self._calib_k_dc     = CALIB_K_DC
+        self._v_per_lsb      = CALIB_K_HAR / G_TOTAL
+        self._mv_per_lsb     = self._v_per_lsb * 1000.0
+        self._v_per_lsb_dc   = CALIB_K_DC / G_DC
+        self._mv_per_lsb_dc  = self._v_per_lsb_dc * 1000.0
 
         self.csv_writer = None
         self.csv_file = None
@@ -802,12 +836,72 @@ class MainWindow(QMainWindow):
         )
         self.btn_clear_curves.clicked.connect(self._on_clear_curves)
 
+        # ★ 全局电压单位切换 (Peak ↔ RMS), 影响 4 路实时数值 + 所有谐波曲线
+        # 相位 Θ 不受影响 (无单位概念).
+        self.cb_amp_unit = QComboBox()
+        self.cb_amp_unit.addItems(["V_peak", "V_rms"])
+        self.cb_amp_unit.setMinimumWidth(85)
+        self.cb_amp_unit.setToolTip(
+            "电压幅度显示单位:\n"
+            "  V_peak = 信号峰值 V₀  (FPGA 原生输出, 默认)\n"
+            "  V_rms  = 有效值 V₀/√2 (与 SR830/Zurich 商用锁相对齐)\n"
+            "影响: 4 路实时数值 + 所有谐波/DC 曲线; 相位 Θ 不变."
+        )
+        self.cb_amp_unit.currentIndexChanged.connect(self._on_amp_unit_changed)
+
+        # ★ 运行时标定系数: K_har (谐波 X/Y/R) 和 K_dc (直流) 各自独立.
+        # 因为两条通路硬件路径不同, 标定偏差也不一定相同.
+
+        def _mk_calib_k_edit(default: float, kind: str, color: str):
+            """构造一组 [QLineEdit][▶] 控件, 返回 (edit, btn)."""
+            ed = QLineEdit(f"{default:.4f}")
+            ed.setFixedWidth(62)
+            ed.setAlignment(Qt.AlignCenter)
+            ed.setToolTip(
+                f"标定系数 K_{kind} = (真实电压) / (GUI 未标定显示).\n"
+                f"  作用: 只影响 {kind.upper()} 通路 (与另一组 K 互不干扰).\n"
+                "  K = 1.0 → 用纯理论 ADC/CIC 增益, 不做软件修正.\n"
+                "  K < 1 → 缩小;  K > 1 → 放大.\n"
+                "建议: 用基准仪器 (Zurich/SR830 测交流 R; 万用表测 DC) 交叉标定后填入."
+            )
+            btn = QPushButton("▶")
+            btn.setFixedSize(28, ed.sizeHint().height())
+            btn.setStyleSheet(
+                f"QPushButton {{ background:{color}; color:#fff; "
+                "font-weight:bold; padding:0px; }"
+                f"QPushButton:hover {{ background:#468; }}"
+            )
+            btn.setToolTip(f"立即应用当前 K_{kind} (Enter 也可生效)")
+            return ed, btn
+
+        self.ed_calib_k_har,  self.btn_calib_k_har_apply  = _mk_calib_k_edit(CALIB_K_HAR, "har", "#357")
+        self.ed_calib_k_dc,   self.btn_calib_k_dc_apply   = _mk_calib_k_edit(CALIB_K_DC,  "dc",  "#735")
+        self.ed_calib_k_har.editingFinished.connect(self._on_calib_k_har_changed)
+        self.btn_calib_k_har_apply.clicked.connect(self._on_calib_k_har_changed)
+        self.ed_calib_k_dc.editingFinished.connect(self._on_calib_k_dc_changed)
+        self.btn_calib_k_dc_apply.clicked.connect(self._on_calib_k_dc_changed)
+
         har_ctrl_layout.addWidget(QLabel("信号:"))
         har_ctrl_layout.addWidget(self.cb_har_select)
         har_ctrl_layout.addWidget(QLabel("分量:"))
         har_ctrl_layout.addWidget(self.cb_comp_select)
         har_ctrl_layout.addWidget(self.btn_add_curve)
         har_ctrl_layout.addWidget(self.btn_clear_curves)
+        har_ctrl_layout.addSpacing(12)
+        har_ctrl_layout.addWidget(QLabel("幅度:"))
+        har_ctrl_layout.addWidget(self.cb_amp_unit)
+        har_ctrl_layout.addSpacing(10)
+        # K_har 着重颜色区分: 蓝 (谐波)
+        lbl_kh = QLabel("K谐波:"); lbl_kh.setStyleSheet("color:#7af;")
+        har_ctrl_layout.addWidget(lbl_kh)
+        har_ctrl_layout.addWidget(self.ed_calib_k_har)
+        har_ctrl_layout.addWidget(self.btn_calib_k_har_apply)
+        har_ctrl_layout.addSpacing(6)
+        # K_dc 着重颜色区分: 紫红 (直流)
+        lbl_kd = QLabel("K直流:"); lbl_kd.setStyleSheet("color:#f9a;")
+        har_ctrl_layout.addWidget(lbl_kd)
+        har_ctrl_layout.addWidget(self.ed_calib_k_dc)
+        har_ctrl_layout.addWidget(self.btn_calib_k_dc_apply)
         har_ctrl_layout.addStretch()
         self.panel_ch3_har.layout().insertLayout(1, har_ctrl_layout)
 
@@ -1172,6 +1266,80 @@ class MainWindow(QMainWindow):
         else:
             self.cb_comp_select.setEnabled(True)
 
+    # ───── 全局电压单位 (V_peak / V_rms) ───────────────────────
+    _SQRT2 = math.sqrt(2.0)
+
+    def _amp_scale(self) -> float:
+        """返回当前电压乘法系数: V_peak → 1.0; V_rms → 1/√2."""
+        if not hasattr(self, "cb_amp_unit"):
+            return 1.0
+        return 1.0 if self.cb_amp_unit.currentText() == "V_peak" else (1.0 / self._SQRT2)
+
+    def _amp_unit_str(self, base: str = "mV") -> str:
+        """返回单位后缀, 例: 'mV' → 'mV' 或 'mVrms';  'V' → 'V' 或 'Vrms'."""
+        if hasattr(self, "cb_amp_unit") and self.cb_amp_unit.currentText() == "V_rms":
+            return base + "rms"
+        return base
+
+    def _on_amp_unit_changed(self, _idx=0):
+        """切换 V_peak ↔ V_rms: 立即刷新一次实时数值 + 曲线."""
+        if getattr(self, "_last_frame", None) is not None:
+            self._update_har_text()
+        if self.t_buf:
+            self.refresh_plots()
+
+    # ───── 运行时电压标定系数 K (谐波 / 直流 两组独立) ──────────────
+    def _parse_calib_k(self, ed: QLineEdit, old_k: float, name: str) -> float | None:
+        """从 LineEdit 解析一个标定 K, 失败时恢复显示并返回 None."""
+        text = ed.text().strip()
+        try:
+            k = float(text)
+        except ValueError:
+            self.on_log(f"[!] {name} 非法: '{text}', 已恢复原值 {old_k:.4f}")
+            ed.setText(f"{old_k:.4f}")
+            return None
+        if not (1e-3 <= k <= 1e3):
+            self.on_log(f"[!] {name} 超范围 (1e-3 ~ 1e3): {k}, 已恢复原值")
+            ed.setText(f"{old_k:.4f}")
+            return None
+        return k
+
+    def _on_calib_k_har_changed(self, *_):
+        """K_har 改变 → 只更新 X/Y/R (有混频) 通路换算因子."""
+        k = self._parse_calib_k(self.ed_calib_k_har, self._calib_k_har, "K谐波")
+        if k is None:
+            return
+        old_k = self._calib_k_har
+        self._calib_k_har = k
+        self._v_per_lsb   = k / G_TOTAL
+        self._mv_per_lsb  = self._v_per_lsb * 1000.0
+        self.on_log(
+            f"[i] K谐波 已更新: {old_k:.4f} → {k:.4f}  "
+            f"(MV_PER_LSB = {self._mv_per_lsb:.4e})"
+        )
+        if getattr(self, "_last_frame", None) is not None:
+            self._update_har_text()
+        if self.t_buf:
+            self.refresh_plots()
+
+    def _on_calib_k_dc_changed(self, *_):
+        """K_dc 改变 → 只更新 DC (无混频) 通路换算因子."""
+        k = self._parse_calib_k(self.ed_calib_k_dc, self._calib_k_dc, "K直流")
+        if k is None:
+            return
+        old_k = self._calib_k_dc
+        self._calib_k_dc    = k
+        self._v_per_lsb_dc  = k / G_DC
+        self._mv_per_lsb_dc = self._v_per_lsb_dc * 1000.0
+        self.on_log(
+            f"[i] K直流 已更新: {old_k:.4f} → {k:.4f}  "
+            f"(MV_PER_LSB_DC = {self._mv_per_lsb_dc:.4e})"
+        )
+        if getattr(self, "_last_frame", None) is not None:
+            self._update_har_text()
+        if self.t_buf:
+            self.refresh_plots()
+
     # ───── 通道3 多曲线添加 / 删除 ──────────────────────────────
     def _on_add_curve(self):
         """点击 [+ 添加] 按钮: 把当前 (信号 × 分量) 添加为新曲线."""
@@ -1274,14 +1442,21 @@ class MainWindow(QMainWindow):
 
     def _refresh_har_curves(self, t: np.ndarray):
         """遍历 self.har_curves, 把每条曲线的数据 setData 进去.
-        Y 轴单位智能切换: 全是电压类 (X/Y/R) → "电压 (V)";
-                          全是相位 (Θ)        → "相位 (°)";
-                          混合                → "电压 (V) / 相位 (°)".
+
+        - 电压类 (X/Y/R/DC) 跟随全局 V_peak / V_rms 单位切换 (Θ 不变).
+        - Y 轴单位智能切换:
+            全是电压类 → "电压 (V)"  或 "电压 (Vrms)"
+            全是相位   → "相位 (°)"
+            混合       → "电压 (V) / 相位 (°)"
         """
         if not self.har_curves:
-            # 没曲线: 把 plot 标签恢复成默认占位, 也不画东西
             self.panel_ch3_har.plot.setLabel("left", "幅值")
             return
+
+        scale    = self._amp_scale()            # 1.0 或 1/√2
+        unit_v   = self._amp_unit_str("V")      # "V" 或 "Vrms"
+        v_lsb    = self._v_per_lsb              # X/Y/R (有混频) 通路
+        v_lsb_dc = self._v_per_lsb_dc           # DC (无混频) 通路, 比 v_lsb 大 4096 倍
 
         has_voltage = False
         has_phase   = False
@@ -1290,33 +1465,35 @@ class MainWindow(QMainWindow):
             comp = it["comp"]
             kx, ky = self._HAR_SIG_KEYS[sig]
 
-            arr_x = np.asarray(self.buf[kx], dtype=float) * V_PER_LSB
+            # ★ DC 通路走独立换算因子, 其它三路谐波走有混频的换算因子
+            this_v_lsb = v_lsb_dc if sig == "DC" else v_lsb
+            arr_x = np.asarray(self.buf[kx], dtype=float) * this_v_lsb
             if ky is None:
                 arr_y = np.zeros_like(arr_x)
             else:
-                arr_y = np.asarray(self.buf[ky], dtype=float) * V_PER_LSB
+                arr_y = np.asarray(self.buf[ky], dtype=float) * this_v_lsb
 
             if comp.startswith("X"):
-                y_data = arr_x
+                y_data = arr_x * scale
                 has_voltage = True
             elif comp.startswith("Y"):
-                y_data = arr_y
+                y_data = arr_y * scale
                 has_voltage = True
             elif comp.startswith("R"):
-                y_data = np.sqrt(arr_x * arr_x + arr_y * arr_y)
+                y_data = np.sqrt(arr_x * arr_x + arr_y * arr_y) * scale
                 has_voltage = True
-            else:  # Θ
+            else:  # Θ - 相位与单位无关
                 y_data = np.degrees(np.arctan2(arr_y, arr_x))
                 has_phase = True
 
             it["curve"].setData(t, y_data)
 
         if has_voltage and has_phase:
-            self.panel_ch3_har.plot.setLabel("left", "电压 (V) / 相位 (°)")
+            self.panel_ch3_har.plot.setLabel("left", f"电压 ({unit_v}) / 相位 (°)")
         elif has_phase:
             self.panel_ch3_har.plot.setLabel("left", "相位 (°)")
         else:
-            self.panel_ch3_har.plot.setLabel("left", "电压 (V)")
+            self.panel_ch3_har.plot.setLabel("left", f"电压 ({unit_v})")
 
     # 谐波 X/Y 数据键名映射 (顺序与 lbl_har_21/12/11 对应)
     _HAR_KEYS = (
@@ -1328,32 +1505,34 @@ class MainWindow(QMainWindow):
     def _update_har_text(self, *_):
         """每一帧把 4 路 (3 谐波 + DC) 的实时值全部刷新.
         与下拉框选择无关 (下拉框只控制波形画哪一路).
-        电压单位 mV, 相位保留 3 位小数.
+        电压单位 mV/mVrms 由全局 cb_amp_unit 控制; 相位 Θ 永远 °.
         """
         d = self._last_frame
         if d is None:
             return
 
-        # 电压换算用模块级常量 MV_PER_LSB (见文件顶部 G_TOTAL 推导, 默认 ≈ 2.758e-4 mV/LSB).
-        # 如果实测发现 GUI 值偏差固定比例, 改文件顶部的 CALIB_K 即可.
+        scale  = self._amp_scale()             # 1.0 (peak) 或 1/√2 (rms)
+        unit   = self._amp_unit_str("mV")      # "mV" 或 "mVrms"
+        mv_lsb = self._mv_per_lsb              # 运行时标定后的电压换算因子
 
         # 3 路谐波: 各自显示 X / Y / R / Θ
         for lbl, (name, kx, ky) in zip(
             (self.lbl_har_21, self.lbl_har_12, self.lbl_har_11),
             self._HAR_KEYS,
         ):
-            x_mv = d.get(kx, 0) * MV_PER_LSB
-            y_mv = d.get(ky, 0) * MV_PER_LSB
+            x_mv = d.get(kx, 0) * mv_lsb * scale
+            y_mv = d.get(ky, 0) * mv_lsb * scale
             r_mv = math.sqrt(x_mv * x_mv + y_mv * y_mv)
             theta_deg = math.degrees(math.atan2(y_mv, x_mv))
             lbl.setText(
-                f"{name} │ X: {x_mv:>+10.3f} mV  Y: {y_mv:>+10.3f} mV  "
-                f"R: {r_mv:>10.3f} mV  Θ: {theta_deg:>+8.3f}°"
+                f"{name} │ X: {x_mv:>+10.3f} {unit}  Y: {y_mv:>+10.3f} {unit}  "
+                f"R: {r_mv:>10.3f} {unit}  Θ: {theta_deg:>+8.3f}°"
             )
 
-        # DC: 只有幅值
-        dc_mv = d.get("ch3_dc", 0) * MV_PER_LSB
-        self.lbl_har_dc.setText(f"DC     │ {dc_mv:>+10.3f} mV   (无 Y/Θ)")
+        # DC: 只有幅值. ★ 用独立的 mv_lsb_dc (无混频通路, 比 X/Y 大 4096 倍).
+        # DC 物理上是直流, 严格说没有 RMS 概念, 但为显示一致, 这里也按全局 scale 缩放.
+        dc_mv = d.get("ch3_dc", 0) * self._mv_per_lsb_dc * scale
+        self.lbl_har_dc.setText(f"DC     │ {dc_mv:>+10.3f} {unit}   (无 Y/Θ)")
 
     # ============================================================ 数据接收
     def on_frame(self, data: dict):

@@ -94,8 +94,8 @@ wire [47:0] tx1_phase_word;
 wire [47:0] tx1_freq_word;
 wire [47:0] tx2_phase_word = 48'd0;
 wire [47:0] tx2_freq_word;
-// ★ 通道3 三路 lockin_psd 的 ref_freq (由 USB 命令 FRQ21/FRQ12/FRQ11 动态下发)
-//   PLL 注释期间手动给定, 后续 PLL 恢复后可改回 pll_freq_ch1/ch2 运算
+// ★ 通道3 三路 lockin_psd 的 ref_freq (由 USB 命令 FRQ21/FRQ12/FRQ11 动态下发).
+//   REFMODE=0 时直接走这三个 wire (手动); REFMODE=1 时改走 pll_freq_ch1/ch2 运算结果 (自动).
 wire [47:0] freq_word_21_uart;   // ch3 @ 2F1+F2
 wire [47:0] freq_word_12_uart;   // ch3 @ F1+2F2
 wire [47:0] freq_word_11_uart;   // ch3 @ F1+F2
@@ -144,79 +144,79 @@ ad_wave_rec u_ad_wave_rec_2 (
 // =========================================================================
 wire [47:0]         pll_freq_ch1;
 wire signed [27:0]  dc_x_ch1, dc_y_ch1;
-// wire                cic_valid_x_ch1, cic_valid_y_ch1;
-// wire                dc_valid_x_ch1,  dc_valid_y_ch1;
+wire                cic_valid_x_ch1, cic_valid_y_ch1;
+wire                dc_valid_x_ch1,  dc_valid_y_ch1;
 wire                is_locked_ch1;
 
-// // ★★★ 锁定阈值现在由上位机运行时下发, 不再是综合时常量 ★★★
-// //   命令: LOCKSWY:<n>  → sweep_thres  (Y 进 LOCK 门槛)
-// //        LOCKTHX:<n>  → lock_x_thres (X 维持 LOCK 门槛)
-// //   默认值在 usb_commend.v 复位时设为 100_000 / 300_000 (折中)
-// //
-// //   28 bit signed 信号在 14×14 混频 + CIC + IIR 后, 满量程量级 ≈ ±30 M.
-// //   ADC 噪声本底 ~800 K (取决于环境). 调参参考:
-// //     - 信号强 (≥ 25% 满量程) → SWEEP=800K, LOCK=3M
-// //     - 信号弱 (< 5% 满量程)  → SWEEP=20K,  LOCK=50K
-// //     - 不知道 / 中等          → SWEEP=100K, LOCK=300K (默认)
-// pll_loop #(
-//     .KI_FRAC      (16),
-//     .IN_WIDTH     (28)
-// ) u_pll_ch1 (
-//     .clk          (clk_65M),
-//     .rst_n        (sys_rst_n),
-//     .pll_en       (pll_en),
-//     .adc_in       (adc_ch1),
-//     .center_freq  (tx1_freq_word),
-//     .pll_kp       (pll_kp),
-//     .pll_ki       (pll_ki),
-//     .tau_x        (tau1_x_uart),
-//     .tau_y        (tau1_y_uart),
-//     .sweep_thres  (sweep_thres_uart),
-//     .lock_x_thres (lock_x_thres_uart),
-//     .dds_freq_out (pll_freq_ch1),
-//     .dc_x         (dc_x_ch1),
-//     .dc_y         (dc_y_ch1),
-//     .cic_valid_x  (cic_valid_x_ch1),
-//     .cic_valid_y  (cic_valid_y_ch1),
-//     .dc_valid_x   (dc_valid_x_ch1),
-//     .dc_valid_y   (dc_valid_y_ch1),
-//     .is_locked    (is_locked_ch1)
-// );
+// ★★★ 锁定阈值现在由上位机运行时下发, 不再是综合时常量 ★★★
+//   命令: LOCKSWY:<n>  → sweep_thres  (Y 进 LOCK 门槛)
+//        LOCKTHX:<n>  → lock_x_thres (X 维持 LOCK 门槛)
+//   默认值在 usb_commend.v 复位时设为 100_000 / 300_000 (折中)
+//
+//   28 bit signed 信号在 14×14 混频 + CIC + IIR 后, 满量程量级 ≈ ±30 M.
+//   ADC 噪声本底 ~800 K (取决于环境). 调参参考:
+//     - 信号强 (≥ 25% 满量程) → SWEEP=800K, LOCK=3M
+//     - 信号弱 (< 5% 满量程)  → SWEEP=20K,  LOCK=50K
+//     - 不知道 / 中等          → SWEEP=100K, LOCK=300K (默认)
+pll_loop #(
+    .KI_FRAC      (16),
+    .IN_WIDTH     (28)
+) u_pll_ch1 (
+    .clk          (clk_65M),
+    .rst_n        (sys_rst_n),
+    .pll_en       (pll_en),
+    .adc_in       (adc_ch1),
+    .center_freq  (tx1_freq_word),
+    .pll_kp       (pll_kp),
+    .pll_ki       (pll_ki),
+    .tau_x        (tau1_x_uart),
+    .tau_y        (tau1_y_uart),
+    .sweep_thres  (sweep_thres_uart),
+    .lock_x_thres (lock_x_thres_uart),
+    .dds_freq_out (pll_freq_ch1),
+    .dc_x         (dc_x_ch1),
+    .dc_y         (dc_y_ch1),
+    .cic_valid_x  (cic_valid_x_ch1),
+    .cic_valid_y  (cic_valid_y_ch1),
+    .dc_valid_x   (dc_valid_x_ch1),
+    .dc_valid_y   (dc_valid_y_ch1),
+    .is_locked    (is_locked_ch1)
+);
 
 
-// // =========================================================================
-// // ★ 通道2: 锁相环 (闭环 PLL)  —— ★ 跟踪 adc_ch2 → 输出 F2 = pll_freq_ch2
-// // =========================================================================
+// =========================================================================
+// ★ 通道2: 锁相环 (闭环 PLL)  —— ★ 跟踪 adc_ch2 → 输出 F2 = pll_freq_ch2
+// =========================================================================
 wire [47:0]         pll_freq_ch2;
 wire signed [27:0]  dc_x_ch2, dc_y_ch2;
-// wire                cic_valid_x_ch2, cic_valid_y_ch2;
-// wire                dc_valid_x_ch2,  dc_valid_y_ch2;
+wire                cic_valid_x_ch2, cic_valid_y_ch2;
+wire                dc_valid_x_ch2,  dc_valid_y_ch2;
 wire                is_locked_ch2;
 
-// pll_loop #(
-//     .KI_FRAC      (16),
-//     .IN_WIDTH     (28)
-// ) u_pll_ch2 (
-//     .clk          (clk_65M),
-//     .rst_n        (sys_rst_n),
-//     .pll_en       (pll_en),
-//     .adc_in       (adc_ch2),
-//     .center_freq  (tx2_freq_word),     // 扫频起点 (FRQ3 指令设置)
-//     .pll_kp       (pll_kp),
-//     .pll_ki       (pll_ki),
-//     .tau_x        (tau2_x_uart),
-//     .tau_y        (tau2_y_uart),
-//     .sweep_thres  (sweep_thres_uart),    // ★ 两通道共用阈值
-//     .lock_x_thres (lock_x_thres_uart),
-//     .dds_freq_out (pll_freq_ch2),
-//     .dc_x         (dc_x_ch2),
-//     .dc_y         (dc_y_ch2),
-//     .cic_valid_x  (cic_valid_x_ch2),
-//     .cic_valid_y  (cic_valid_y_ch2),
-//     .dc_valid_x   (dc_valid_x_ch2),
-//     .dc_valid_y   (dc_valid_y_ch2),
-//     .is_locked    (is_locked_ch2)
-// );
+pll_loop #(
+    .KI_FRAC      (16),
+    .IN_WIDTH     (28)
+) u_pll_ch2 (
+    .clk          (clk_65M),
+    .rst_n        (sys_rst_n),
+    .pll_en       (pll_en),
+    .adc_in       (adc_ch2),
+    .center_freq  (tx2_freq_word),     // 扫频起点 (FRQ3 指令设置)
+    .pll_kp       (pll_kp),
+    .pll_ki       (pll_ki),
+    .tau_x        (tau2_x_uart),
+    .tau_y        (tau2_y_uart),
+    .sweep_thres  (sweep_thres_uart),    // ★ 两通道共用阈值
+    .lock_x_thres (lock_x_thres_uart),
+    .dds_freq_out (pll_freq_ch2),
+    .dc_x         (dc_x_ch2),
+    .dc_y         (dc_y_ch2),
+    .cic_valid_x  (cic_valid_x_ch2),
+    .cic_valid_y  (cic_valid_y_ch2),
+    .dc_valid_x   (dc_valid_x_ch2),
+    .dc_valid_y   (dc_valid_y_ch2),
+    .is_locked    (is_locked_ch2)
+);
 
 
 // =========================================================================
@@ -255,27 +255,32 @@ wire                is_locked_ch2;
 
 
 // =========================================================================
-// ★ 通道3: 三路开环锁相放大器 (lockin_psd) + 一路 DC 通路
+// ★★★ 通道3 锁相放大器 (PSD + DC 通路) 已暂时禁用 ★★★
+//
+// 目的: 缩短综合时间, 专注调 PLL.
+// 影响: PSD 输出全部固定为 0 (ILA / USB 帧打包字段都跑得通, 只是显示 0)
+// 恢复: 删除下面 "占位 wire" 几行 + 删除下方 /* === DISABLED ... */ 块注释
 // =========================================================================
 
+// ---- 占位 wire (PSD/DC 关闭后, 给下游 ILA / 帧打包用) ----
+wire signed [27:0] dc_x_ch3_21 = 28'sd0;
+wire signed [27:0] dc_y_ch3_21 = 28'sd0;
+wire signed [27:0] dc_x_ch3_12 = 28'sd0;
+wire signed [27:0] dc_y_ch3_12 = 28'sd0;
+wire signed [27:0] dc_x_ch3_11 = 28'sd0;
+wire signed [27:0] dc_y_ch3_11 = 28'sd0;
+wire signed [27:0] dc_ch3      = 28'sd0;
+
+/* === PSD/DC disabled BEGIN ==================================================
 // =========================================================================
 // ★ 通道3 ref_freq 来源 mux: 自动 (PLL 硬件实时) / 手动 (USB 下发)
 //
 //   REFMODE = 0 (默认, 手动): ref_freq = FRQ21 / FRQ12 / FRQ11 (上位机算好下发)
 //   REFMODE = 1 (自动)      : ref_freq 由 pll_freq_ch1/ch2 在硬件层实时运算
 //                             (无软件每帧下发, 完全跟随 PLL 锁定结果)
-//
-//   ★★★ 当前 pll_loop u_pll_ch1 / u_pll_ch2 已被注释 ★★★
-//     pll_freq_ch1 / pll_freq_ch2 是悬空 wire, "自动"支路不可用.
-//     因此 mux 暂时【强制走手动支路】(REFMODE 命令仍可下发, 但当前不生效).
-//
-//   ★ PLL 恢复时怎么改:
-//     1) 取消注释下方 "PLL 恢复后启用" 的 3 行 assign
-//     2) 删除/注释 "PLL 注释期间" 的 3 行 assign (本意是强制走手动)
-//     3) 这样 REFMODE 命令就能切换"自动/手动"两种模式
 // =========================================================================
 
-// 组合频率 (PLL 锁定后) — 暂时悬空, 等 PLL 恢复后才有效
+// 组合频率 (PLL 锁定后)
 wire [47:0] f_2f1_plus_f2 = pll_freq_ch1 * 2 + pll_freq_ch2;
 wire [47:0] f_f1_plus_2f2 = pll_freq_ch1 + 2 * pll_freq_ch2;
 wire [47:0] f_f1_plus_f2  = pll_freq_ch1 + pll_freq_ch2;
@@ -285,18 +290,11 @@ wire [47:0] ref_freq_21_to_psd;
 wire [47:0] ref_freq_12_to_psd;
 wire [47:0] ref_freq_11_to_psd;
 
-// 【PLL 注释期间】强制走手动支路, REFMODE 命令暂不生效
-assign ref_freq_21_to_psd = freq_word_21_uart;
-assign ref_freq_12_to_psd = freq_word_12_uart;
-assign ref_freq_11_to_psd = freq_word_11_uart;
-
-// 【PLL 恢复后启用】取消下面 3 行注释, 同时把上面 3 行 assign 删除/注释
-// assign ref_freq_21_to_psd = ref_freq_auto_uart ? f_2f1_plus_f2 : freq_word_21_uart;
-// assign ref_freq_12_to_psd = ref_freq_auto_uart ? f_f1_plus_2f2 : freq_word_12_uart;
-// assign ref_freq_11_to_psd = ref_freq_auto_uart ? f_f1_plus_f2  : freq_word_11_uart;
+assign ref_freq_21_to_psd = ref_freq_auto_uart ? f_2f1_plus_f2 : freq_word_21_uart;
+assign ref_freq_12_to_psd = ref_freq_auto_uart ? f_f1_plus_2f2 : freq_word_12_uart;
+assign ref_freq_11_to_psd = ref_freq_auto_uart ? f_f1_plus_f2  : freq_word_11_uart;
 
 // ---- 通道3 @ 2F1+F2 -----------------------------------------------------
-wire signed [27:0] dc_x_ch3_21, dc_y_ch3_21;
 wire               dc_valid_x_ch3_21, dc_valid_y_ch3_21;
 
 lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
@@ -316,7 +314,6 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
 );
 
 // ---- 通道3 @ F1+2F2 -----------------------------------------------------
-wire signed [27:0] dc_x_ch3_12, dc_y_ch3_12;
 wire               dc_valid_x_ch3_12, dc_valid_y_ch3_12;
 
 lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
@@ -336,7 +333,6 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
 );
 
 // ---- 通道3 @ F1+F2  -----------------------------------------------------
-wire signed [27:0] dc_x_ch3_11, dc_y_ch3_11;
 wire               dc_valid_x_ch3_11, dc_valid_y_ch3_11;
 
 lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
@@ -365,14 +361,13 @@ cic_compiler_0 u_cic_dc_ch3 (
     .m_axis_data_tdata   (cic_dc_ch3),  .m_axis_data_tvalid (cic_valid_dc_ch3)
 );
 
-wire signed [27:0] dc_ch3;
 wire               dc_valid_ch3;
-// DC 通路同样使用 cascade, 但阶数独立 (ORDDC 命令), 与三路谐波 (ORD21/12/11) 各自独立
 iir_lpf_cascade #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
     .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_dc_ch3),
     .shift_k(tau_dc_uart), .order(order_dc_uart),
     .din(cic_dc_ch3), .dout(dc_ch3), .valid_out(dc_valid_ch3)
 );
+=== PSD/DC disabled END =================================================== */
 
 
 // =========================================================================
@@ -491,10 +486,8 @@ usb_commend u_usb_commend (
     .rec_done(rec_done),
     .tx_done(tx_done),
     .x_y_fir(x_y_fir_packed),
-    // ★ PLL 注释期间, 数据帧触发信号改用 ch3 @ 2F1+F2 的 dc_valid_x
-    //   (原本是 PLL ch1 的 dc_valid_x_ch1, 但 pll_loop u_pll_ch1 已被注释)
-    //   恢复 PLL 后改回 dc_valid_x_ch1 即可.
-    .m_axis_data_tvalid_fir_x(dc_valid_x_ch3_21),
+    // 数据帧触发: 用 PLL ch1 的 dc_valid_x 一拍 → 每帧上传一次
+    .m_axis_data_tvalid_fir_x(dc_valid_x_ch1),
     .center_freq(center_freq_uart),
     .pll_kp(pll_kp),
     .pll_ki(pll_ki),
@@ -536,12 +529,13 @@ ila_0 u_ila_0 (
     .probe0  (adc_ch1),                 // 14bit
     .probe1  (adc_ch2),                 // 14bit
     .probe2  (adc_ch3),                 // 14bit
-    // .probe3  (pll_freq_ch1),            // 48bit: F1
-    // .probe4  (pll_freq_ch2),            // 48bit: F2 ★ 现已闭环
-    .probe3  (dc_x_ch3_21),             // 28bit
-    .probe4  (dc_x_ch3_12),             // 28bit
-    .probe5  (dc_x_ch3_11),             // 28bit
-    .probe6  (dc_ch3)                   // 28bit
+    // PSD 已禁用, 把 probe3~6 切到 PLL 闭环量, 便于在 ILA 里直接看锁相过程
+    //   probe3/4 = ch1 X/Y (X≈幅度, Y≈相位误差→PI 输入)
+    //   probe5/6 = ch2 X/Y
+    .probe3  (dc_x_ch1),                // 28bit
+    .probe4  (dc_y_ch1),                // 28bit
+    .probe5  (dc_x_ch2),                // 28bit
+    .probe6  (dc_y_ch2)                 // 28bit
 );
 
 
