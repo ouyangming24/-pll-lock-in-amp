@@ -32,7 +32,7 @@ from PyQt5.QtWidgets import (
 
 from device import (
     LockinDevice, UdpLockinDevice, MockDevice, list_serial_ports,
-    hz_to_freq_word, FIELD_NAMES,
+    hz_to_freq_word, FIELD_NAMES, F_CLK,
 )
 
 # ============================================================================
@@ -1560,8 +1560,7 @@ class MainWindow(QMainWindow):
 
         if self.csv_writer:
             try:
-                self.csv_writer.writerow(
-                    [data["timestamp"]] + [data[k] for k in FIELD_NAMES])
+                self.csv_writer.writerow(self._build_csv_row(data))
             except Exception as e:
                 self.on_log(f"[!] CSV 写入失败: {e}")
 
@@ -1596,6 +1595,89 @@ class MainWindow(QMainWindow):
         self.lbl_status_buf.setText(f"缓冲: {len(self.t_buf)}/{PLOT_BUF}")
 
     # ============================================================ CSV 录制
+    # CSV 表头. 列定义:
+    #   timestamp                绝对时间戳 (Unix epoch, 秒)
+    #   pll_freq_ch1_hz / ch2_hz PLL 锁定频率 (Hz, 由频率字反算)
+    #   locked_ch1 / locked_ch2  PLL 锁定标志 (0/1)
+    #   ch3_21_X_mV ... theta_deg  通道3 @ 2F1+F2: X, Y, R(=√(X²+Y²)), Θ(=atan2(Y,X))
+    #   ch3_12_X_mV ... theta_deg  通道3 @ F1+2F2 同上
+    #   ch3_11_X_mV ... theta_deg  通道3 @ F1+F2  同上
+    #   ch3_dc_mV                通道3 DC 通路电压
+    #   ch1_X_mV/Y/R/theta       通道1 PLL 内部 X/Y (锁相过程的 in-phase / quadrature)
+    #   ch2_X_mV/Y/R/theta       通道2 PLL 内部 X/Y
+    #   adc_ch1/2/3_LSB          原始 ADC 14bit 码值 (-8192 ~ 8191), 追溯用
+    #
+    # ★ 电压单位固定为 "mV peak", 不随 GUI 显示 (Peak / RMS) 切换变化
+    #   想要 RMS, 事后乘 1/√2 即可
+    CSV_COLUMNS = [
+        "timestamp",
+        "pll_freq_ch1_hz", "pll_freq_ch2_hz", "locked_ch1", "locked_ch2",
+        # --- 通道3 三谐波: X, Y, R, theta(°) ---
+        "ch3_21_X_mV", "ch3_21_Y_mV", "ch3_21_R_mV", "ch3_21_theta_deg",
+        "ch3_12_X_mV", "ch3_12_Y_mV", "ch3_12_R_mV", "ch3_12_theta_deg",
+        "ch3_11_X_mV", "ch3_11_Y_mV", "ch3_11_R_mV", "ch3_11_theta_deg",
+        # --- 通道3 DC ---
+        "ch3_dc_mV",
+        # --- 通道1/2 PLL 内部 X/Y/R/theta ---
+        "ch1_X_mV", "ch1_Y_mV", "ch1_R_mV", "ch1_theta_deg",
+        "ch2_X_mV", "ch2_Y_mV", "ch2_R_mV", "ch2_theta_deg",
+        # --- 原始 ADC (LSB) ---
+        "adc_ch1_LSB", "adc_ch2_LSB", "adc_ch3_LSB",
+    ]
+
+    def _build_csv_row(self, d: dict) -> list:
+        """按 CSV_COLUMNS 顺序生成一行电压/相位数据.
+        电压一律按 mV peak 输出, 不受 GUI Unit 切换影响.
+        """
+        mv      = self._mv_per_lsb           # 谐波 / PLL 通路 LSB → mV
+        mv_dc   = self._mv_per_lsb_dc        # DC 通路 LSB → mV (不同增益)
+
+        def _xy_block(kx: str, ky: str):
+            """根据 X/Y 字段名计算 (X, Y, R, theta) 四个值 (mV / °)"""
+            x = d.get(kx, 0) * mv
+            y = d.get(ky, 0) * mv
+            r = math.sqrt(x * x + y * y)
+            th = math.degrees(math.atan2(y, x))
+            return x, y, r, th
+
+        row = [
+            f"{d.get('timestamp', 0.0):.6f}",
+            f"{d.get('pll_freq_ch1_hz', 0.0):.6f}",
+            f"{d.get('pll_freq_ch2_hz', 0.0):.6f}",
+            int(bool(d.get("locked_ch1", False))),
+            int(bool(d.get("locked_ch2", False))),
+        ]
+        for kx, ky in (("ch3_x_21", "ch3_y_21"),
+                       ("ch3_x_12", "ch3_y_12"),
+                       ("ch3_x_11", "ch3_y_11")):
+            x, y, r, th = _xy_block(kx, ky)
+            row += [f"{x:.6f}", f"{y:.6f}", f"{r:.6f}", f"{th:.4f}"]
+        row.append(f"{d.get('ch3_dc', 0) * mv_dc:.6f}")
+        for kx, ky in (("ch1_x", "ch1_y"), ("ch2_x", "ch2_y")):
+            x, y, r, th = _xy_block(kx, ky)
+            row += [f"{x:.6f}", f"{y:.6f}", f"{r:.6f}", f"{th:.4f}"]
+        row += [d.get("adc_ch1", 0), d.get("adc_ch2", 0), d.get("adc_ch3", 0)]
+        return row
+
+    def _write_csv_metadata_header(self, f):
+        """在 CSV 第一行之前, 用 '#' 注释行写入元数据.
+        pandas 读取时用 pd.read_csv(path, comment='#') 即可自动跳过.
+        """
+        meta_lines = [
+            f"# Lockin GUI Recording",
+            f"# recorded_at      = {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"# voltage_unit     = mV peak (NOT scaled by GUI Peak/RMS switch)",
+            f"# phase_unit       = degree (atan2(Y, X))",
+            f"# CALIB_K_HAR      = {self._calib_k_har:.6f}",
+            f"# CALIB_K_DC       = {self._calib_k_dc:.6f}",
+            f"# MV_PER_LSB       = {self._mv_per_lsb:.6e}  # 谐波/PLL 通路: LSB -> mV",
+            f"# MV_PER_LSB_DC    = {self._mv_per_lsb_dc:.6e}  # DC 通路:    LSB -> mV",
+            f"# ADC_FS_V         = {ADC_FS_V:.4f}",
+            f"# F_CLK_Hz         = {F_CLK}",
+            f"#",
+        ]
+        f.write("\n".join(meta_lines) + "\n")
+
     def on_record_clicked(self):
         if self.csv_writer:
             self._stop_recording()
@@ -1607,13 +1689,16 @@ class MainWindow(QMainWindow):
                 return
             try:
                 self.csv_file = open(path, "w", newline="", encoding="utf-8")
+                self._write_csv_metadata_header(self.csv_file)
                 self.csv_writer = csv.writer(self.csv_file)
-                self.csv_writer.writerow(["timestamp"] + FIELD_NAMES)
+                self.csv_writer.writerow(self.CSV_COLUMNS)
                 self.btn_record.setText("⏹ 停止录制")
                 self.btn_record.setStyleSheet("background:#a33; color:white;")
                 self.lbl_status_rec.setText(f"● 录制中: {path.split('/')[-1]}")
                 self.lbl_status_rec.setStyleSheet("color:#f55;")
                 self.on_log(f"[+] 开始录制: {path}")
+                self.on_log(f"    电压单位 = mV peak (CALIB_K_HAR={self._calib_k_har:.4f}, "
+                            f"K_DC={self._calib_k_dc:.4f})")
             except Exception as e:
                 self.on_log(f"[!] 打开 CSV 失败: {e}")
 
