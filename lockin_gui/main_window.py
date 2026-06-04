@@ -318,6 +318,11 @@ class MainWindow(QMainWindow):
         self._v_per_lsb_dc   = CALIB_K_DC / G_DC
         self._mv_per_lsb_dc  = self._v_per_lsb_dc * 1000.0
 
+        # 运行时"时基(晶振)标定": k = 真实频率 / GUI 未标定显示频率 = 实际时钟 / 标称 65MHz
+        #   显示: pll_freq_hz *= k ;  下发: word = hz_to_freq_word(hz / k)  (两者自洽)
+        #   纯比例误差 (无截距), 故标定一个点即可; k = 1.0 表示不修正 (用理想 65 MHz)
+        self._clk_cal = 1.0
+
         self.csv_writer = None
         self.csv_file = None
 
@@ -506,6 +511,9 @@ class MainWindow(QMainWindow):
         self.ed_f1 = self._mk_freq_row(g_freq, 0, "F1 起点", "50000", "FRQ2")
         self.ed_f2 = self._mk_freq_row(g_freq, 1, "F2 起点", "60000", "FRQ3")
         v.addWidget(gb_freq)
+
+        # ★ 时基(晶振)标定: 修正锁定频率读数的固定 ppm 误差
+        v.addWidget(self._build_clk_cal_group())
 
         # ★ 通道3 三路开环锁相 ref_freq
         #   两种模式:
@@ -786,6 +794,125 @@ class MainWindow(QMainWindow):
         self.ed_fr21.setText(f"{2 * f1 + f2:.0f}")
         self.ed_fr12.setText(f"{f1 + 2 * f2:.0f}")
         self.ed_fr11.setText(f"{f1 + f2:.0f}")
+
+    # ------------------------------------------------- 时基(晶振)标定
+    # 锁定频率读数有一个固定的 ppm 误差, 来自板载 50MHz 晶振相对理想值的偏差
+    # (经 clk_wiz 倍频到 65MHz). 这是纯比例误差 (f_显 = f_真 / k, 过原点, 无截距),
+    # 所以标定一个点即可确定 k = f_真 / f_显; 填多个点取平均更稳.
+    #   修正后: 显示 pll_freq_hz *= k ; 下发 word = hz_to_freq_word(hz / k).
+    def _build_clk_cal_group(self) -> QGroupBox:
+        gb = QGroupBox("时基标定 (晶振 ppm 修正)")
+        gb.setObjectName("gbHighlight")
+        gb.setToolTip(
+            "锁定频率的'基础误差'来自板载晶振相对理想 65MHz 的 ppm 偏差.\n"
+            "纯比例误差 → 标定 1 个点即可, 多填几点取平均更稳.\n"
+            "用法: '设定真值'填信号源真实频率, '实测显示'填 GUI 锁定稳定后的读数,\n"
+            "点'计算并应用'即可; 也可直接在下方输入 ppm 手动设置.\n"
+            "提示: 标定要等开机十几分钟、温度稳定后做, 用尽量准的信号源."
+        )
+        outer = QVBoxLayout(gb)
+        outer.setContentsMargins(10, 12, 10, 8)
+        outer.setSpacing(6)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        h1 = QLabel("设定真值 (Hz)"); h1.setStyleSheet("font-size:9pt; color:#9bd;")
+        h2 = QLabel("实测显示 (Hz)"); h2.setStyleSheet("font-size:9pt; color:#9bd;")
+        grid.addWidget(h1, 0, 1)
+        grid.addWidget(h2, 0, 2)
+
+        self.ed_cal_true = []
+        self.ed_cal_disp = []
+        defaults_true = ["100000", "60000", "50000"]
+        for i, dt in enumerate(defaults_true):
+            lb = QLabel(f"点{i+1}"); lb.setFixedWidth(40); lb.setStyleSheet("font-size:10pt;")
+            et = QLineEdit(dt); et.setFixedWidth(150); et.setAlignment(Qt.AlignCenter)
+            ed = QLineEdit("");  ed.setFixedWidth(150); ed.setAlignment(Qt.AlignCenter)
+            ed.setPlaceholderText("锁定稳定读数")
+            grid.addWidget(lb, i + 1, 0)
+            grid.addWidget(et, i + 1, 1)
+            grid.addWidget(ed, i + 1, 2)
+            self.ed_cal_true.append(et)
+            self.ed_cal_disp.append(ed)
+        outer.addLayout(grid)
+
+        btn_h = QHBoxLayout()
+        self.btn_cal_apply = QPushButton("计算并应用")
+        self.btn_cal_apply.setStyleSheet(
+            "background:#357; color:#fff; font-weight:bold; padding:4px 10px;")
+        self.btn_cal_apply.clicked.connect(self._apply_clk_cal_from_points)
+        self.btn_cal_reset = QPushButton("复位 (k=1)")
+        self.btn_cal_reset.setStyleSheet("padding:4px 10px;")
+        self.btn_cal_reset.clicked.connect(self._reset_clk_cal)
+        btn_h.addWidget(self.btn_cal_apply)
+        btn_h.addWidget(self.btn_cal_reset)
+        btn_h.addStretch()
+        outer.addLayout(btn_h)
+
+        ppm_h = QHBoxLayout()
+        ppm_h.addWidget(QLabel("手动 ppm:"))
+        self.ed_cal_ppm = QLineEdit("0.000")
+        self.ed_cal_ppm.setFixedWidth(90); self.ed_cal_ppm.setAlignment(Qt.AlignCenter)
+        self.ed_cal_ppm.setToolTip(
+            "时钟相对标称 65MHz 的偏差 ppm (负 = 实际偏慢 → 显示偏高). 回车或点 ▶ 应用.")
+        self.ed_cal_ppm.returnPressed.connect(self._apply_clk_cal_from_ppm)
+        btn_ppm = QPushButton("▶"); btn_ppm.setFixedWidth(36)
+        btn_ppm.setStyleSheet("font-weight:bold;")
+        btn_ppm.clicked.connect(self._apply_clk_cal_from_ppm)
+        ppm_h.addWidget(self.ed_cal_ppm)
+        ppm_h.addWidget(btn_ppm)
+        ppm_h.addStretch()
+        outer.addLayout(ppm_h)
+
+        self.lbl_clk_cal = QLabel("当前: k = 1.0000000  (时钟偏差 +0.00 ppm)")
+        self.lbl_clk_cal.setStyleSheet("font-size:9pt; color:#5d5;")
+        outer.addWidget(self.lbl_clk_cal)
+        return gb
+
+    def _set_clk_cal(self, k: float, note: str = ""):
+        """统一设置时基标定系数 k, 刷新 UI 与日志. 越界 (±10万ppm) 拒绝."""
+        if not (0.9 <= k <= 1.1):
+            self.on_log(f"[!] 时基标定 k={k:.7f} 超出合理范围 (0.9~1.1), 已忽略")
+            return
+        self._clk_cal = k
+        ppm = (k - 1.0) * 1e6
+        self.lbl_clk_cal.setText(f"当前: k = {k:.7f}  (时钟偏差 {ppm:+.2f} ppm)")
+        if hasattr(self, "ed_cal_ppm"):
+            self.ed_cal_ppm.setText(f"{ppm:.3f}")
+        self.on_log(f"[i] 时基标定已应用: k={k:.7f} ({ppm:+.2f} ppm){(' ' + note) if note else ''}")
+
+    def _apply_clk_cal_from_points(self):
+        """读各标定点, 算 k = mean(真值 / 显示) 并应用. 只统计两栏都填了的行."""
+        ks = []
+        for et, ed in zip(self.ed_cal_true, self.ed_cal_disp):
+            ts, ds = et.text().strip(), ed.text().strip()
+            if not ts or not ds:
+                continue
+            try:
+                tv, dv = float(ts), float(ds)
+            except ValueError:
+                self.on_log(f"[!] 标定点数值非法: '{ts}' / '{ds}', 跳过")
+                continue
+            if tv <= 0 or dv <= 0:
+                continue
+            ks.append(tv / dv)
+        if not ks:
+            self.on_log("[!] 没有有效标定点 (每点需同时填'设定真值'和'实测显示')")
+            return
+        self._set_clk_cal(sum(ks) / len(ks), note=f"(由 {len(ks)} 个点平均)")
+
+    def _apply_clk_cal_from_ppm(self):
+        """直接按手动输入的 ppm 设置 k = 1 + ppm·1e-6."""
+        try:
+            ppm = float(self.ed_cal_ppm.text().strip())
+        except ValueError:
+            self.on_log(f"[!] ppm 非法: '{self.ed_cal_ppm.text()}'")
+            return
+        self._set_clk_cal(1.0 + ppm * 1e-6, note="(手动 ppm)")
+
+    def _reset_clk_cal(self):
+        self._set_clk_cal(1.0, note="(复位, 不修正)")
 
     # ------------------------------------------------------------- 绘图区
     def _build_plot_area(self) -> QWidget:
@@ -1077,9 +1204,13 @@ class MainWindow(QMainWindow):
         except ValueError:
             self.on_log(f"[!] {cmd} 频率非法: {hz_str}")
             return
-        word = hz_to_freq_word(hz)
+        # 下发按时基标定反向换算: DDS 用真实(偏差)时钟产生, 物理输出才等于 hz
+        word = hz_to_freq_word(hz / self._clk_cal)
         self.dev.send_command(f"{cmd}:{word}")
-        self.on_log(f"  ({hz:.3f} Hz → 频率字 {word})")
+        if self._clk_cal != 1.0:
+            self.on_log(f"  ({hz:.3f} Hz → 频率字 {word}, 已按时基标定 k={self._clk_cal:.7f})")
+        else:
+            self.on_log(f"  ({hz:.3f} Hz → 频率字 {word})")
 
     # ------------------------------------------------------------------
     # 视觉反馈: 点击参数行 ▶ 按钮后, 整行高亮 ~ 450 ms 再恢复
@@ -1537,6 +1668,12 @@ class MainWindow(QMainWindow):
     # ============================================================ 数据接收
     def on_frame(self, data: dict):
         self.frame_count += 1
+        # ★ 时基标定: 把按标称 65MHz 反算的锁定频率修正到真实物理频率 (k=1 时不变)
+        if self._clk_cal != 1.0:
+            if "pll_freq_ch1_hz" in data:
+                data["pll_freq_ch1_hz"] *= self._clk_cal
+            if "pll_freq_ch2_hz" in data:
+                data["pll_freq_ch2_hz"] *= self._clk_cal
         for k in FIELD_NAMES:
             self.buf[k].append(data[k])
         self.t_buf.append(data["timestamp"])
@@ -1674,6 +1811,8 @@ class MainWindow(QMainWindow):
             f"# MV_PER_LSB_DC    = {self._mv_per_lsb_dc:.6e}  # DC 通路:    LSB -> mV",
             f"# ADC_FS_V         = {ADC_FS_V:.4f}",
             f"# F_CLK_Hz         = {F_CLK}",
+            f"# CLK_CAL_k        = {self._clk_cal:.9f}  # 时基标定: 真实/标称, 已乘入 pll_freq",
+            f"# CLK_CAL_ppm      = {(self._clk_cal - 1.0) * 1e6:+.3f}",
             f"#",
         ]
         f.write("\n".join(meta_lines) + "\n")
