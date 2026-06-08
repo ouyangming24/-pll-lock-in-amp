@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton, QComboBox, QRadioButton,
     QPlainTextEdit, QFileDialog, QSplitter, QStatusBar, QFrame,
-    QSizePolicy,
+    QSizePolicy, QCheckBox, QScrollArea,
 )
 
 from device import (
@@ -57,6 +57,31 @@ HAR_PALETTE = [
 # CIC 降采样后 IIR 实际工作的采样率 (Hz). 与 lock_in_amp.v 中
 # cic_compiler_0 的 Fixed_Or_Initial_Rate=65 + 输入 65MHz 一致 → 1 MHz
 IIR_FS_HZ = 1_000_000
+
+# ── 一键自动锁定 (CH1 / CH2) 参数 (可按需微调) ────────────────────────
+# 捕获期 (acquire): 用稳健增益 + 软件 AGC 快速拉住, 容差大
+AUTO_TAU_Y          = 7          # 捕获期环路鉴相 IIR (快而稳)
+AUTO_TAU_X          = 16         # 捕获期幅值路 IIR (锁定判据)
+AUTO_KP_BASE        = 500        # 在 AUTO_R_REF 基准幅度下的 KP
+AUTO_KI_BASE        = 50         # 在 AUTO_R_REF 基准幅度下的 KI
+AUTO_R_REF          = 2_000_000.0  # AGC 基准幅度 (LSB): KP = KP_BASE·R_REF/R
+AUTO_KP_RANGE       = (20, 5000)   # AGC 后 KP 钳位范围
+AUTO_KI_RANGE       = (2, 500)     # AGC 后 KI 钳位范围
+# 保持期 (hold): 判稳后切到的"最终超稳参数" — 用户实测最稳的一组.
+#   KP=1, KI=0 → 极窄一阶环, 频率读数最稳 (代价: 有稳态相位偏移, 慢漂跟踪弱);
+#   tau_x=20 (fc≈152 mHz, 幅度/判据路) / tau_y=15 (fc≈4.86 Hz, 进环误差路).
+#   注意: KP/KI 在 FPGA 内两通道共享, 故为全局; tau 为本通道独立.
+AUTO_FINAL_KP       = 1
+AUTO_FINAL_KI       = 0
+AUTO_FINAL_TAU_X    = 20
+AUTO_FINAL_TAU_Y    = 15
+AUTO_SMOOTH_N       = 400        # 稳定后把后置平滑 N 开到这么大 → mHz
+AUTO_LOCK_TIMEOUT_S = 15.0       # 等"硬件锁定"超时
+AUTO_VERIFY_TIMEOUT_S = 12.0     # 等"频率稳定"超时
+AUTO_SETTLE_S       = 2.0        # AGC 后给环路重新稳定的时间
+AUTO_STABLE_N       = 40         # 判稳: 连续多少帧
+AUTO_STABLE_HZ      = 0.10       # 判稳: 最近 N 帧 (max-min) 阈值
+AUTO_POLL_MS        = 100        # 状态机轮询周期
 
 TAU_MIN = 0
 TAU_MAX = 31              # shift_k 是 5bit, 硬件支持上限
@@ -223,7 +248,7 @@ class ChannelHeader(QWidget):
         if freq_hz < 1e-3:
             self.lbl_freq.setText(f"{self.freq_label} = ─── Hz")
         else:
-            self.lbl_freq.setText(f"{self.freq_label} = {freq_hz:>11.3f} Hz")
+            self.lbl_freq.setText(f"{self.freq_label} = {freq_hz:>13.4f} Hz")
         if locked:
             self.lbl_led.setStyleSheet("color:#3f3; font-size:18pt;")  # 亮绿
             self.lbl_state.setText("LOCKED")
@@ -237,9 +262,19 @@ class ChannelHeader(QWidget):
 # ============================================================================
 # 单个绘图面板 (header + pyqtgraph plot)
 # ============================================================================
+class FixedDecimalAxis(pg.AxisItem):
+    """纵轴刻度强制保留固定小数位 (并关闭 SI 前缀/偏移), 用于频率图显示到 mHz."""
+    def __init__(self, decimals: int = 3, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.decimals = decimals
+
+    def tickStrings(self, values, scale, spacing):
+        return [f"{v * scale:.{self.decimals}f}" for v in values]
+
+
 class PlotPanel(QFrame):
     def __init__(self, title: str, freq_label: str | None = None,
-                 y_label: str = "幅值"):
+                 y_label: str = "幅值", left_decimals: int | None = None):
         super().__init__()
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet("QFrame { background:#222; border:1px solid #444; border-radius:4px; }")
@@ -257,7 +292,13 @@ class PlotPanel(QFrame):
             lbl.setStyleSheet("color:#4af; font-weight:bold; font-size:11pt;")
             v.addWidget(lbl)
 
-        self.plot = pg.PlotWidget()
+        if left_decimals is not None:
+            # 纵轴固定小数位 (频率图): 关掉 SI 前缀, 避免 60000.228 被显示成 60.000k
+            _left_axis = FixedDecimalAxis(decimals=left_decimals, orientation="left")
+            self.plot = pg.PlotWidget(axisItems={"left": _left_axis})
+            _left_axis.enableAutoSIPrefix(False)
+        else:
+            self.plot = pg.PlotWidget()
         self.plot.showGrid(x=True, y=True, alpha=0.3)
         self.plot.setLabel("bottom", "时间", units="s")
         self.plot.setLabel("left", y_label)
@@ -307,6 +348,12 @@ class MainWindow(QMainWindow):
         self._latest_locked_ch2 = False
         self._last_frame: dict | None = None    # 最近一帧解析结果, 供诊断按钮使用
 
+        # 自动模式谐波 ref 跟随实测锁定频率: 自动下发的迟滞状态
+        #   只有当三路 ref 相对"上次下发值"变化超过阈值, 且距上次下发超过最小间隔时,
+        #   才真正下发到 FPGA, 避免每帧刷屏占满串口/UDP.
+        self._ref_last_sent = {}     # {cmd: hz} 上次自动下发的频率
+        self._ref_last_send_t = 0.0  # 上次自动下发时间戳
+
         # 运行时电压标定 (用户可在 GUI 上随时改). K 拆成两组独立:
         #   _calib_k_har → 只影响 X/Y/R (有混频) 通路 → _v_per_lsb / _mv_per_lsb
         #   _calib_k_dc  → 只影响 DC    (无混频) 通路 → _v_per_lsb_dc / _mv_per_lsb_dc
@@ -322,6 +369,23 @@ class MainWindow(QMainWindow):
         #   显示: pll_freq_hz *= k ;  下发: word = hz_to_freq_word(hz / k)  (两者自洽)
         #   纯比例误差 (无截距), 故标定一个点即可; k = 1.0 表示不修正 (用理想 65 MHz)
         self._clk_cal = 1.0
+
+        # 锁定频率"后置平滑"(读数精度, 与 PLL 环路带宽解耦):
+        #   对已锁定的频率读数做独立滑动平均 → 环路可调快, 读数仍稳到 mHz.
+        #   大跳变 (>jump Hz) 自动清空窗口 → 立刻跟随新频率, 不被旧值拖累.
+        #   失锁时自动旁路 (显示瞬时值).
+        self._freq_sm_enabled = True
+        self._freq_sm_n       = 100      # 滑动窗口长度 (帧)
+        self._freq_sm_jump    = 5.0      # 跳变阈值 (Hz): 超过则判为换频, 立即重置窗口
+        self._freq_sm_buf     = [deque(maxlen=self._freq_sm_n),
+                                 deque(maxlen=self._freq_sm_n)]
+
+        # 一键自动锁定 (CH1) 状态机: idle → wait_lock → settle → verify → idle
+        self._auto_state = "idle"
+        self._auto_ch    = 1       # 当前自动锁定作用的通道 (1 或 2)
+        self._auto_t0    = 0.0
+        self._auto_timer = QTimer()
+        self._auto_timer.timeout.connect(self._auto_step)
 
         self.csv_writer = None
         self.csv_file = None
@@ -378,8 +442,18 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.lbl_mode)
 
         # 左侧参数面板 / 右侧绘图区
-        left = self._build_param_panel()
+        param_panel = self._build_param_panel()
+        # ★ 参数项较多, 用滚动区域包裹: 窗口高度不足时纵向滚动, 不再把各组压扁
+        left = QScrollArea()
+        left.setWidget(param_panel)
+        left.setWidgetResizable(True)
+        # 横向"按需": 万一内容仍超宽, 出现横向滚动条可滚动查看, 而不是被直接裁掉
+        left.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left.setFrameShape(QFrame.NoFrame)
         right = self._build_plot_area()
+
+        LEFT_W = 512   # 参数面板 490 + 竖直滚动条(~17) + 余量, 保证 viewport ≥ 490 不裁切
+        left.setMinimumWidth(LEFT_W)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left)
@@ -387,9 +461,9 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setChildrenCollapsible(False)
-        splitter.setSizes([460, 1040])
-        self.splitter = splitter   # ★ 保存引用, resizeEvent 强制左侧宽度不缩水
-        self._left_panel_w = 460   # 与上面 setSizes 一致, resizeEvent 会引用此值
+        splitter.setSizes([LEFT_W, 1040])
+        self.splitter = splitter    # ★ 保存引用, resizeEvent 强制左侧宽度不缩水
+        self._left_panel_w = LEFT_W # 与上面 setSizes 一致, resizeEvent 会引用此值
 
         central = QWidget()
         v = QVBoxLayout(central)
@@ -413,10 +487,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- 参数面板
     def _build_param_panel(self) -> QWidget:
         panel = QWidget()
-        # ★ 固定参数面板宽度: 不随窗口最大化而被 QSplitter 比例缩放压扁.
-        #   setFixedWidth 是强制宽度, 比 setMinimumWidth + setMaximumWidth 更可靠.
-        panel.setFixedWidth(460)
-        panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        # ★ 参数面板宽度: 用 minimumWidth + 可拉伸策略, 让它在 QScrollArea 里
+        #   始终填满 viewport (而不是固定死宽度导致右侧空白 / 被滚动条裁切).
+        #   配合 IIR 行的弹性 fc 列, 拉宽时内容自动变宽, 永不遮挡单位 / 按钮.
+        panel.setMinimumWidth(450)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         v = QVBoxLayout(panel)
         v.setSpacing(6)
 
@@ -443,9 +518,9 @@ class MainWindow(QMainWindow):
         #   panel 固定 460, 边距余 19px 自然贴右边, 完全不受 resize 影响.
         g_tau.setColumnStretch(0, 0)
         g_tau.setColumnStretch(1, 0)
-        g_tau.setColumnStretch(2, 0)
+        g_tau.setColumnStretch(2, 1)   # ★ fc 列弹性: 吸收富余, 单位完整且按钮始终可见
         g_tau.setColumnStretch(3, 0)
-        g_tau.setColumnStretch(4, 1)   # 末尾加一个虚拟"吸收列"消化富余
+        g_tau.setColumnStretch(4, 0)
         self.ed_t1x  = self._mk_tau_row(g_tau, 0,  "CH1_X (PLL)",       "20", "TAU1X")
         self.ed_t1y  = self._mk_tau_row(g_tau, 1,  "CH1_Y (PLL)",       "8",  "TAU1Y")
         self.ed_t2x  = self._mk_tau_row(g_tau, 2,  "CH2_X (PLL)",       "20", "TAU2X")
@@ -512,29 +587,60 @@ class MainWindow(QMainWindow):
         self.ed_f2 = self._mk_freq_row(g_freq, 1, "F2 起点", "60000", "FRQ3")
         v.addWidget(gb_freq)
 
+        # ★ 一键自动锁定 (CH1 / CH2): 下发中心频率 → 等锁定 → 软件AGC →
+        #   判稳后切到最终超稳参数 (KP=1/KI=0 + 本通道 tau) + 大平滑 → mHz
+        auto_tip = (
+            "填好对应起点后点此:\n"
+            "① 下发中心频率 + 稳健捕获参数 → ② 等待硬件锁定 →\n"
+            "③ 按幅度自动整定 KP/KI (软件 AGC) → ④ 频率连续稳定后,\n"
+            "自动切到最终超稳参数 (KP=1, KI=0, tau_x=20, tau_y=15) + 大平滑,\n"
+            "读数稳到 mHz. 过程中再次点击 = 取消.\n"
+            "注意: KP/KI 与锁定阈值为双通道共享, 给某通道做自动锁定时\n"
+            "捕获期会临时改变全局增益, 可能短暂扰动另一已锁通道."
+        )
+        auto_h = QHBoxLayout()
+        self.btn_auto_lock = QPushButton("⚡ 一键自动锁定 CH1")
+        self.btn_auto_lock.setStyleSheet(
+            "background:#2a6cc0; color:#fff; font-weight:bold; padding:6px;")
+        self.btn_auto_lock.setToolTip(auto_tip)
+        self.btn_auto_lock.clicked.connect(lambda: self._on_auto_lock_clicked(1))
+        self.btn_auto_lock2 = QPushButton("⚡ 一键自动锁定 CH2")
+        self.btn_auto_lock2.setStyleSheet(
+            "background:#2a6cc0; color:#fff; font-weight:bold; padding:6px;")
+        self.btn_auto_lock2.setToolTip(auto_tip)
+        self.btn_auto_lock2.clicked.connect(lambda: self._on_auto_lock_clicked(2))
+        auto_h.addWidget(self.btn_auto_lock)
+        auto_h.addWidget(self.btn_auto_lock2)
+        v.addLayout(auto_h)
+
         # ★ 时基(晶振)标定: 修正锁定频率读数的固定 ppm 误差
         v.addWidget(self._build_clk_cal_group())
 
+        # ★ 锁定频率后置平滑: 读数精度与环路带宽解耦 (环路调快, 读数仍稳)
+        v.addWidget(self._build_freq_smooth_group())
+
         # ★ 通道3 三路开环锁相 ref_freq
         #   两种模式:
-        #     自动: 三路 ref_freq 由 F1/F2 (上面的"通道频率扫频起点") 自动算出
-        #            2F1+F2  /  F1+2F2  /  F1+F2 — 输入框变只读, 跟随 F1/F2 实时刷新
+        #     自动: 三路 ref_freq 由 F1/F2 自动算出 2F1+F2 / F1+2F2 / F1+F2, 输入框只读.
+        #            通道锁定时基准取"实测锁定频率"(pll_freq_ch1_hz/ch2_hz, 已含时基标定
+        #            与平滑), 未锁定时回退 F1/F2 起点标称值; 锁定后按迟滞自动下发到 FPGA.
+        #            (跟随逻辑见 on_frame → _track_ref_freqs)
         #     手动: 三路 ref_freq 独立编辑, 不受 F1/F2 影响 (例如锁单一频点测试)
-        #   恢复 PLL 后, "自动" 应改为跟随 pll_freq_ch1_hz / pll_freq_ch2_hz, 这一行在
-        #   on_frame 里加一个补丁即可.
         gb_ref = QGroupBox("通道3 锁相参考频率 (Hz)")
         gb_ref.setToolTip(
-            "自动: 三路 ref_freq = (2F1+F2 / F1+2F2 / F1+F2), 跟随上面 F1/F2 输入框实时刷新.\n"
+            "自动: 三路 ref_freq = (2F1+F2 / F1+2F2 / F1+F2), 实时跟随 F1/F2.\n"
+            "  · 通道已锁定 → 用'实测锁定频率'(含时基标定+平滑), 更精确;\n"
+            "  · 未锁定     → 回退到 F1/F2 扫频起点 (标称值).\n"
+            "  · 锁定后会按迟滞自动下发到 FPGA (变化>0.5Hz 且间隔≥1s 才发).\n"
             "手动: 三路 ref_freq 独立指定, 可任意锁一个频点 (例如做单频谐波灵敏度扫描).\n"
-            "默认值 (自动 / 50k+60k) = 160 / 170 / 110 kHz.\n"
-            "PLL 恢复后, 自动模式可改为跟随实时锁定的 pll_freq_ch1/ch2."
+            "默认值 (自动 / 50k+60k) = 160 / 170 / 110 kHz."
         )
         gb_ref_v = QVBoxLayout(gb_ref)
 
         # 模式切换行
         mode_h = QHBoxLayout()
         mode_h.addWidget(QLabel("模式:"))
-        self.rb_ref_auto = QRadioButton("自动 (= F1/F2 组合频率)")
+        self.rb_ref_auto = QRadioButton("自动 (跟随实测锁定 F1/F2)")
         self.rb_ref_man  = QRadioButton("手动")
         self.rb_ref_auto.setChecked(True)
         mode_h.addWidget(self.rb_ref_auto)
@@ -632,7 +738,7 @@ class MainWindow(QMainWindow):
         """
         lbl = QLabel(label)
         lbl.setStyleSheet("font-size: 10pt;")
-        lbl.setFixedWidth(95)
+        lbl.setFixedWidth(105)            # ★ 105 容纳 "2F1+F2 (谐波)" 等 CJK 标签, 不被截断
         grid.addWidget(lbl, row, 0)
 
         ed = QLineEdit(default)
@@ -650,7 +756,9 @@ class MainWindow(QMainWindow):
         fc_lbl = QLabel("")
         fc_lbl.setStyleSheet(
             "color: #4a8; font-family: Consolas, monospace; font-size: 10pt;")
-        fc_lbl.setFixedWidth(145)         # ★ fc 标签也固定, 不再 stretch 抢空间
+        # ★ 弹性: 占据剩余空间 (随面板变宽), 保证单位完整 + 按钮(col3)永远可见
+        fc_lbl.setMinimumWidth(110)
+        fc_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         grid.addWidget(fc_lbl, row, 2)
 
         btn = QPushButton("▶")
@@ -784,16 +892,87 @@ class MainWindow(QMainWindow):
         if self.rb_ref_auto.isChecked():
             self._update_ref_freqs_from_f1f2()
 
-    def _update_ref_freqs_from_f1f2(self):
-        """读 ed_f1 / ed_f2, 算 2F1+F2 / F1+2F2 / F1+F2 并写回输入框."""
+    # 自动模式下三路 ref 的"频率源":
+    #   - 通道已锁定 → 用实测锁定频率 pll_freq_ch1_hz / ch2_hz
+    #       (已含时基标定 ×k 与后置平滑, 比 F1/F2 标称起点更精确, 且自动吃到标定);
+    #   - 未锁定     → 回退到 F1/F2 扫频起点输入框 (标称值), 保证还没锁住时有合理预设.
+    AUTO_AUTOSEND = True       # 锁定后是否把跟随得到的 ref 自动下发到 FPGA
+    AUTO_REF_DELTA_HZ = 0.5    # ref 相对上次下发变化超过此值才重发
+    AUTO_REF_MIN_INTERVAL = 1.0  # 两次自动下发之间的最小间隔 (秒)
+
+    def _ref_source_f1f2(self):
+        """返回 (f1, f2, src): 用于计算三路 ref 的基准频率.
+
+        src = 'lock' 表示采用实测锁定频率, 'nom' 表示采用 F1/F2 起点标称值.
+        仅在自动模式且对应通道锁定时优先用实测值; 否则回退标称值.
+        输入非法 / 控件未就绪时返回 None.
+        """
         try:
             f1 = float(self.ed_f1.text())
             f2 = float(self.ed_f2.text())
         except (ValueError, AttributeError):
+            return None
+        src = "nom"
+        if getattr(self, "rb_ref_auto", None) is not None and self.rb_ref_auto.isChecked():
+            if getattr(self, "_latest_locked_ch1", False) and self._latest_freq_ch1 > 0:
+                f1 = self._latest_freq_ch1
+                src = "lock"
+            if getattr(self, "_latest_locked_ch2", False) and self._latest_freq_ch2 > 0:
+                f2 = self._latest_freq_ch2
+                src = "lock"
+        return f1, f2, src
+
+    def _update_ref_freqs_from_f1f2(self):
+        """按当前 ref 源 (实测锁定优先, 否则 F1/F2 起点) 重算三路 ref 并写回输入框."""
+        src = self._ref_source_f1f2()
+        if src is None:
             return  # 输入非法或控件尚未就绪, 静默跳过
-        self.ed_fr21.setText(f"{2 * f1 + f2:.0f}")
-        self.ed_fr12.setText(f"{f1 + 2 * f2:.0f}")
-        self.ed_fr11.setText(f"{f1 + f2:.0f}")
+        f1, f2, _ = src
+        # 实测跟随时频率带小数, 用 3 位小数保留 mHz 量级
+        self.ed_fr21.setText(f"{2 * f1 + f2:.3f}")
+        self.ed_fr12.setText(f"{f1 + 2 * f2:.3f}")
+        self.ed_fr11.setText(f"{f1 + f2:.3f}")
+
+    def _track_ref_freqs(self):
+        """每帧调用 (自动模式): 让三路 ref 实时跟随实测锁定频率, 并按迟滞自动下发.
+
+        - 仅在自动模式生效; 手动模式完全不动用户的输入框.
+        - 显示文本始终刷新 (跟随源可能是实测也可能是标称起点).
+        - 自动下发: 仅当 src='lock' (确有通道锁定), 且某路 ref 相对上次下发值
+          变化 > AUTO_REF_DELTA_HZ, 且距上次下发 > AUTO_REF_MIN_INTERVAL 秒时才发,
+          避免每帧刷屏占满链路.
+        """
+        if getattr(self, "rb_ref_auto", None) is None or not self.rb_ref_auto.isChecked():
+            return
+        src = self._ref_source_f1f2()
+        if src is None:
+            return
+        f1, f2, kind = src
+        f21 = 2 * f1 + f2
+        f12 = f1 + 2 * f2
+        f11 = f1 + f2
+        self.ed_fr21.setText(f"{f21:.3f}")
+        self.ed_fr12.setText(f"{f12:.3f}")
+        self.ed_fr11.setText(f"{f11:.3f}")
+
+        if not (self.AUTO_AUTOSEND and kind == "lock"):
+            return
+        now = time.time()
+        if now - self._ref_last_send_t < self.AUTO_REF_MIN_INTERVAL:
+            return
+        pending = []
+        for cmd, hz in (("FRQ21", f21), ("FRQ12", f12), ("FRQ11", f11)):
+            last = self._ref_last_sent.get(cmd)
+            if last is None or abs(hz - last) >= self.AUTO_REF_DELTA_HZ:
+                pending.append((cmd, hz))
+        if not pending:
+            return
+        for cmd, hz in pending:
+            self._send_freq_cmd(cmd, f"{hz:.3f}", quiet=True)
+            self._ref_last_sent[cmd] = hz
+        self._ref_last_send_t = now
+        self.on_log(
+            f"[自动ref] 跟随实测: 2F1+F2={f21:.3f}  F1+2F2={f12:.3f}  F1+F2={f11:.3f} Hz")
 
     # ------------------------------------------------- 时基(晶振)标定
     # 锁定频率读数有一个固定的 ppm 误差, 来自板载 50MHz 晶振相对理想值的偏差
@@ -914,16 +1093,265 @@ class MainWindow(QMainWindow):
     def _reset_clk_cal(self):
         self._set_clk_cal(1.0, note="(复位, 不修正)")
 
+    # ------------------------------------------- 锁定频率后置平滑 (读数精度)
+    # 与 PLL 环路带宽解耦: 对"已锁定"的频率读数做独立滑动平均, 所以环路 / IIR
+    # 可以调快 (快速锁定), 读数精度则靠这级平均做到 mHz. 关键是大跳变检测:
+    # 当瞬时值偏离窗口均值超过阈值 (换频 / 大跳变), 立即清空窗口跟随新值,
+    # 不被旧频率拖累 —— 这正是"大跳变也能快速稳定"的做法.
+    def _build_freq_smooth_group(self) -> QGroupBox:
+        gb = QGroupBox("锁定频率平滑 (读数精度)")
+        gb.setObjectName("gbHighlight")
+        gb.setToolTip(
+            "对已锁定的频率读数做独立后置平均, 与 PLL 环路带宽解耦:\n"
+            "→ 环路 / IIR 可以调快 (快速锁定), 读数仍能平均到 mHz 级.\n"
+            "大跳变 (超过'跳变阈值') 会自动清空窗口、立即跟随新频率, 不被旧值拖累.\n"
+            "失锁时自动旁路 (直接显示瞬时值)."
+        )
+        outer = QVBoxLayout(gb)
+        outer.setContentsMargins(10, 12, 10, 8)
+        outer.setSpacing(6)
+
+        row1 = QHBoxLayout()
+        self.cb_freq_sm = QCheckBox("启用")
+        self.cb_freq_sm.setChecked(self._freq_sm_enabled)
+        self.cb_freq_sm.toggled.connect(self._on_freq_sm_changed)
+        row1.addWidget(self.cb_freq_sm)
+        row1.addStretch()
+        outer.addLayout(row1)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        l1 = QLabel("平均点数 N"); l1.setFixedWidth(95); l1.setStyleSheet("font-size:10pt;")
+        self.ed_freq_sm_n = QLineEdit(str(self._freq_sm_n))
+        self.ed_freq_sm_n.setFixedWidth(110); self.ed_freq_sm_n.setAlignment(Qt.AlignCenter)
+        self.ed_freq_sm_n.setToolTip("滑动窗口长度 (帧). 越大越稳、跟随越慢. 典型 50~300.")
+        l2 = QLabel("跳变阈值(Hz)"); l2.setFixedWidth(95); l2.setStyleSheet("font-size:10pt;")
+        self.ed_freq_sm_jump = QLineEdit(f"{self._freq_sm_jump:g}")
+        self.ed_freq_sm_jump.setFixedWidth(110); self.ed_freq_sm_jump.setAlignment(Qt.AlignCenter)
+        self.ed_freq_sm_jump.setToolTip(
+            "瞬时值偏离窗口均值超过此值 → 判为换频 / 大跳变, 立即清空窗口跟随新值.\n"
+            "设大: 抗噪强但换频跟随略慢; 设小: 换频跟随快但易被噪声触发重置.")
+        grid.addWidget(l1, 0, 0); grid.addWidget(self.ed_freq_sm_n, 0, 1)
+        grid.addWidget(l2, 1, 0); grid.addWidget(self.ed_freq_sm_jump, 1, 1)
+        btn = QPushButton("应用")
+        btn.setFixedWidth(60)
+        btn.setStyleSheet("background:#357; color:#fff; font-weight:bold;")
+        btn.clicked.connect(self._on_freq_sm_changed)
+        grid.addWidget(btn, 0, 2, 2, 1)
+        outer.addLayout(grid)
+        return gb
+
+    def _smooth_freq(self, ch: int, raw: float, locked: bool) -> float:
+        """对单通道锁定频率做滑动平均; 未锁/未启用/大跳变时旁路或重置窗口."""
+        buf = self._freq_sm_buf[ch]
+        if (not self._freq_sm_enabled) or (not locked) or raw <= 0:
+            buf.clear()
+            return raw
+        if buf:
+            m = sum(buf) / len(buf)
+            if abs(raw - m) > self._freq_sm_jump:
+                buf.clear()      # 换频 / 大跳变: 丢弃旧窗口, 立即跟随新频率
+        buf.append(raw)
+        return sum(buf) / len(buf)
+
+    def _on_freq_sm_changed(self, *_):
+        """应用平滑开关 / 窗口长度 / 跳变阈值."""
+        self._freq_sm_enabled = self.cb_freq_sm.isChecked()
+        try:
+            n = int(float(self.ed_freq_sm_n.text().strip()))
+        except ValueError:
+            n = self._freq_sm_n
+        n = max(1, min(5000, n))
+        self.ed_freq_sm_n.setText(str(n))
+        try:
+            jump = float(self.ed_freq_sm_jump.text().strip())
+        except ValueError:
+            jump = self._freq_sm_jump
+        if jump <= 0:
+            jump = self._freq_sm_jump
+        self.ed_freq_sm_jump.setText(f"{jump:g}")
+        if n != self._freq_sm_n:
+            self._freq_sm_n = n
+            self._freq_sm_buf = [deque(self._freq_sm_buf[0], maxlen=n),
+                                 deque(self._freq_sm_buf[1], maxlen=n)]
+        self._freq_sm_jump = jump
+        self.on_log(
+            f"[i] 锁定频率平滑: {'开' if self._freq_sm_enabled else '关'}, "
+            f"N={n}, 跳变阈值={jump:g} Hz")
+
+    # ------------------------------------------- 一键自动锁定 (CH1 / CH2)
+    # 流程 (非阻塞状态机, QTimer 每 100ms 推进一步, 同一时刻只跑一个通道):
+    #   wait_lock : 下发中心频率+稳健捕获参数, 轮询硬件 is_locked
+    #   settle    : 锁上后按幅度 R 软件 AGC 整定 KP/KI, 给环路重新稳定时间
+    #   verify    : 等"最近 N 帧频率波动 < 阈值"判定真稳 → 切最终超稳参数 + 大平滑 → mHz
+    #
+    # 硬件约束: KP/KI 与锁定阈值在 FPGA 内两通道共享 (全局), 只有 IIR tau 与频率
+    #   是分通道的. 所以给某通道做自动锁定时, 捕获期改的是"全局"增益, 会临时
+    #   扰动另一已锁通道; 收尾时统一回到 KP=AUTO_FINAL_KP/KI=AUTO_FINAL_KI (两通道一致).
+    def _auto_cfg(self, ch: int) -> dict:
+        """返回通道相关的控件 / 帧字段 / 命令映射 (KP/KI/平滑为全局, 不在此表)."""
+        if ch == 2:
+            return dict(
+                ch=2, freq_cmd="FRQ3", freq_ed=self.ed_f2,
+                tau_x_cmd="TAU2X", tau_y_cmd="TAU2Y",
+                tau_x_ed=self.ed_t2x, tau_y_ed=self.ed_t2y,
+                locked_key="locked_ch2", x_key="ch2_x", y_key="ch2_y",
+                buf_key="pll_freq_ch2_hz",
+                btn=self.btn_auto_lock2, other_btn=self.btn_auto_lock,
+                btn_idle="⚡ 一键自动锁定 CH2",
+                latest=lambda: self._latest_freq_ch2,
+            )
+        return dict(
+            ch=1, freq_cmd="FRQ2", freq_ed=self.ed_f1,
+            tau_x_cmd="TAU1X", tau_y_cmd="TAU1Y",
+            tau_x_ed=self.ed_t1x, tau_y_ed=self.ed_t1y,
+            locked_key="locked_ch1", x_key="ch1_x", y_key="ch1_y",
+            buf_key="pll_freq_ch1_hz",
+            btn=self.btn_auto_lock, other_btn=self.btn_auto_lock2,
+            btn_idle="⚡ 一键自动锁定 CH1",
+            latest=lambda: self._latest_freq_ch1,
+        )
+
+    def _auto_apply_final(self, cfg: dict):
+        """判稳后切到用户实测最稳的一组参数: 全局 KP/KI + 本通道 IIR tau + 大平滑."""
+        self.ed_kp.setText(str(AUTO_FINAL_KP)); self._send_int_cmd("KP", str(AUTO_FINAL_KP))
+        self.ed_ki.setText(str(AUTO_FINAL_KI)); self._send_int_cmd("KI", str(AUTO_FINAL_KI))
+        cfg["tau_x_ed"].setText(str(AUTO_FINAL_TAU_X))
+        self._send_int_cmd(cfg["tau_x_cmd"], str(AUTO_FINAL_TAU_X))
+        cfg["tau_y_ed"].setText(str(AUTO_FINAL_TAU_Y))
+        self._send_int_cmd(cfg["tau_y_cmd"], str(AUTO_FINAL_TAU_Y))
+        self.ed_freq_sm_n.setText(str(AUTO_SMOOTH_N))
+        self._on_freq_sm_changed()
+
+    def _on_auto_lock_clicked(self, ch: int = 1):
+        if self._auto_state != "idle":
+            self._auto_cancel()
+            return
+        if not getattr(self.dev, "is_connected", False):
+            self.on_log("[!] 自动锁定: 设备未连接")
+            return
+        cfg = self._auto_cfg(ch)
+        try:
+            float(cfg["freq_ed"].text())
+        except ValueError:
+            self.on_log(f"[!] 自动锁定: CH{ch} 起点频率非法")
+            return
+        self._auto_ch = ch
+        self.on_log("[自动] 提示: KP/KI 与锁定阈值为双通道共享, "
+                    "捕获期会临时改变全局增益, 可能短暂扰动另一已锁通道.")
+        # 1) 下发中心频率 + 稳健捕获参数 (并同步到输入框, 让用户看到)
+        self._send_freq_cmd(cfg["freq_cmd"], cfg["freq_ed"].text())
+        cfg["tau_y_ed"].setText(str(AUTO_TAU_Y))
+        self._send_int_cmd(cfg["tau_y_cmd"], str(AUTO_TAU_Y))
+        cfg["tau_x_ed"].setText(str(AUTO_TAU_X))
+        self._send_int_cmd(cfg["tau_x_cmd"], str(AUTO_TAU_X))
+        self.ed_kp.setText(str(AUTO_KP_BASE)); self._send_int_cmd("KP", str(AUTO_KP_BASE))
+        self.ed_ki.setText(str(AUTO_KI_BASE)); self._send_int_cmd("KI", str(AUTO_KI_BASE))
+        # 2) 平滑设为中等 (确保启用, N=100) 用于判稳阶段
+        self.cb_freq_sm.setChecked(True)
+        self.ed_freq_sm_n.setText("100")
+        self._on_freq_sm_changed()
+        # 3) 启动状态机
+        self._auto_state = "wait_lock"
+        self._auto_t0 = time.time()
+        cfg["btn"].setText(f"■ 取消自动锁定 CH{ch}")
+        cfg["btn"].setStyleSheet(
+            "background:#a33; color:#fff; font-weight:bold; padding:6px;")
+        cfg["other_btn"].setEnabled(False)
+        self._auto_timer.start(AUTO_POLL_MS)
+        self.on_log(f"[自动] 开始锁定 CH{ch} @ {cfg['freq_ed'].text()} Hz ...")
+
+    def _auto_reset_buttons(self):
+        cfg = self._auto_cfg(self._auto_ch)
+        cfg["btn"].setText(cfg["btn_idle"])
+        cfg["btn"].setStyleSheet(
+            "background:#2a6cc0; color:#fff; font-weight:bold; padding:6px;")
+        cfg["btn"].setEnabled(True)
+        cfg["other_btn"].setEnabled(True)
+
+    def _auto_cancel(self):
+        self._auto_timer.stop()
+        self._auto_state = "idle"
+        self._auto_reset_buttons()
+        self.on_log("[自动] 已取消")
+
+    def _auto_finish(self, ok: bool, msg: str):
+        self._auto_timer.stop()
+        self._auto_state = "idle"
+        self._auto_reset_buttons()
+        self.on_log(f"[自动] {'✓ 完成' if ok else '✗ 失败'}: {msg}")
+
+    def _auto_step(self):
+        fr = getattr(self, "_last_frame", None)
+        if fr is None:
+            return
+        cfg = self._auto_cfg(self._auto_ch)
+        now = time.time()
+        st = self._auto_state
+        locked = bool(fr.get(cfg["locked_key"], False))
+
+        if st == "wait_lock":
+            if locked:
+                # 软件 AGC: 按幅度 R 自动整定 KP/KI, 使环路增益 ≈ 常数
+                R = math.hypot(fr.get(cfg["x_key"], 0), fr.get(cfg["y_key"], 0))
+                R = max(R, 1.0)
+                kp = int(max(AUTO_KP_RANGE[0],
+                             min(AUTO_KP_RANGE[1], AUTO_KP_BASE * AUTO_R_REF / R)))
+                ki = int(max(AUTO_KI_RANGE[0],
+                             min(AUTO_KI_RANGE[1], AUTO_KI_BASE * AUTO_R_REF / R)))
+                self.ed_kp.setText(str(kp)); self._send_int_cmd("KP", str(kp))
+                self.ed_ki.setText(str(ki)); self._send_int_cmd("KI", str(ki))
+                self.on_log(f"[自动] CH{cfg['ch']} 已锁定; AGC: R={R:.0f} → KP={kp}, KI={ki}")
+                self._auto_state = "settle"
+                self._auto_t0 = now
+            elif now - self._auto_t0 > AUTO_LOCK_TIMEOUT_S:
+                self._auto_finish(
+                    False,
+                    f"CH{cfg['ch']} 超时未锁定 — 请确认中心频率在信号 ±100Hz 内, 且信号确实存在")
+
+        elif st == "settle":
+            if not locked and now - self._auto_t0 > AUTO_SETTLE_S:
+                self._auto_finish(
+                    False, "AGC 后掉锁 (可能增益偏大), 请减小 AUTO_KP_BASE 或手动微调")
+            elif now - self._auto_t0 > AUTO_SETTLE_S:
+                self._auto_state = "verify"
+                self._auto_t0 = now
+
+        elif st == "verify":
+            if not locked:
+                self._auto_finish(False, "锁定丢失, 请检查信号 / 降低 KP")
+                return
+            hist = list(self.buf[cfg["buf_key"]])[-AUTO_STABLE_N:]
+            stable = (len(hist) >= AUTO_STABLE_N
+                      and (max(hist) - min(hist)) < AUTO_STABLE_HZ)
+            if stable:
+                self._auto_apply_final(cfg)
+                self._auto_finish(
+                    True,
+                    f"CH{cfg['ch']} F={cfg['latest']():.4f} Hz, 已切最终稳定参数"
+                    f"(KP={AUTO_FINAL_KP}, KI={AUTO_FINAL_KI}, "
+                    f"tau_x={AUTO_FINAL_TAU_X}, tau_y={AUTO_FINAL_TAU_Y}) "
+                    f"+ 大平滑(N={AUTO_SMOOTH_N}) → mHz 级")
+            elif now - self._auto_t0 > AUTO_VERIFY_TIMEOUT_S:
+                self._auto_apply_final(cfg)
+                self._auto_finish(
+                    True,
+                    f"CH{cfg['ch']} 已切最终稳定参数 + 大平滑, 但环路波动稍大 — "
+                    "可再加大平滑 N, 或确认参考信号本身是否抖动")
+
     # ------------------------------------------------------------- 绘图区
     def _build_plot_area(self) -> QWidget:
         # 4 个独立绘图面板, 每个带自己的 header
         # 上左: 通道1 PLL 锁定频率 F1 随时间变化 + F1 锁定灯
-        self.panel_ch1 = PlotPanel("通道1 PLL 锁定频率 F1(t)", freq_label="F1", y_label="频率 (Hz)")
+        self.panel_ch1 = PlotPanel("通道1 PLL 锁定频率 F1(t)", freq_label="F1",
+                                   y_label="频率 (Hz)", left_decimals=3)
         self.curve_freq_ch1 = self.panel_ch1.plot.plot(
             pen=pg.mkPen("#4af", width=PEN_W), name="f1_hz")
 
         # 上右: 通道2 PLL 锁定频率 F2 随时间变化 + F2 锁定灯
-        self.panel_ch2 = PlotPanel("通道2 PLL 锁定频率 F2(t)", freq_label="F2", y_label="频率 (Hz)")
+        self.panel_ch2 = PlotPanel("通道2 PLL 锁定频率 F2(t)", freq_label="F2",
+                                   y_label="频率 (Hz)", left_decimals=3)
         self.curve_freq_ch2 = self.panel_ch2.plot.plot(
             pen=pg.mkPen("#fa6", width=PEN_W), name="f2_hz")
 
@@ -976,6 +1404,20 @@ class MainWindow(QMainWindow):
         )
         self.cb_amp_unit.currentIndexChanged.connect(self._on_amp_unit_changed)
 
+        # ★ 谐波实时数值显示模式切换: X/Y (同相/正交) ⇄ R/Θ (幅值/相位)
+        #   一行只显示两个量, 避免四个量挤在一起被截断 (R/Θ 显示不出来).
+        self._har_disp_mode = "xy"
+        self.btn_har_disp = QPushButton("显示: X/Y")
+        self.btn_har_disp.setCheckable(True)
+        self.btn_har_disp.setMinimumWidth(92)
+        self.btn_har_disp.setToolTip(
+            "切换下方 3 路谐波实时数值的显示内容:\n"
+            "  未按下 = X/Y (同相 / 正交分量)\n"
+            "  按下   = R/Θ (幅值 / 相位)\n"
+            "DC 无相位, 两种模式都只显示幅值."
+        )
+        self.btn_har_disp.clicked.connect(self._on_har_disp_toggled)
+
         # ★ 运行时标定系数: K_har (谐波 X/Y/R) 和 K_dc (直流) 各自独立.
         # 因为两条通路硬件路径不同, 标定偏差也不一定相同.
 
@@ -1017,6 +1459,8 @@ class MainWindow(QMainWindow):
         har_ctrl_layout.addSpacing(12)
         har_ctrl_layout.addWidget(QLabel("幅度:"))
         har_ctrl_layout.addWidget(self.cb_amp_unit)
+        har_ctrl_layout.addSpacing(6)
+        har_ctrl_layout.addWidget(self.btn_har_disp)
         har_ctrl_layout.addSpacing(10)
         # K_har 着重颜色区分: 蓝 (谐波)
         lbl_kh = QLabel("K谐波:"); lbl_kh.setStyleSheet("color:#7af;")
@@ -1044,7 +1488,7 @@ class MainWindow(QMainWindow):
         # 三路谐波: X / Y / R / Θ ;  DC 只有幅值. 电压 mV, 相位保留 3 位小数.
         VAL_STYLE = ("color:#ddd; background:#1a1a1a; padding:2px 6px;"
                      " font-family:Consolas, monospace; font-size:9pt;")
-        VAL_DEFAULT = "X: ---.--- mV  Y: ---.--- mV  R: ---.--- mV  Θ: ---.---°"
+        VAL_DEFAULT = "X: ---.--- mV    Y: ---.--- mV"
 
         self.lbl_har_21 = QLabel(f"2F1+F2 │ {VAL_DEFAULT}")
         self.lbl_har_12 = QLabel(f"F1+2F2 │ {VAL_DEFAULT}")
@@ -1054,6 +1498,8 @@ class MainWindow(QMainWindow):
                     self.lbl_har_11, self.lbl_har_dc):
             lbl.setStyleSheet(VAL_STYLE)
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            # ★ 横向 Ignored: 长文本标签不再把整列最小宽度撑大 (否则左下面板挤占右列)
+            lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         har_val_grid = QGridLayout()
         har_val_grid.setContentsMargins(10, 0, 10, 2)
@@ -1081,7 +1527,7 @@ class MainWindow(QMainWindow):
         self.curve_adc_ch3 = self.panel_ch3_adc.plot.plot(
             pen=pg.mkPen("#9af", width=PEN_W), name="adc_ch3")
 
-        # 2x2 网格布局
+        # 2x2 网格布局 (★ 强制两列两行等分, 不被某个面板的内容宽度撑歪)
         wrap = QWidget()
         grid = QGridLayout(wrap)
         grid.setContentsMargins(0, 0, 0, 0)
@@ -1090,6 +1536,13 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.panel_ch2, 0, 1)
         grid.addWidget(self.panel_ch3_har, 1, 0)
         grid.addWidget(self.panel_ch3_adc, 1, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
+        for p in (self.panel_ch1, self.panel_ch2,
+                  self.panel_ch3_har, self.panel_ch3_adc):
+            p.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         return wrap
 
     # ------------------------------------------------------------- 窗口尺寸
@@ -1198,7 +1651,7 @@ class MainWindow(QMainWindow):
             return
         self.dev.send_command(f"{cmd}:{v}")
 
-    def _send_freq_cmd(self, cmd, hz_str):
+    def _send_freq_cmd(self, cmd, hz_str, quiet=False):
         try:
             hz = float(hz_str)
         except ValueError:
@@ -1207,6 +1660,8 @@ class MainWindow(QMainWindow):
         # 下发按时基标定反向换算: DDS 用真实(偏差)时钟产生, 物理输出才等于 hz
         word = hz_to_freq_word(hz / self._clk_cal)
         self.dev.send_command(f"{cmd}:{word}")
+        if quiet:
+            return  # 自动跟随下发: 不逐条刷日志 (由调用方汇总打印一行)
         if self._clk_cal != 1.0:
             self.on_log(f"  ({hz:.3f} Hz → 频率字 {word}, 已按时基标定 k={self._clk_cal:.7f})")
         else:
@@ -1633,6 +2088,13 @@ class MainWindow(QMainWindow):
         ("F1+F2 ", "ch3_x_11", "ch3_y_11"),
     )
 
+    def _on_har_disp_toggled(self, *_):
+        """切换谐波实时数值显示: X/Y ⇄ R/Θ."""
+        self._har_disp_mode = "rt" if self.btn_har_disp.isChecked() else "xy"
+        self.btn_har_disp.setText(
+            "显示: R/Θ" if self._har_disp_mode == "rt" else "显示: X/Y")
+        self._update_har_text()
+
     def _update_har_text(self, *_):
         """每一帧把 4 路 (3 谐波 + DC) 的实时值全部刷新.
         与下拉框选择无关 (下拉框只控制波形画哪一路).
@@ -1646,24 +2108,27 @@ class MainWindow(QMainWindow):
         unit   = self._amp_unit_str("mV")      # "mV" 或 "mVrms"
         mv_lsb = self._mv_per_lsb              # 运行时标定后的电压换算因子
 
-        # 3 路谐波: 各自显示 X / Y / R / Θ
+        # 3 路谐波: 按当前模式显示 X/Y 或 R/Θ (只显示两个量, 避免被截断)
+        rt = (self._har_disp_mode == "rt")
         for lbl, (name, kx, ky) in zip(
             (self.lbl_har_21, self.lbl_har_12, self.lbl_har_11),
             self._HAR_KEYS,
         ):
             x_mv = d.get(kx, 0) * mv_lsb * scale
             y_mv = d.get(ky, 0) * mv_lsb * scale
-            r_mv = math.sqrt(x_mv * x_mv + y_mv * y_mv)
-            theta_deg = math.degrees(math.atan2(y_mv, x_mv))
-            lbl.setText(
-                f"{name} │ X: {x_mv:>+10.3f} {unit}  Y: {y_mv:>+10.3f} {unit}  "
-                f"R: {r_mv:>10.3f} {unit}  Θ: {theta_deg:>+8.3f}°"
-            )
+            if rt:
+                r_mv = math.sqrt(x_mv * x_mv + y_mv * y_mv)
+                theta_deg = math.degrees(math.atan2(y_mv, x_mv))
+                lbl.setText(
+                    f"{name} │ R: {r_mv:>11.3f} {unit}    Θ: {theta_deg:>+9.3f}°")
+            else:
+                lbl.setText(
+                    f"{name} │ X: {x_mv:>+11.3f} {unit}    Y: {y_mv:>+11.3f} {unit}")
 
-        # DC: 只有幅值. ★ 用独立的 mv_lsb_dc (无混频通路, 比 X/Y 大 4096 倍).
+        # DC: 只有幅值 (无相位), 两种模式都一样. ★ 用独立的 mv_lsb_dc (无混频通路).
         # DC 物理上是直流, 严格说没有 RMS 概念, 但为显示一致, 这里也按全局 scale 缩放.
         dc_mv = d.get("ch3_dc", 0) * self._mv_per_lsb_dc * scale
-        self.lbl_har_dc.setText(f"DC     │ {dc_mv:>+10.3f} {unit}   (无 Y/Θ)")
+        self.lbl_har_dc.setText(f"DC     │ {dc_mv:>+11.3f} {unit}   (无 Θ)")
 
     # ============================================================ 数据接收
     def on_frame(self, data: dict):
@@ -1674,6 +2139,13 @@ class MainWindow(QMainWindow):
                 data["pll_freq_ch1_hz"] *= self._clk_cal
             if "pll_freq_ch2_hz" in data:
                 data["pll_freq_ch2_hz"] *= self._clk_cal
+        # ★ 锁定频率后置平滑 (读数精度): 独立于环路, 大跳变自动重置以快速跟随
+        if "pll_freq_ch1_hz" in data:
+            data["pll_freq_ch1_hz"] = self._smooth_freq(
+                0, data["pll_freq_ch1_hz"], data.get("locked_ch1", False))
+        if "pll_freq_ch2_hz" in data:
+            data["pll_freq_ch2_hz"] = self._smooth_freq(
+                1, data["pll_freq_ch2_hz"], data.get("locked_ch2", False))
         for k in FIELD_NAMES:
             self.buf[k].append(data[k])
         self.t_buf.append(data["timestamp"])
@@ -1694,6 +2166,10 @@ class MainWindow(QMainWindow):
         # 派生频率轨迹也存进缓冲, 用于上行两个频率曲线
         self.buf["pll_freq_ch1_hz"].append(self._latest_freq_ch1)
         self.buf["pll_freq_ch2_hz"].append(self._latest_freq_ch2)
+
+        # 自动模式: 三路谐波 ref 实时跟随实测锁定频率 (节流: 每 5 帧刷新一次)
+        if self.frame_count % 5 == 0:
+            self._track_ref_freqs()
 
         if self.csv_writer:
             try:
