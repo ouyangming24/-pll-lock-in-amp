@@ -587,6 +587,9 @@ class MainWindow(QMainWindow):
         self.ed_f2 = self._mk_freq_row(g_freq, 1, "F2 起点", "60000", "FRQ3")
         v.addWidget(gb_freq)
 
+        # ★ 信号发生器 (DAC904): 内部DDS 指定频率/相位, 或跟随 CH1/CH2 锁定频率同步输出
+        v.addWidget(self._build_dac_group())
+
         # ★ 一键自动锁定 (CH1 / CH2): 下发中心频率 → 等锁定 → 软件AGC →
         #   判稳后切到最终超稳参数 (KP=1/KI=0 + 本通道 tau) + 大平滑 → mHz
         auto_tip = (
@@ -1141,6 +1144,90 @@ class MainWindow(QMainWindow):
         grid.addWidget(btn, 0, 2, 2, 1)
         outer.addLayout(grid)
         return gb
+
+    # ------------------------------------------- 信号发生器 (DAC904)
+    # 三种工作模式 (DMOD):
+    #   0 内部DDS : 频率 (DFRQ) / 相位 (DPHS) 由上位机指定, 独立信号源
+    #   1 跟随CH1 : 输出频率 = CH1 PLL 锁定频率 (与外参考同频输出)
+    #   2 跟随CH2 : 输出频率 = CH2 PLL 锁定频率
+    # 频率字换算与锁相一致 (含时基标定 _clk_cal); 相位按 角度→48bit 相位字 换算.
+    def _build_dac_group(self) -> QGroupBox:
+        gb = QGroupBox("信号发生器 (DAC904)")
+        gb.setObjectName("gbHighlight")
+        gb.setToolTip(
+            "硬件: DAC904 (offset binary, 14bit), 采样时钟 = clk_65M.\n"
+            "模式: 内部DDS = 自定义频率/相位独立信号源;\n"
+            "      跟随CH1/CH2 = 输出与对应通道外参考锁定结果同频 (相位用'相位'微调).\n"
+            "跟随模式下'频率'输入被硬件忽略 (由 PLL 锁定频率决定)."
+        )
+        outer = QVBoxLayout(gb)
+        outer.setContentsMargins(10, 12, 10, 8)
+        outer.setSpacing(6)
+
+        # 模式行: 下拉 + ▶
+        mode_h = QHBoxLayout()
+        lbl_mode = QLabel("信号源"); lbl_mode.setFixedWidth(95); lbl_mode.setStyleSheet("font-size:10pt;")
+        self.cb_dac_mode = QComboBox()
+        self.cb_dac_mode.addItem("内部 DDS (自定义)", 0)
+        self.cb_dac_mode.addItem("跟随 CH1 锁定频率", 1)
+        self.cb_dac_mode.addItem("跟随 CH2 锁定频率", 2)
+        self.cb_dac_mode.setFixedHeight(30)
+        self.cb_dac_mode.setFixedWidth(268)
+        self.cb_dac_mode.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
+        self.cb_dac_mode.currentIndexChanged.connect(self._on_dac_mode_changed)
+        btn_mode = QPushButton("▶"); btn_mode.setFixedSize(42, 30)
+        btn_mode.setStyleSheet("font-size: 11pt; font-weight: bold;")
+        btn_mode.clicked.connect(self._send_dac_mode)
+        mode_h.addWidget(lbl_mode); mode_h.addWidget(self.cb_dac_mode); mode_h.addWidget(btn_mode)
+        mode_h.addStretch()
+        outer.addLayout(mode_h)
+
+        # 频率 / 相位行
+        grid = QGridLayout()
+        self._setup_normal_grid(grid)
+        self.ed_dac_freq = self._mk_freq_row(grid, 0, "频率 (Hz)", "50000", "DFRQ")
+        # 相位行: 单独做 (角度 → 相位字), 不走 _mk_freq_row
+        lbl_ph = QLabel("相位 (°)"); lbl_ph.setFixedWidth(95); lbl_ph.setStyleSheet("font-size:10pt;")
+        grid.addWidget(lbl_ph, 1, 0)
+        self.ed_dac_phase = QLineEdit("0")
+        self.ed_dac_phase.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
+        self.ed_dac_phase.setAlignment(Qt.AlignCenter)
+        self.ed_dac_phase.setFixedWidth(268); self.ed_dac_phase.setFixedHeight(30)
+        self.ed_dac_phase.setToolTip("0~360°, 内部换算为 48bit 相位字下发 (DPHS).")
+        grid.addWidget(self.ed_dac_phase, 1, 1)
+        btn_ph = QPushButton("▶"); btn_ph.setFixedSize(42, 30)
+        btn_ph.setStyleSheet("font-size: 11pt; font-weight: bold;")
+        btn_ph.clicked.connect(lambda: self._send_dac_phase(self.ed_dac_phase.text()))
+        grid.addWidget(btn_ph, 1, 2)
+        outer.addLayout(grid)
+
+        self._on_dac_mode_changed()   # 初始化频率框可用状态
+        return gb
+
+    def _on_dac_mode_changed(self, *_):
+        """跟随 CH1/CH2 模式下, 频率输入框置灰 (硬件忽略)."""
+        if not hasattr(self, "ed_dac_freq"):
+            return
+        internal = (self.cb_dac_mode.currentData() == 0)
+        self.ed_dac_freq.setEnabled(internal)
+        self.ed_dac_freq.setToolTip(
+            "内部DDS 输出频率 (Hz)." if internal
+            else "跟随模式下此值被硬件忽略 (输出频率 = PLL 锁定频率).")
+
+    def _send_dac_mode(self):
+        mode = int(self.cb_dac_mode.currentData())
+        self.dev.send_command(f"DMOD:{mode}")
+        self.on_log(f"[i] 信号发生器模式 = {self.cb_dac_mode.currentText()} (DMOD:{mode})")
+
+    def _send_dac_phase(self, deg_str):
+        try:
+            deg = float(deg_str)
+        except ValueError:
+            self.on_log(f"[!] DPHS 相位非法: {deg_str}")
+            return
+        word = int(round((deg % 360.0) / 360.0 * (1 << 48))) & ((1 << 48) - 1)
+        self.dev.send_command(f"DPHS:{word}")
+        self.on_log(f"  (DAC 相位 {deg:.3f}° → 相位字 {word})")
 
     def _smooth_freq(self, ch: int, raw: float, locked: bool) -> float:
         """对单通道锁定频率做滑动平均; 未锁/未启用/大跳变时旁路或重置窗口."""
@@ -1776,6 +1863,10 @@ class MainWindow(QMainWindow):
         self._send_order_one("ORD12", self.cb_order12)
         self._send_order_one("ORD11", self.cb_order11)
         self._send_order_one("ORDDC", self.cb_orderdc)
+        # ★ 信号发生器 (DAC904): 模式 / 频率 / 相位
+        self._send_dac_mode()
+        self._send_freq_cmd("DFRQ", self.ed_dac_freq.text())
+        self._send_dac_phase(self.ed_dac_phase.text())
 
     def on_diag_clicked(self):
         """点击 [打印当前帧诊断] 按钮: 把最近一帧的全部解析结果 dump 到日志,

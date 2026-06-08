@@ -51,7 +51,12 @@ module lock_in_amp(
 
    // ★ 新增: PL LED 状态指示 (可选, 不接也行)
    output wire       pl_led1,    // 链路状态: 长亮=1G 已链上
-   output wire       pl_led2     // 帧丢失指示: 闪烁=有帧被丢弃
+   output wire       pl_led2,    // 帧丢失指示: 闪烁=有帧被丢弃
+
+   // ★ 新增: 信号发生器 DAC904 接口
+   output wire        dac_pd,    // DAC 掉电控制 (da_wave_send 内固定为 0)
+   output wire        dac_clk,   // DAC 采样时钟 (= clk_65M)
+   output wire [13:0] da_data    // DAC 数据 (offset binary, 14bit)
 );
 
 // =========================================================================
@@ -109,6 +114,10 @@ wire [2:0]  order_dc_uart;      // ch3 DC 通路   IIR
 // ★ PLL 锁定阈值 (由 USB 命令 LOCKSWY/LOCKTHX 动态下发)
 wire signed [27:0] sweep_thres_uart;
 wire signed [27:0] lock_x_thres_uart;
+// ★ 信号发生器 (DAC904) 控制 (由 USB 命令 DMOD/DFRQ/DPHS 下发)
+wire [1:0]  dac_src_mode_uart;     // 0=内部DDS / 1=跟随CH1 / 2=跟随CH2
+wire [47:0] dac_freq_word_uart;    // 内部DDS频率字
+wire [47:0] dac_phase_word_uart;   // 内部DDS相位字
 
 
 // =========================================================================
@@ -252,6 +261,51 @@ pll_loop #(
 //     .m_axis_phase_tvalid   (),
 //     .m_axis_phase_tdata    ()
 // );
+
+
+// =========================================================================
+// ★ 信号发生器 (DAC904)  —— 内部 DDS / 跟随 CH1·CH2 锁定频率
+//
+//   频率字来源 (DMOD 命令选择):
+//     0 = 内部 DDS : 频率/相位由上位机 DFRQ/DPHS 指定 (独立信号源)
+//     1 = 跟随 CH1 : 频率字 = pll_freq_ch1 (与 CH1 外参考锁定结果同频输出)
+//     2 = 跟随 CH2 : 频率字 = pll_freq_ch2
+//   相位: 始终叠加 dac_phase_word_uart (DPHS), 跟随模式下用于微调相位对齐.
+//
+//   注: 跟随模式输出与输入"同频", 相位为本 DDS 自由相位 + DPHS 偏移; 若要与
+//       输入信号严格同相, 需现场用 DPHS 标定 (或后续从 PLL NCO 直接引相位).
+// =========================================================================
+wire [47:0] dac_freq_sel = (dac_src_mode_uart == 2'd1) ? pll_freq_ch1 :
+                           (dac_src_mode_uart == 2'd2) ? pll_freq_ch2 :
+                                                         dac_freq_word_uart;
+
+// DDS 配置: {phase_offset[47:0], phase_increment[47:0]}
+wire [95:0]        dac_dds_cfg = {dac_phase_word_uart, dac_freq_sel};
+wire signed [31:0] dac_sine_cos;
+wire signed [13:0] dac_sine = dac_sine_cos[29:16];   // 取正弦 (cos 在 [13:0])
+
+dds_compiler_1 u_dds_dac (
+    .aclk                  (clk_65M),
+    .s_axis_config_tvalid  (1'b1),
+    .s_axis_config_tdata   (dac_dds_cfg),
+    .m_axis_data_tvalid    (),
+    .m_axis_data_tdata     (dac_sine_cos),
+    .m_axis_phase_tvalid   (),
+    .m_axis_phase_tdata    ()
+);
+
+// signed [13:0] (-8192..8191) → offset binary (0..16383), 喂给 DAC904.
+// 翻转 MSB 等价于 +8192, 且不会有 14'sd8192 溢出问题.
+wire [13:0] dac_wave = {~dac_sine[13], dac_sine[12:0]};
+
+da_wave_send u_da_wave_send (
+    .CLK_DAC904 (clk_65M),
+    .SYS_RST    (sys_rst),
+    .DATA_BUF   (dac_wave),
+    .PD         (dac_pd),
+    .DAC_CLK    (dac_clk),
+    .DAC_DATA   (da_data)
+);
 
 
 // =========================================================================
@@ -516,6 +570,10 @@ usb_commend u_usb_commend (
     .order12 (order12_uart),
     .order11 (order11_uart),
     .order_dc(order_dc_uart),
+    // ★ 信号发生器 (DAC904) 控制 (DMOD/DFRQ/DPHS)
+    .dac_src_mode  (dac_src_mode_uart),
+    .dac_freq_word (dac_freq_word_uart),
+    .dac_phase_word(dac_phase_word_uart),
     .send_en(send_en),
     .send_data(send_data)
 );

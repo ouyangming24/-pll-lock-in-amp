@@ -71,6 +71,11 @@ module usb_commend(
     output reg [2:0] order12,    // ch3 @ F1+2F2  PSD 阶数
     output reg [2:0] order11,    // ch3 @ F1+F2   PSD 阶数
     output reg [2:0] order_dc,   // ch3 DC 通路   IIR 阶数
+    // ★ 信号发生器 (DAC904) 控制
+    //   dac_src_mode: 0=内部DDS(指定频率/相位下发), 1=跟随CH1锁定频率, 2=跟随CH2锁定频率
+    output reg [1:0]  dac_src_mode,    // DMOD 命令
+    output reg [47:0] dac_freq_word,   // DFRQ 命令: 内部DDS频率字 (48bit)
+    output reg [47:0] dac_phase_word,  // DPHS 命令: 内部DDS相位字 (48bit)
     output reg send_en,
     output reg [7:0] send_data
 );
@@ -112,6 +117,9 @@ module usb_commend(
     parameter CMD_ORD12   = 5'd26;   // ch3 @ F1+2F2  IIR 阶数 (1..4)
     parameter CMD_ORD11   = 5'd27;   // ch3 @ F1+F2   IIR 阶数 (1..4)
     parameter CMD_ORDDC   = 5'd28;   // ch3 DC 通路   IIR 阶数 (1..4)
+    parameter CMD_DMOD    = 5'd29;   // 信号发生器源选择 (0=内部DDS / 1=跟随CH1 / 2=跟随CH2)
+    parameter CMD_DFRQ    = 5'd30;   // 信号发生器内部DDS频率字 (48bit)
+    parameter CMD_DPHS    = 5'd31;   // 信号发生器内部DDS相位字 (48bit)
 
     reg [2:0] curr_state;
     reg [4:0] cmd_type;  // ??????????5 bit
@@ -209,6 +217,10 @@ module usb_commend(
             order12       <= 3'd1;
             order11       <= 3'd1;
             order_dc      <= 3'd1;
+            // ★ 信号发生器默认: 内部DDS, ~50 kHz @ 65MHz (50000*2^48/65e6), 0 相位
+            dac_src_mode   <= 2'd0;
+            dac_freq_word  <= 48'd216519212854;
+            dac_phase_word <= 48'd0;
             // ???PLL ?????????????????(????, ???????????????????
             sweep_thres  <= 28'd100_000;   // |dc_y| > 100K ?????LOCK
             lock_x_thres <= 28'd300_000;   // LOCK ?????? |dc_x| ??> 300K ????
@@ -295,6 +307,22 @@ module usb_commend(
                                 curr_state <= SEND_RESPONSE;
                                 msg_cnt <= 5'd0;
                                 msg_len <= 5'd18; 
+                            end
+                            // ★ 信号发生器 (DAC904): DMOD / DFRQ / DPHS (均为 4 字符命令)
+                            else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "M" && cmd_buffer[2] == "O" && cmd_buffer[3] == "D" && rec_data == ":") begin
+                                cmd_type <= CMD_DMOD;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "F" && cmd_buffer[2] == "R" && cmd_buffer[3] == "Q" && rec_data == ":") begin
+                                cmd_type <= CMD_DFRQ;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "P" && cmd_buffer[2] == "H" && cmd_buffer[3] == "S" && rec_data == ":") begin
+                                cmd_type <= CMD_DPHS;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
                             end
                             else begin
                                 cmd_cnt <= cmd_cnt + 1'b1;
@@ -523,6 +551,16 @@ module usb_commend(
                                     order_dc <= value_buffer[2:0];
                                 else
                                     order_dc <= 3'd1;
+                            end
+                            // ★ 信号发生器 (DAC904)
+                            else if (cmd_type == CMD_DMOD) begin
+                                dac_src_mode <= value_buffer[1:0];
+                            end
+                            else if (cmd_type == CMD_DFRQ) begin
+                                dac_freq_word <= value_buffer;
+                            end
+                            else if (cmd_type == CMD_DPHS) begin
+                                dac_phase_word <= value_buffer;
                             end
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;

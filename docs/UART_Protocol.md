@@ -324,6 +324,9 @@ github  → https://github.com/ouyangming24/-pll-lock-in-amp.git   (镜像)
 | `ORD12` ★ | 5 字符 | 3 bit  | 通道3 谐波 `F1+2F2` IIR 阶数 (1..4) | `1` |
 | `ORD11` ★ | 5 字符 | 3 bit  | 通道3 谐波 `F1+F2`  IIR 阶数 (1..4) | `1` |
 | `ORDDC` ★ | 5 字符 | 3 bit  | 通道3 DC 通路       IIR 阶数 (1..4) | `1` |
+| `DMOD` ★ | 4 字符 | 2 bit  | 信号发生器(DAC904)源：`0`=内部DDS / `1`=跟随CH1锁定频率 / `2`=跟随CH2锁定频率 | `0` |
+| `DFRQ` ★ | 4 字符 | 48 bit | 信号发生器内部DDS频率控制字 (仅 `DMOD=0` 生效) | `216519212854` (~50 kHz) |
+| `DPHS` ★ | 4 字符 | 48 bit | 信号发生器内部DDS相位控制字 (角度→48bit) | `0` |
 | `XYOUT` | 5 字符 | —  | 启动 X/Y 直流量连续回传 | 关闭 |
 | `stop` | 4 字符 | — | 停止 X/Y 连续回传 | — |
 
@@ -657,7 +660,7 @@ ser.write(b'stop\r\n')
 
 ### 6.6 容错与注意事项
 
-1. **指令大小写敏感**：除 `stop` 是全小写，其他指令（`KP`/`KI`/`FREQ`/`TAU1X`/`TAU1Y`/`TAU2X`/`TAU2Y`/`TAU21`/`TAU12`/`TAU11`/`TAUDC`/`PHAS`/`FRQ2`/`FRQ3`/`FRQ21`/`FRQ12`/`FRQ11`/`LOCKSWY`/`LOCKTHX`/`REFMODE`/`ORD21`/`ORD12`/`ORD11`/`ORDDC`/`XYOUT`）都必须**全大写**。
+1. **指令大小写敏感**：除 `stop` 是全小写，其他指令（`KP`/`KI`/`FREQ`/`TAU1X`/`TAU1Y`/`TAU2X`/`TAU2Y`/`TAU21`/`TAU12`/`TAU11`/`TAUDC`/`PHAS`/`FRQ2`/`FRQ3`/`FRQ21`/`FRQ12`/`FRQ11`/`LOCKSWY`/`LOCKTHX`/`REFMODE`/`ORD21`/`ORD12`/`ORD11`/`ORDDC`/`DMOD`/`DFRQ`/`DPHS`/`XYOUT`）都必须**全大写**。
 2. **数值仅支持十进制**：`value_buffer` 解析逻辑是 `value * 10 + (ascii - '0')`，
    暂不支持 `0x` 十六进制、负号、小数点。
 3. **指令超长**：若指令字符数累计 ≥ 9 还未匹配任何已知指令，会返回 `Command Error!\r\n` 并丢弃。

@@ -430,6 +430,10 @@ class MockDevice(QObject):
             "ORD12":   1,
             "ORD11":   1,
             "ORDDC":   1,
+            # 信号发生器 (DAC904): 模式 / 内部DDS频率字 / 相位字
+            "DMOD":  0,                          # 0=内部DDS, 1=跟随CH1, 2=跟随CH2
+            "DFRQ":  hz_to_freq_word(50000),
+            "DPHS":  0,
         }
         # 模拟数据生成定时器 (~50 fps; 真实硬件帧率 ≤ 10 fps, 这里足够看动效)
         self._timer = QTimer()

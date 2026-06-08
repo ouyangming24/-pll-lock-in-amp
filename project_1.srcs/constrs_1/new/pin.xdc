@@ -7,7 +7,7 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN M19} [get_ports sys_clk]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN J20} [get_ports sys_rst_n]
 
 
-# 假设您的时钟叫 sys_clk，放宽 IIR 模块内的建立时间检查到 2 个周期
+# 假设您的时钟�? sys_clk，放�? IIR 模块内的建立时间�?查到 2 个周�?
 #set_multicycle_path -setup -from [get_cells -hierarchical -filter {NAME =~ *u_iir_lpf_ema*/y_acc_reg*}] -to [get_cells -hierarchical -filter {NAME =~ *u_iir_lpf_ema*/y_acc_reg*}] 2
 #set_multicycle_path -hold -from [get_cells -hierarchical -filter {NAME =~ *u_iir_lpf_ema*/y_acc_reg*}] -to [get_cells -hierarchical -filter {NAME =~ *u_iir_lpf_ema*/y_acc_reg*}] 1
 
@@ -73,11 +73,11 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G16} [get_ports adc_clk]
 
 
 # --- 弃用 (2026-05) ----------------------------------------------------------
-# 旧引脚分配: adc_clk_2 在 AA18, 14 根 data 散布在 AB16~V22 (跨度 16~22 行).
-# 现象: ch3 ADC 采样波形带规律性"锯齿", 推测是 PCB 走线长度差/14 位
-#       数据线 setup-hold 边缘紊乱所致 (ch1/2 用同一份 ad_wave_rec 代码无锯齿).
-# 修复: 改用集中在右上角 (V13~AB17) 的一片相邻 IO, 走线短、长度差小, 波形干净.
-# 保留以下注释作为历史参考, 不要再启用.
+# 旧引脚分�?: adc_clk_2 �? AA18, 14 �? data 散布�? AB16~V22 (跨度 16~22 �?).
+# 现象: ch3 ADC 采样波形带规律�??"锯齿", 推测�? PCB 走线长度�?/14 �?
+#       数据�? setup-hold 边缘紊乱�?�? (ch1/2 用同�?�? ad_wave_rec 代码无锯�?).
+# 修复: 改用集中在右上角 (V13~AB17) 的一片相�? IO, 走线短�?�长度差�?, 波形干净.
+# 保留以下注释作为历史参�??, 不要再启�?.
 # -----------------------------------------------------------------------------
 # set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y18}  [get_ports adc_oeb_b_2]
 # set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA18} [get_ports adc_clk_2]
@@ -122,10 +122,10 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA18}  [get_ports adc_otr_2]
 
 
 #############################################################################
-# FT245BL USB-FIFO 接口 (替代原先的 UART)
-#   - FT245BL VCCIO 建议接 3.3 V, FPGA 端 IOSTANDARD 用 LVCMOS33
-#   - 下面的 PACKAGE_PIN 全是 ★占位★, 必须根据实际 PCB 连线修改!
-#   - 原 uart_tx(L17) / uart_rx(M17) 的 2 个引脚已释放, 可用于其他功能
+# FT245BL USB-FIFO 接口 (替代原先�? UART)
+#   - FT245BL VCCIO 建议�? 3.3 V, FPGA �? IOSTANDARD �? LVCMOS33
+#   - 下面�? PACKAGE_PIN 全是 ★占位★, 必须根据实际 PCB 连线修改!
+#   - �? uart_tx(L17) / uart_rx(M17) �? 2 个引脚已释放, 可用于其他功�?
 #############################################################################
 
 # ---- FIFO 数据总线 D0..D7 (双向) ------------------------------------------
@@ -145,16 +145,32 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN E20} [get_ports ft_rxf_n ]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G19} [get_ports ft_txe_n ]
 
 
-# ---- 未接 FPGA 的 FT245 引脚 (PCB 处理, 不在此约束) -----------------------
-#   FT245 PWREN# (pin 10) : 输出, 未使用 -> 悬空或接 LED/测试点
-#   FT245 SI/WU  (pin 11) : 输入, 未使用 -> PCB 上拉到 VCCIO (强制要求!)
+# ---- 未接 FPGA �? FT245 引脚 (PCB 处理, 不在此约�?) -----------------------
+#   FT245 PWREN# (pin 10) : 输出, 未使�? -> 悬空或接 LED/测试�?
+#   FT245 SI/WU  (pin 11) : 输入, 未使�? -> PCB 上拉�? VCCIO (强制要求!)
 
-# ---- 建议的时序/电气约束 ---------------------------------------------------
-# FT245 的 FIFO 时钟上限为 48 MHz, 本工程 sys_clk = 50 MHz 已足够慢,
-# 读写时序由 ft245_rx/ft245_tx 内部计数器保证, 通常不需要额外 SDC 约束。
-# 若以后加入更高速的同步 FIFO (FT245BL 不支持), 再补 create_generated_clock。
+# ---- 建议的时�?/电气约束 ---------------------------------------------------
+# FT245 �? FIFO 时钟上限�? 48 MHz, 本工�? sys_clk = 50 MHz 已足够慢,
+# 读写时序�? ft245_rx/ft245_tx 内部计数器保�?, 通常不需要额�? SDC 约束�?
+# 若以后加入更高�?�的同步 FIFO (FT245BL 不支�?), 再补 create_generated_clock�?
 
-
+#DAC 
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB16} [get_ports dac_pd]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA16} [get_ports dac_clk]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA19} [get_ports {da_data[13]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y19} [get_ports {da_data[12]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB19} [get_ports {da_data[11]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB20} [get_ports {da_data[10]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB21} [get_ports {da_data[9]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA21} [get_ports {da_data[8]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB22} [get_ports {da_data[7]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA22} [get_ports {da_data[6]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y21} [get_ports {da_data[5]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y20} [get_ports {da_data[4]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN W22} [get_ports {da_data[3]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN V22} [get_ports {da_data[2]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN U22} [get_ports {da_data[1]}]
+set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN T22} [get_ports {da_data[0]}]
 
 
 
