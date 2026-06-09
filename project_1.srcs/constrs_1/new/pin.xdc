@@ -1,13 +1,23 @@
 
-#æ—¶åºçº¦æŸ
+#�?�序约�?
 create_clock -period 20.000 -name sys_clk [get_ports sys_clk]
 
-#IOç®¡è„šçº¦æŸ
+# CDC: sys_clk(50MHz) and clk_wiz output 65MHz are asynchronous to each other.
+#   usb_commend/FT245 run on sys_clk(50M); PLL/PSD/DDS run on clk_out1_clk_wiz_0(65M).
+#   Multi-bit config buses between the two domains are double-registered in
+#   lock_in_amp.v (CDC sync block). Declare async clock groups to remove the
+#   bogus setup analysis on these crossings (was WNS ~= -16ns, 5000+ failing
+#   endpoints, which made the open-loop PSDs latch corrupted frequency words).
+set_clock_groups -asynchronous \
+  -group [get_clocks sys_clk] \
+  -group [get_clocks clk_out1_clk_wiz_0]
+
+#IO管�??约�?
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN M19} [get_ports sys_clk]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN J20} [get_ports sys_rst_n]
 
 
-# å‡è®¾æ‚¨çš„æ—¶é’Ÿå? sys_clkï¼Œæ”¾å®? IIR æ¨¡å—å†…çš„å»ºç«‹æ—¶é—´æ£?æŸ¥åˆ° 2 ä¸ªå‘¨æœ?
+# �?设�?��??�?��??�? sys_clk�?�?��? IIR 模�?�??�??建�?�?��?��?�?��?� 2 个�?��??
 #set_multicycle_path -setup -from [get_cells -hierarchical -filter {NAME =~ *u_iir_lpf_ema*/y_acc_reg*}] -to [get_cells -hierarchical -filter {NAME =~ *u_iir_lpf_ema*/y_acc_reg*}] 2
 #set_multicycle_path -hold -from [get_cells -hierarchical -filter {NAME =~ *u_iir_lpf_ema*/y_acc_reg*}] -to [get_cells -hierarchical -filter {NAME =~ *u_iir_lpf_ema*/y_acc_reg*}] 1
 
@@ -72,12 +82,12 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G15} [get_ports adc_oeb_b]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G16} [get_ports adc_clk]
 
 
-# --- å¼ƒç”¨ (2026-05) ----------------------------------------------------------
-# æ—§å¼•è„šåˆ†é…?: adc_clk_2 åœ? AA18, 14 æ ? data æ•£å¸ƒåœ? AB16~V22 (è·¨åº¦ 16~22 è¡?).
-# çŽ°è±¡: ch3 ADC é‡‡æ ·æ³¢å½¢å¸¦è§„å¾‹æ??"é”¯é½¿", æŽ¨æµ‹æ˜? PCB èµ°çº¿é•¿åº¦å·?/14 ä½?
-#       æ•°æ®çº? setup-hold è¾¹ç¼˜ç´Šä¹±æ‰?è‡? (ch1/2 ç”¨åŒä¸?ä»? ad_wave_rec ä»£ç æ— é”¯é½?).
-# ä¿®å¤: æ”¹ç”¨é›†ä¸­åœ¨å³ä¸Šè§’ (V13~AB17) çš„ä¸€ç‰‡ç›¸é‚? IO, èµ°çº¿çŸ­ã?é•¿åº¦å·®å°?, æ³¢å½¢å¹²å‡€.
-# ä¿ç•™ä»¥ä¸‹æ³¨é‡Šä½œä¸ºåŽ†å²å‚è??, ä¸è¦å†å¯ç”?.
+# --- �?�?� (2026-05) ----------------------------------------------------------
+# �?��?�??�??�??: adc_clk_2 �?? AA18, 14 �? data �?��?�?? AB16~V22 (跨度 16~22 �?).
+# �?�象: ch3 ADC �??样波形带�?�?�??"�?�齿", �?��?�?? PCB 走线�?�度�?/14 �?
+#       �?�据�? setup-hold 边�?�?乱�??�?? (ch1/2 �?��?�?�? ad_wave_rec 代码�?��?��?).
+# 修复: �?��?��??中�?�右�?�? (V13~AB17) �??�?�??�?��?? IO, 走线�?��?��?�度差�?, 波形干�??.
+# 保�??以�?注�??�?为�??史�?�??, 不要�?�启�??.
 # -----------------------------------------------------------------------------
 # set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN Y18}  [get_ports adc_oeb_b_2]
 # set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA18} [get_ports adc_clk_2]
@@ -122,13 +132,13 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AA18}  [get_ports adc_otr_2]
 
 
 #############################################################################
-# FT245BL USB-FIFO æŽ¥å£ (æ›¿ä»£åŽŸå…ˆçš? UART)
-#   - FT245BL VCCIO å»ºè®®æŽ? 3.3 V, FPGA ç«? IOSTANDARD ç”? LVCMOS33
-#   - ä¸‹é¢çš? PACKAGE_PIN å…¨æ˜¯ â˜…å ä½â˜…, å¿…é¡»æ ¹æ®å®žé™… PCB è¿žçº¿ä¿®æ”¹!
-#   - åŽ? uart_tx(L17) / uart_rx(M17) çš? 2 ä¸ªå¼•è„šå·²é‡Šæ”¾, å¯ç”¨äºŽå…¶ä»–åŠŸèƒ?
+# FT245BL USB-FIFO �?�口 (�?�代�??�??�?? UART)
+#   - FT245BL VCCIO 建议�?? 3.3 V, FPGA �? IOSTANDARD �?? LVCMOS33
+#   - �?面�?? PACKAGE_PIN �?��?� �??占位�??, �?须根据�?�?? PCB �?线修�?�!
+#   - �?? uart_tx(L17) / uart_rx(M17) �?? 2 个�?�??已�??�?�, 可�?��?�?��?�??�??
 #############################################################################
 
-# ---- FIFO æ•°æ®æ€»çº¿ D0..D7 (åŒå‘) ------------------------------------------
+# ---- FIFO �?�据�?�线 D0..D7 (�?�?) ------------------------------------------
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN H20} [get_ports {ft_d[0]}]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN F18} [get_ports {ft_d[1]}]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G17} [get_ports {ft_d[2]}]
@@ -138,21 +148,21 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN E19} [get_ports {ft_d[5]}]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN C22} [get_ports {ft_d[6]}]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN B21} [get_ports {ft_d[7]}]
 
-# ---- FIFO æŽ§åˆ¶ä¿¡å· ---------------------------------------------------------
+# ---- FIFO �?��?�信号 ---------------------------------------------------------
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN B22} [get_ports ft_rd_n  ]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN D22} [get_ports ft_wr    ]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN E20} [get_ports ft_rxf_n ]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G19} [get_ports ft_txe_n ]
 
 
-# ---- æœªæŽ¥ FPGA çš? FT245 å¼•è„š (PCB å¤„ç†, ä¸åœ¨æ­¤çº¦æ?) -----------------------
-#   FT245 PWREN# (pin 10) : è¾“å‡º, æœªä½¿ç”? -> æ‚¬ç©ºæˆ–æŽ¥ LED/æµ‹è¯•ç‚?
-#   FT245 SI/WU  (pin 11) : è¾“å…¥, æœªä½¿ç”? -> PCB ä¸Šæ‹‰åˆ? VCCIO (å¼ºåˆ¶è¦æ±‚!)
+# ---- �?��?� FPGA �?? FT245 �?�?? (PCB �?�?, 不�?�此约�?) -----------------------
+#   FT245 PWREN# (pin 10) : �?�?�, �?�使�?? -> �?�空�??�?� LED/�?�?�??
+#   FT245 SI/WU  (pin 11) : �?�?�, �?�使�?? -> PCB �?�??�?? VCCIO (强�?�要�?!)
 
-# ---- å»ºè®®çš„æ—¶åº?/ç”µæ°”çº¦æŸ ---------------------------------------------------
-# FT245 çš? FIFO æ—¶é’Ÿä¸Šé™ä¸? 48 MHz, æœ¬å·¥ç¨? sys_clk = 50 MHz å·²è¶³å¤Ÿæ…¢,
-# è¯»å†™æ—¶åºç”? ft245_rx/ft245_tx å†…éƒ¨è®¡æ•°å™¨ä¿è¯?, é€šå¸¸ä¸éœ€è¦é¢å¤? SDC çº¦æŸã€?
-# è‹¥ä»¥åŽåŠ å…¥æ›´é«˜é?Ÿçš„åŒæ­¥ FIFO (FT245BL ä¸æ”¯æŒ?), å†è¡¥ create_generated_clockã€?
+# ---- 建议�??�?��?/�?��?约�? ---------------------------------------------------
+# FT245 �?? FIFO �?��??�?�?��? 48 MHz, �?�工�? sys_clk = 50 MHz 已足�?�?�,
+# 读�??�?�序�?? ft245_rx/ft245_tx �??�?�计�?��?�保�?, �??常不�??要额�? SDC 约�?�??
+# �?�以�?�?��?��?��?�??�??�?步 FIFO (FT245BL 不�?��??), �?�补 create_generated_clock�??
 
 #DAC 
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN AB16} [get_ports dac_pd]

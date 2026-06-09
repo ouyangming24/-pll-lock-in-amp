@@ -22,8 +22,15 @@ module coherent_harm_lo (
     output wire signed [13:0] harm_cos
 );
 
-    wire [55:0] comb_phase_full = phase_ch1 * harm_n + phase_ch2 * harm_m;
-    wire [47:0] comb_phase      = comb_phase_full[47:0];
+    // θ_harm = n·θ1 + m·θ2. 48×8 乘加路径较长, 在 clk 域寄存两级流水打断,
+    // 降低 65M 域组合延迟 (sin/cos 同步延迟, 仅引入恒定相位偏移, 不影响相干性).
+    reg [55:0] prod1, prod2;
+    reg [47:0] comb_phase;
+    always @(posedge clk) begin
+        prod1      <= phase_ch1 * harm_n;
+        prod2      <= phase_ch2 * harm_m;
+        comb_phase <= prod1[47:0] + prod2[47:0];
+    end
 
     // {phase_offset, phase_increment}; increment=0 → 仅相位查找, 不独立积分
     wire [95:0] harm_dds_cfg = {comb_phase, 48'd0};
