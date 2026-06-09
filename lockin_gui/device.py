@@ -424,7 +424,10 @@ class MockDevice(QObject):
             "FRQ11": hz_to_freq_word(110_000),   # F1+F2
             "LOCKSWY": 100_000,
             "LOCKTHX": 300_000,
-            "REFMODE": 0,   # 0=手动 (FRQ21/12/11), 1=PLL 硬件自动 (PLL 恢复后启用)
+            "REFMODE": 1,   # 0=手动 (FRQ21/12/11), 1=硬件 n·F1+m·F2
+            "OSC1": (2 << 8) | 1,   # 振荡器1: 2·F1+1·F2
+            "OSC2": (1 << 8) | 2,   # 振荡器2: 1·F1+2·F2
+            "OSC3": (1 << 8) | 1,   # 振荡器3: 1·F1+1·F2
             # 通道3 4 路 IIR 阶数 (各路独立, 1..4 = 6/12/18/24 dB/oct)
             "ORD21":   1,
             "ORD12":   1,

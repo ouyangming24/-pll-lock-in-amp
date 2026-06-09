@@ -327,6 +327,8 @@ class MainWindow(QMainWindow):
             self.dev = UdpLockinDevice()
         else:
             self.dev = LockinDevice()
+        self._udp_mode = udp_mode
+        self._demo_mode = demo_mode
         self.dev.frame_received.connect(self.on_frame)
         self.dev.log_message.connect(self.on_log)
         self.dev.connection_changed.connect(self.on_conn_changed)
@@ -347,12 +349,6 @@ class MainWindow(QMainWindow):
         self._latest_locked_ch1 = False
         self._latest_locked_ch2 = False
         self._last_frame: dict | None = None    # 最近一帧解析结果, 供诊断按钮使用
-
-        # 自动模式谐波 ref 跟随实测锁定频率: 自动下发的迟滞状态
-        #   只有当三路 ref 相对"上次下发值"变化超过阈值, 且距上次下发超过最小间隔时,
-        #   才真正下发到 FPGA, 避免每帧刷屏占满串口/UDP.
-        self._ref_last_sent = {}     # {cmd: hz} 上次自动下发的频率
-        self._ref_last_send_t = 0.0  # 上次自动下发时间戳
 
         # 运行时电压标定 (用户可在 GUI 上随时改). K 拆成两组独立:
         #   _calib_k_har → 只影响 X/Y/R (有混频) 通路 → _v_per_lsb / _mv_per_lsb
@@ -402,6 +398,13 @@ class MainWindow(QMainWindow):
         if not _USE_OPENGL:
             self.on_log("    ↳ 未检测到 PyOpenGL, 使用 CPU 渲染. "
                         "如鼠标卡顿可: pip install PyOpenGL")
+        if self._demo_mode:
+            self.on_log("[+] 通信模式: DEMO (离线模拟)")
+        elif self._udp_mode:
+            self.on_log("[+] 通信模式: UDP 数据 + 串口命令 "
+                        "(需 FPGA 已启用 eth_lockin_top; 当前工程默认未启用)")
+        else:
+            self.on_log("[+] 通信模式: 串口 (FT245 USB, 命令+数据; 需点「开始数据流」发 XYOUT)")
 
     # ============================================================ UI 构造
     def _build_ui(self):
@@ -587,11 +590,7 @@ class MainWindow(QMainWindow):
         self.ed_f2 = self._mk_freq_row(g_freq, 1, "F2 起点", "60000", "FRQ3")
         v.addWidget(gb_freq)
 
-        # ★ 信号发生器 (DAC904): 内部DDS 指定频率/相位, 或跟随 CH1/CH2 锁定频率同步输出
-        v.addWidget(self._build_dac_group())
-
-        # ★ 一键自动锁定 (CH1 / CH2): 下发中心频率 → 等锁定 → 软件AGC →
-        #   判稳后切到最终超稳参数 (KP=1/KI=0 + 本通道 tau) + 大平滑 → mHz
+        # ★ 一键自动锁定 (CH1 / CH2)
         auto_tip = (
             "填好对应起点后点此:\n"
             "① 下发中心频率 + 稳健捕获参数 → ② 等待硬件锁定 →\n"
@@ -616,58 +615,19 @@ class MainWindow(QMainWindow):
         auto_h.addWidget(self.btn_auto_lock2)
         v.addLayout(auto_h)
 
+        # ★ 信号发生器
+        v.addWidget(self._build_dac_group())
+
         # ★ 时基(晶振)标定: 修正锁定频率读数的固定 ppm 误差
         v.addWidget(self._build_clk_cal_group())
 
         # ★ 锁定频率后置平滑: 读数精度与环路带宽解耦 (环路调快, 读数仍稳)
         v.addWidget(self._build_freq_smooth_group())
 
-        # ★ 通道3 三路开环锁相 ref_freq
-        #   两种模式:
-        #     自动: 三路 ref_freq 由 F1/F2 自动算出 2F1+F2 / F1+2F2 / F1+F2, 输入框只读.
-        #            通道锁定时基准取"实测锁定频率"(pll_freq_ch1_hz/ch2_hz, 已含时基标定
-        #            与平滑), 未锁定时回退 F1/F2 起点标称值; 锁定后按迟滞自动下发到 FPGA.
-        #            (跟随逻辑见 on_frame → _track_ref_freqs)
-        #     手动: 三路 ref_freq 独立编辑, 不受 F1/F2 影响 (例如锁单一频点测试)
-        gb_ref = QGroupBox("通道3 锁相参考频率 (Hz)")
-        gb_ref.setToolTip(
-            "自动: 三路 ref_freq = (2F1+F2 / F1+2F2 / F1+F2), 实时跟随 F1/F2.\n"
-            "  · 通道已锁定 → 用'实测锁定频率'(含时基标定+平滑), 更精确;\n"
-            "  · 未锁定     → 回退到 F1/F2 扫频起点 (标称值).\n"
-            "  · 锁定后会按迟滞自动下发到 FPGA (变化>0.5Hz 且间隔≥1s 才发).\n"
-            "手动: 三路 ref_freq 独立指定, 可任意锁一个频点 (例如做单频谐波灵敏度扫描).\n"
-            "默认值 (自动 / 50k+60k) = 160 / 170 / 110 kHz."
-        )
-        gb_ref_v = QVBoxLayout(gb_ref)
-
-        # 模式切换行
-        mode_h = QHBoxLayout()
-        mode_h.addWidget(QLabel("模式:"))
-        self.rb_ref_auto = QRadioButton("自动 (跟随实测锁定 F1/F2)")
-        self.rb_ref_man  = QRadioButton("手动")
-        self.rb_ref_auto.setChecked(True)
-        mode_h.addWidget(self.rb_ref_auto)
-        mode_h.addWidget(self.rb_ref_man)
-        mode_h.addStretch()
-        gb_ref_v.addLayout(mode_h)
-
-        # 三路输入框
-        g_ref = QGridLayout()
-        self._setup_normal_grid(g_ref)
-        self.ed_fr21 = self._mk_freq_row(g_ref, 0, "2F1+F2", "160000", "FRQ21")
-        self.ed_fr12 = self._mk_freq_row(g_ref, 1, "F1+2F2", "170000", "FRQ12")
-        self.ed_fr11 = self._mk_freq_row(g_ref, 2, "F1+F2 ", "110000", "FRQ11")
-        gb_ref_v.addLayout(g_ref)
-
-        v.addWidget(gb_ref)
-
-        # 信号连接 (放在所有控件创建完成后):
-        #  - F1/F2 编辑时, 若是自动模式, 自动刷新三路 ref_freq
-        #  - 切换模式时, 联动 readOnly 状态和样式
+        v.addWidget(self._build_ch3_osc_group())
         self.rb_ref_auto.toggled.connect(self._on_ref_mode_toggled)
         self.ed_f1.textChanged.connect(self._on_f1f2_text_changed)
         self.ed_f2.textChanged.connect(self._on_f1f2_text_changed)
-        # 上电初始化为"自动模式"对应的视觉/数据状态
         self._on_ref_mode_toggled(True)
 
         gb_phs = QGroupBox("相位偏移 (FRQ2 通道)")
@@ -810,6 +770,7 @@ class MainWindow(QMainWindow):
         btn.setStyleSheet("font-size: 11pt; font-weight: bold;")
         btn.clicked.connect(lambda: self._send_freq_cmd(cmd, ed.text()))
         grid.addWidget(btn, row, 2)
+        ed._send_btn = btn
         return ed
 
     def _setup_normal_grid(self, grid):
@@ -875,33 +836,162 @@ class MainWindow(QMainWindow):
     #   - 切换时, 若是切到"自动", 立刻用 F1/F2 重算一次写回输入框 (不会触发
     #     textChanged 递归, 因为我们没监听 ed_fr21/12/11 的 textChanged).
     #   - 若 F1/F2 输入非法 (例如空字符串), _update_ref_freqs_from_f1f2 不抛异常,
-    #     保留三路输入框原值即可.
+    def _build_ch3_osc_group(self) -> QGroupBox:
+        """通道3 三路振荡器: 自动=n×F1+m×F2 系数下发 OSCx; 手动=绝对频率 FRQxx."""
+        gb = QGroupBox("通道3 振荡器 (谐波参考)")
+        gb.setToolTip(
+            "自动 (REFMODE:1): 设置 ×F1 / ×F2 系数, 点 ▶ 发 OSC1/2/3.\n"
+            "  FPGA 用 CH1/CH2 PLL 本振相位相干组合 n·θ1+m·θ2 (上电后 Θ 稳定).\n"
+            "手动 (REFMODE:0): 直接指定参考频率 (Hz), 发 FRQ21/12/11."
+        )
+        outer = QVBoxLayout(gb)
 
-    REF_AUTO_STYLE = (
-        "QLineEdit { background: #2a2a2a; color: #888; }"  # 只读时灰底淡字
-    )
-    REF_MAN_STYLE = ""  # 恢复默认 (跟主题走)
+        mode_h = QHBoxLayout()
+        mode_h.addWidget(QLabel("模式:"))
+        self.rb_ref_auto = QRadioButton("自动 (n·F1 + m·F2)")
+        self.rb_ref_man  = QRadioButton("手动 (指定 Hz)")
+        self.rb_ref_auto.setChecked(True)
+        mode_h.addWidget(self.rb_ref_auto)
+        mode_h.addWidget(self.rb_ref_man)
+        mode_h.addStretch()
+        outer.addLayout(mode_h)
+
+        btn_all = QPushButton("▶ 下发全部振荡器系数")
+        btn_all.setStyleSheet("font-size: 10pt; padding: 4px;")
+        btn_all.clicked.connect(lambda: self._send_all_osc_coefs())
+        self.btn_send_all_osc = btn_all
+        outer.addWidget(btn_all)
+
+        grid = QGridLayout()
+        grid.setVerticalSpacing(6)
+        grid.setHorizontalSpacing(6)
+        grid.setContentsMargins(4, 4, 4, 4)
+
+        self.ch3_oscs = []
+        osc_defs = [
+            ("振荡器 1", "OSC1", "FRQ21", "160000", 2, 1),
+            ("振荡器 2", "OSC2", "FRQ12", "170000", 1, 2),
+            ("振荡器 3", "OSC3", "FRQ11", "110000", 1, 1),
+        ]
+        for row, (label, osc_cmd, frq_cmd, frq_def, n_def, m_def) in enumerate(osc_defs):
+            lbl = QLabel(label)
+            lbl.setStyleSheet("font-size: 10pt;")
+            lbl.setFixedWidth(72)
+            grid.addWidget(lbl, row, 0)
+
+            auto_w = QWidget()
+            ah = QHBoxLayout(auto_w)
+            ah.setContentsMargins(0, 0, 0, 0)
+            ah.setSpacing(4)
+            ed_n = QLineEdit(str(n_def))
+            ed_m = QLineEdit(str(m_def))
+            for ed in (ed_n, ed_m):
+                ed.setFixedWidth(36)
+                ed.setFixedHeight(28)
+                ed.setAlignment(Qt.AlignCenter)
+                ed.setStyleSheet("font-size: 11pt; padding: 2px;")
+            lbl_hz = QLabel("≈ --- Hz")
+            lbl_hz.setStyleSheet("font-size: 10pt; color: #8ad;")
+            lbl_hz.setMinimumWidth(110)
+            ah.addWidget(QLabel("×F1"))
+            ah.addWidget(ed_n)
+            ah.addWidget(QLabel("+ ×F2"))
+            ah.addWidget(ed_m)
+            ah.addWidget(lbl_hz)
+            ah.addStretch()
+            grid.addWidget(auto_w, row, 1)
+
+            ed_frq = QLineEdit(frq_def)
+            ed_frq.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
+            ed_frq.setAlignment(Qt.AlignCenter)
+            ed_frq.setFixedHeight(30)
+            grid.addWidget(ed_frq, row, 2)
+
+            btn = QPushButton("▶")
+            btn.setFixedSize(36, 30)
+            btn.setStyleSheet("font-size: 11pt; font-weight: bold;")
+            grid.addWidget(btn, row, 3)
+
+            osc = {
+                "ed_n": ed_n, "ed_m": ed_m, "lbl_hz": lbl_hz,
+                "auto_w": auto_w, "ed_frq": ed_frq, "btn": btn,
+                "osc_cmd": osc_cmd, "frq_cmd": frq_cmd,
+            }
+            ed_n.textChanged.connect(self._on_osc_coef_changed)
+            ed_m.textChanged.connect(self._on_osc_coef_changed)
+            self.ch3_oscs.append(osc)
+            btn.clicked.connect(lambda _c=False, o=osc: self._send_one_osc(o))
+
+        outer.addLayout(grid)
+        return gb
 
     def _on_ref_mode_toggled(self, is_auto: bool):
-        """单选按钮切换. is_auto = rb_ref_auto.isChecked()"""
-        for ed in (self.ed_fr21, self.ed_fr12, self.ed_fr11):
-            ed.setReadOnly(is_auto)
-            ed.setStyleSheet(self.REF_AUTO_STYLE if is_auto else self.REF_MAN_STYLE)
-        if is_auto:
-            self._update_ref_freqs_from_f1f2()
+        """切换自动(系数+OSC)/手动(频率+FRQ)面板."""
+        auto = self.rb_ref_auto.isChecked()
+        for osc in self.ch3_oscs:
+            osc["auto_w"].setVisible(auto)
+            osc["ed_frq"].setVisible(not auto)
+            osc["btn"].setEnabled(True)
+        self.btn_send_all_osc.setVisible(auto)
+        if auto:
+            self._update_osc_hz_display()
+        if self.dev.is_connected:
+            self._send_ref_mode()
+
+    def _send_ref_mode(self, quiet: bool = False):
+        """下发 REFMODE: 自动=1 (硬件 n·F1+m·F2), 手动=0 (FRQ21/12/11)."""
+        auto = self.rb_ref_auto.isChecked()
+        mode = 1 if auto else 0
+        self.dev.send_command(f"REFMODE:{mode}")
+        if quiet:
+            return
+        label = "硬件自动 (n·F1+m·F2)" if auto else "手动 (FRQ21/12/11)"
+        self.on_log(f"[i] 通道3 ref 来源 = {label} (REFMODE:{mode})")
+
+    def _pack_osc_val(self, n: int, m: int) -> int:
+        return ((n & 0xFF) << 8) | (m & 0xFF)
+
+    def _send_one_osc(self, osc: dict, quiet: bool = False):
+        """下发单路振荡器: 自动发 OSCx 系数, 手动发 FRQxx 频率."""
+        if self.rb_ref_auto.isChecked():
+            try:
+                n = int(osc["ed_n"].text())
+                m = int(osc["ed_m"].text())
+            except ValueError:
+                self.on_log(f"[!] {osc['osc_cmd']} 系数非法")
+                return
+            if not (0 <= n <= 255 and 0 <= m <= 255):
+                self.on_log(f"[!] {osc['osc_cmd']} 系数须 0..255")
+                return
+            val = self._pack_osc_val(n, m)
+            self.dev.send_command(f"{osc['osc_cmd']}:{val}")
+            if not quiet:
+                self.on_log(f"  {osc['osc_cmd']}: n={n} m={m} (→ {val})")
+        else:
+            self._send_freq_cmd(osc["frq_cmd"], osc["ed_frq"].text())
+
+    def _send_all_osc_coefs(self, quiet: bool = False):
+        """自动模式: 下发三路 OSC 系数 + REFMODE:1."""
+        if not self.rb_ref_auto.isChecked():
+            self.on_log("[!] 手动模式下请用各行 ▶ 发 FRQxx")
+            return
+        self._send_ref_mode(quiet=True)
+        for osc in self.ch3_oscs:
+            self._send_one_osc(osc, quiet=True)
+        if not quiet:
+            parts = []
+            for osc in self.ch3_oscs:
+                parts.append(
+                    f"{osc['osc_cmd']}={osc['ed_n'].text()}·F1+{osc['ed_m'].text()}·F2")
+            self.on_log("[i] 已下发振荡器系数: " + ", ".join(parts))
 
     def _on_f1f2_text_changed(self, _txt: str):
-        """F1 或 F2 输入框内容变化时, 若处于自动模式就同步刷新三路 ref_freq."""
         if self.rb_ref_auto.isChecked():
-            self._update_ref_freqs_from_f1f2()
+            self._update_osc_hz_display()
 
-    # 自动模式下三路 ref 的"频率源":
-    #   - 通道已锁定 → 用实测锁定频率 pll_freq_ch1_hz / ch2_hz
-    #       (已含时基标定 ×k 与后置平滑, 比 F1/F2 标称起点更精确, 且自动吃到标定);
-    #   - 未锁定     → 回退到 F1/F2 扫频起点输入框 (标称值), 保证还没锁住时有合理预设.
-    AUTO_AUTOSEND = True       # 锁定后是否把跟随得到的 ref 自动下发到 FPGA
-    AUTO_REF_DELTA_HZ = 0.5    # ref 相对上次下发变化超过此值才重发
-    AUTO_REF_MIN_INTERVAL = 1.0  # 两次自动下发之间的最小间隔 (秒)
+    def _on_osc_coef_changed(self, _txt: str = ""):
+        if self.rb_ref_auto.isChecked():
+            self._update_osc_hz_display()
 
     def _ref_source_f1f2(self):
         """返回 (f1, f2, src): 用于计算三路 ref 的基准频率.
@@ -925,57 +1015,26 @@ class MainWindow(QMainWindow):
                 src = "lock"
         return f1, f2, src
 
-    def _update_ref_freqs_from_f1f2(self):
-        """按当前 ref 源 (实测锁定优先, 否则 F1/F2 起点) 重算三路 ref 并写回输入框."""
+    def _update_osc_hz_display(self):
+        """自动模式: 按系数与 F1/F2 刷新各路估算频率 (仅显示, 不下发)."""
         src = self._ref_source_f1f2()
-        if src is None:
-            return  # 输入非法或控件尚未就绪, 静默跳过
+        if src is None or not getattr(self, "ch3_oscs", None):
+            return
         f1, f2, _ = src
-        # 实测跟随时频率带小数, 用 3 位小数保留 mHz 量级
-        self.ed_fr21.setText(f"{2 * f1 + f2:.3f}")
-        self.ed_fr12.setText(f"{f1 + 2 * f2:.3f}")
-        self.ed_fr11.setText(f"{f1 + f2:.3f}")
+        for osc in self.ch3_oscs:
+            try:
+                n = int(osc["ed_n"].text())
+                m = int(osc["ed_m"].text())
+                hz = n * f1 + m * f2
+                osc["lbl_hz"].setText(f"≈ {hz:.3f} Hz")
+            except ValueError:
+                osc["lbl_hz"].setText("≈ --- Hz")
 
     def _track_ref_freqs(self):
-        """每帧调用 (自动模式): 让三路 ref 实时跟随实测锁定频率, 并按迟滞自动下发.
-
-        - 仅在自动模式生效; 手动模式完全不动用户的输入框.
-        - 显示文本始终刷新 (跟随源可能是实测也可能是标称起点).
-        - 自动下发: 仅当 src='lock' (确有通道锁定), 且某路 ref 相对上次下发值
-          变化 > AUTO_REF_DELTA_HZ, 且距上次下发 > AUTO_REF_MIN_INTERVAL 秒时才发,
-          避免每帧刷屏占满链路.
-        """
+        """每帧 (自动模式): 仅刷新估算频率显示."""
         if getattr(self, "rb_ref_auto", None) is None or not self.rb_ref_auto.isChecked():
             return
-        src = self._ref_source_f1f2()
-        if src is None:
-            return
-        f1, f2, kind = src
-        f21 = 2 * f1 + f2
-        f12 = f1 + 2 * f2
-        f11 = f1 + f2
-        self.ed_fr21.setText(f"{f21:.3f}")
-        self.ed_fr12.setText(f"{f12:.3f}")
-        self.ed_fr11.setText(f"{f11:.3f}")
-
-        if not (self.AUTO_AUTOSEND and kind == "lock"):
-            return
-        now = time.time()
-        if now - self._ref_last_send_t < self.AUTO_REF_MIN_INTERVAL:
-            return
-        pending = []
-        for cmd, hz in (("FRQ21", f21), ("FRQ12", f12), ("FRQ11", f11)):
-            last = self._ref_last_sent.get(cmd)
-            if last is None or abs(hz - last) >= self.AUTO_REF_DELTA_HZ:
-                pending.append((cmd, hz))
-        if not pending:
-            return
-        for cmd, hz in pending:
-            self._send_freq_cmd(cmd, f"{hz:.3f}", quiet=True)
-            self._ref_last_sent[cmd] = hz
-        self._ref_last_send_t = now
-        self.on_log(
-            f"[自动ref] 跟随实测: 2F1+F2={f21:.3f}  F1+2F2={f12:.3f}  F1+F2={f11:.3f} Hz")
+        self._update_osc_hz_display()
 
     # ------------------------------------------------- 时基(晶振)标定
     # 锁定频率读数有一个固定的 ppm 误差, 来自板载 50MHz 晶振相对理想值的偏差
@@ -1152,8 +1211,7 @@ class MainWindow(QMainWindow):
     #   2 跟随CH2 : 输出频率 = CH2 PLL 锁定频率
     # 频率字换算与锁相一致 (含时基标定 _clk_cal); 相位按 角度→48bit 相位字 换算.
     def _build_dac_group(self) -> QGroupBox:
-        gb = QGroupBox("信号发生器 (DAC904)")
-        gb.setObjectName("gbHighlight")
+        gb = QGroupBox("信号发生器")
         gb.setToolTip(
             "硬件: DAC904 (offset binary, 14bit), 采样时钟 = clk_65M.\n"
             "模式: 内部DDS = 自定义频率/相位独立信号源;\n"
@@ -1703,6 +1761,9 @@ class MainWindow(QMainWindow):
             self.btn_stream.setEnabled(True)
             self.lbl_status_conn.setText("● 已连接")
             self.lbl_status_conn.setStyleSheet("color: #5d5;")
+            self._send_ref_mode(quiet=True)
+            if self.rb_ref_auto.isChecked():
+                self._send_all_osc_coefs(quiet=True)
         else:
             self.btn_connect.setText("连接")
             self.btn_stream.setEnabled(False)
@@ -1852,10 +1913,13 @@ class MainWindow(QMainWindow):
         self._send_int_cmd("PHAS", self.ed_phs.text())
         self._send_freq_cmd("FRQ2", self.ed_f1.text())
         self._send_freq_cmd("FRQ3", self.ed_f2.text())
-        # ★ 通道3 三路 ref_freq (PLL 注释期间手动下发)
-        self._send_freq_cmd("FRQ21", self.ed_fr21.text())
-        self._send_freq_cmd("FRQ12", self.ed_fr12.text())
-        self._send_freq_cmd("FRQ11", self.ed_fr11.text())
+        # ★ 通道3 振荡器: 自动=REFMODE:1+OSC; 手动=REFMODE:0+FRQ21/12/11
+        if self.rb_ref_auto.isChecked():
+            self._send_all_osc_coefs(quiet=True)
+        else:
+            self._send_ref_mode(quiet=True)
+            for osc in self.ch3_oscs:
+                self._send_freq_cmd(osc["frq_cmd"], osc["ed_frq"].text())
         self._send_int_cmd("LOCKSWY", self.ed_swy.text())
         self._send_int_cmd("LOCKTHX", self.ed_thx.text())
         # ★ 通道3 4 路 IIR 阶数 (各路独立, 1..4 = 6/12/18/24 dB/oct)

@@ -99,13 +99,16 @@ wire [47:0] tx1_phase_word;
 wire [47:0] tx1_freq_word;
 wire [47:0] tx2_phase_word = 48'd0;
 wire [47:0] tx2_freq_word;
-// ★ 通道3 三路 lockin_psd 的 ref_freq (由 USB 命令 FRQ21/FRQ12/FRQ11 动态下发).
-//   REFMODE=0 时直接走这三个 wire (手动); REFMODE=1 时改走 pll_freq_ch1/ch2 运算结果 (自动).
-wire [47:0] freq_word_21_uart;   // ch3 @ 2F1+F2
-wire [47:0] freq_word_12_uart;   // ch3 @ F1+2F2
-wire [47:0] freq_word_11_uart;   // ch3 @ F1+F2
-// ★ 通道3 ref_freq 来源选择信号 (REFMODE 命令: 0=手动 / 1=PLL 硬件自动)
-wire        ref_freq_auto_uart;
+// ★ 通道3 三路振荡器 ref_freq
+//   REFMODE=0: 手动, 频率字由 FRQ21/FRQ12/FRQ11 下发
+//   REFMODE=1: 自动, 硬件实时 n*pll_freq_ch1 + m*pll_freq_ch2 (系数 OSC1/2/3)
+wire [47:0] freq_word_21_uart;   // 振荡器1 手动频率字
+wire [47:0] freq_word_12_uart;   // 振荡器2
+wire [47:0] freq_word_11_uart;   // 振荡器3
+wire        ref_freq_auto_uart;  // REFMODE: 0=手动 / 1=自动
+wire [7:0]  osc1_n_uart, osc1_m_uart;
+wire [7:0]  osc2_n_uart, osc2_m_uart;
+wire [7:0]  osc3_n_uart, osc3_m_uart;
 // ★ 通道3 4 路 IIR 阶数 (各路独立, ORD21/ORD12/ORD11/ORDDC 命令: 1..4)
 wire [2:0]  order21_uart;       // ch3 @ 2F1+F2  PSD
 wire [2:0]  order12_uart;       // ch3 @ F1+2F2  PSD
@@ -152,6 +155,7 @@ ad_wave_rec u_ad_wave_rec_2 (
 // ★ 通道1: 锁相环 (闭环 PLL)  —— 跟踪 adc_ch1 → 输出 F1 = pll_freq_ch1
 // =========================================================================
 wire [47:0]         pll_freq_ch1;
+wire [47:0]         pll_phase_ch1;
 wire signed [27:0]  dc_x_ch1, dc_y_ch1;
 wire                cic_valid_x_ch1, cic_valid_y_ch1;
 wire                dc_valid_x_ch1,  dc_valid_y_ch1;
@@ -183,6 +187,7 @@ pll_loop #(
     .sweep_thres  (sweep_thres_uart),
     .lock_x_thres (lock_x_thres_uart),
     .dds_freq_out (pll_freq_ch1),
+    .dds_phase_out(pll_phase_ch1),
     .dc_x         (dc_x_ch1),
     .dc_y         (dc_y_ch1),
     .cic_valid_x  (cic_valid_x_ch1),
@@ -197,6 +202,7 @@ pll_loop #(
 // ★ 通道2: 锁相环 (闭环 PLL)  —— ★ 跟踪 adc_ch2 → 输出 F2 = pll_freq_ch2
 // =========================================================================
 wire [47:0]         pll_freq_ch2;
+wire [47:0]         pll_phase_ch2;
 wire signed [27:0]  dc_x_ch2, dc_y_ch2;
 wire                cic_valid_x_ch2, cic_valid_y_ch2;
 wire                dc_valid_x_ch2,  dc_valid_y_ch2;
@@ -218,6 +224,7 @@ pll_loop #(
     .sweep_thres  (sweep_thres_uart),    // ★ 两通道共用阈值
     .lock_x_thres (lock_x_thres_uart),
     .dds_freq_out (pll_freq_ch2),
+    .dds_phase_out(pll_phase_ch2),
     .dc_x         (dc_x_ch2),
     .dc_y         (dc_y_ch2),
     .cic_valid_x  (cic_valid_x_ch2),
@@ -274,20 +281,67 @@ pll_loop #(
 //
 //   注: 跟随模式输出与输入"同频", 相位为本 DDS 自由相位 + DPHS 偏移; 若要与
 //       输入信号严格同相, 需现场用 DPHS 标定 (或后续从 PLL NCO 直接引相位).
+//
+//   DFRQ/DMOD/DPHS 在 sys_clk(50M) 更新, DDS 在 clk_65M 运行 —— 必须先同步
+//   再打拍, 且仅在配置变化时脉冲 s_axis_config_tvalid (勿恒为 1).
 // =========================================================================
-wire [47:0] dac_freq_sel = (dac_src_mode_uart == 2'd1) ? pll_freq_ch1 :
-                           (dac_src_mode_uart == 2'd2) ? pll_freq_ch2 :
-                                                         dac_freq_word_uart;
+reg [1:0]  dac_src_mode_meta, dac_src_mode_sync, dac_src_mode_65m;
+reg [47:0] dac_freq_word_meta, dac_freq_word_65m;
+reg [47:0] dac_phase_word_meta, dac_phase_word_65m;
+
+always @(posedge clk_65M or negedge sys_rst_n) begin
+    if (!sys_rst_n) begin
+        dac_src_mode_meta  <= 2'd0;
+        dac_src_mode_sync  <= 2'd0;
+        dac_src_mode_65m   <= 2'd0;
+        dac_freq_word_meta <= 48'd216519212854;   // 与 usb_commend 默认 ~50 kHz 一致
+        dac_freq_word_65m  <= 48'd216519212854;
+        dac_phase_word_meta <= 48'd0;
+        dac_phase_word_65m  <= 48'd0;
+    end else begin
+        dac_src_mode_meta  <= dac_src_mode_uart;
+        dac_src_mode_sync  <= dac_src_mode_meta;
+        dac_src_mode_65m   <= dac_src_mode_sync;
+        dac_freq_word_meta <= dac_freq_word_uart;
+        dac_freq_word_65m  <= dac_freq_word_meta;
+        dac_phase_word_meta <= dac_phase_word_uart;
+        dac_phase_word_65m  <= dac_phase_word_meta;
+    end
+end
+
+wire [47:0] dac_freq_sel = (dac_src_mode_65m == 2'd1) ? pll_freq_ch1 :
+                           (dac_src_mode_65m == 2'd2) ? pll_freq_ch2 :
+                                                         dac_freq_word_65m;
 
 // DDS 配置: {phase_offset[47:0], phase_increment[47:0]}
-wire [95:0]        dac_dds_cfg = {dac_phase_word_uart, dac_freq_sel};
+wire [95:0] dac_dds_cfg_next = {dac_phase_word_65m, dac_freq_sel};
+
+reg [95:0] dac_dds_cfg_reg;
+reg [95:0] dac_dds_cfg_prev;
+reg        dac_cfg_valid;
+
+always @(posedge clk_65M or negedge sys_rst_n) begin
+    if (!sys_rst_n) begin
+        dac_dds_cfg_reg  <= {48'd0, 48'd216519212854};
+        dac_dds_cfg_prev <= 96'd0;
+        dac_cfg_valid    <= 1'b1;
+    end else begin
+        dac_cfg_valid <= 1'b0;
+        if (dac_dds_cfg_next != dac_dds_cfg_prev) begin
+            dac_dds_cfg_reg  <= dac_dds_cfg_next;
+            dac_dds_cfg_prev <= dac_dds_cfg_next;
+            dac_cfg_valid    <= 1'b1;
+        end
+    end
+end
+
 wire signed [31:0] dac_sine_cos;
 wire signed [13:0] dac_sine = dac_sine_cos[29:16];   // 取正弦 (cos 在 [13:0])
 
 dds_compiler_1 u_dds_dac (
     .aclk                  (clk_65M),
-    .s_axis_config_tvalid  (1'b1),
-    .s_axis_config_tdata   (dac_dds_cfg),
+    .s_axis_config_tvalid  (dac_cfg_valid),
+    .s_axis_config_tdata   (dac_dds_cfg_reg),
     .m_axis_data_tvalid    (),
     .m_axis_data_tdata     (dac_sine_cos),
     .m_axis_phase_tvalid   (),
@@ -309,46 +363,64 @@ da_wave_send u_da_wave_send (
 
 
 // =========================================================================
-// ★★★ 通道3 锁相放大器 (PSD + DC 通路) 已暂时禁用 ★★★
+// ★ 通道3 锁相放大器 (PSD × 3 振荡器 + DC 通路)
+// =========================================================================
+// ★ 通道3 ref_freq 来源 mux
 //
-// 目的: 缩短综合时间, 专注调 PLL.
-// 影响: PSD 输出全部固定为 0 (ILA / USB 帧打包字段都跑得通, 只是显示 0)
-// 恢复: 删除下面 "占位 wire" 几行 + 删除下方 /* === DISABLED ... */ 块注释
+//   REFMODE = 0 (手动): ref_freq = FRQ21 / FRQ12 / FRQ11, 内部独立 DDS
+//   REFMODE = 1 (自动): 相干本振 sin(n·θ1+m·θ2), θ1/θ2 来自 CH1/CH2 PLL 本振相位
+//                       系数 n,m 由 OSC1/OSC2/OSC3 下发
 // =========================================================================
 
-// ---- 占位 wire (PSD/DC 关闭后, 给下游 ILA / 帧打包用) ----
-wire signed [27:0] dc_x_ch3_21 = 28'sd0;
-wire signed [27:0] dc_y_ch3_21 = 28'sd0;
-wire signed [27:0] dc_x_ch3_12 = 28'sd0;
-wire signed [27:0] dc_y_ch3_12 = 28'sd0;
-wire signed [27:0] dc_x_ch3_11 = 28'sd0;
-wire signed [27:0] dc_y_ch3_11 = 28'sd0;
-wire signed [27:0] dc_ch3      = 28'sd0;
+wire [55:0] f_osc1_auto = pll_freq_ch1 * osc1_n_uart + pll_freq_ch2 * osc1_m_uart;
+wire [55:0] f_osc2_auto = pll_freq_ch1 * osc2_n_uart + pll_freq_ch2 * osc2_m_uart;
+wire [55:0] f_osc3_auto = pll_freq_ch1 * osc3_n_uart + pll_freq_ch2 * osc3_m_uart;
 
-/* === PSD/DC disabled BEGIN ==================================================
-// =========================================================================
-// ★ 通道3 ref_freq 来源 mux: 自动 (PLL 硬件实时) / 手动 (USB 下发)
-//
-//   REFMODE = 0 (默认, 手动): ref_freq = FRQ21 / FRQ12 / FRQ11 (上位机算好下发)
-//   REFMODE = 1 (自动)      : ref_freq 由 pll_freq_ch1/ch2 在硬件层实时运算
-//                             (无软件每帧下发, 完全跟随 PLL 锁定结果)
-// =========================================================================
-
-// 组合频率 (PLL 锁定后)
-wire [47:0] f_2f1_plus_f2 = pll_freq_ch1 * 2 + pll_freq_ch2;
-wire [47:0] f_f1_plus_2f2 = pll_freq_ch1 + 2 * pll_freq_ch2;
-wire [47:0] f_f1_plus_f2  = pll_freq_ch1 + pll_freq_ch2;
-
-// 真正送进 lockin_psd 的三路参考频率
 wire [47:0] ref_freq_21_to_psd;
 wire [47:0] ref_freq_12_to_psd;
 wire [47:0] ref_freq_11_to_psd;
 
-assign ref_freq_21_to_psd = ref_freq_auto_uart ? f_2f1_plus_f2 : freq_word_21_uart;
-assign ref_freq_12_to_psd = ref_freq_auto_uart ? f_f1_plus_2f2 : freq_word_12_uart;
-assign ref_freq_11_to_psd = ref_freq_auto_uart ? f_f1_plus_f2  : freq_word_11_uart;
+assign ref_freq_21_to_psd = ref_freq_auto_uart ? f_osc1_auto[47:0] : freq_word_21_uart;
+assign ref_freq_12_to_psd = ref_freq_auto_uart ? f_osc2_auto[47:0] : freq_word_12_uart;
+assign ref_freq_11_to_psd = ref_freq_auto_uart ? f_osc3_auto[47:0] : freq_word_11_uart;
 
-// ---- 通道3 @ 2F1+F2 -----------------------------------------------------
+// ---- 相干谐波本振 (自动模式: 复用 CH1/CH2 PLL 相位) -----------------------
+wire signed [13:0] coh_sin_osc1, coh_cos_osc1;
+wire signed [13:0] coh_sin_osc2, coh_cos_osc2;
+wire signed [13:0] coh_sin_osc3, coh_cos_osc3;
+
+coherent_harm_lo u_coh_lo_osc1 (
+    .clk        (clk_65M),
+    .phase_ch1  (pll_phase_ch1),
+    .phase_ch2  (pll_phase_ch2),
+    .harm_n     (osc1_n_uart),
+    .harm_m     (osc1_m_uart),
+    .harm_sine  (coh_sin_osc1),
+    .harm_cos   (coh_cos_osc1)
+);
+
+coherent_harm_lo u_coh_lo_osc2 (
+    .clk        (clk_65M),
+    .phase_ch1  (pll_phase_ch1),
+    .phase_ch2  (pll_phase_ch2),
+    .harm_n     (osc2_n_uart),
+    .harm_m     (osc2_m_uart),
+    .harm_sine  (coh_sin_osc2),
+    .harm_cos   (coh_cos_osc2)
+);
+
+coherent_harm_lo u_coh_lo_osc3 (
+    .clk        (clk_65M),
+    .phase_ch1  (pll_phase_ch1),
+    .phase_ch2  (pll_phase_ch2),
+    .harm_n     (osc3_n_uart),
+    .harm_m     (osc3_m_uart),
+    .harm_sine  (coh_sin_osc3),
+    .harm_cos   (coh_cos_osc3)
+);
+
+// ---- 振荡器 1 (默认 2F1+F2) ---------------------------------------------
+wire signed [27:0] dc_x_ch3_21, dc_y_ch3_21;
 wire               dc_valid_x_ch3_21, dc_valid_y_ch3_21;
 
 lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
@@ -357,6 +429,9 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
     .adc_in      (adc_ch3),
     .ref_freq    (ref_freq_21_to_psd),
     .ref_phase   (48'd0),
+    .use_coh_ref (ref_freq_auto_uart),
+    .coh_ref_sine(coh_sin_osc1),
+    .coh_ref_cos (coh_cos_osc1),
     .tau         (tau21_uart),
     .iir_order   (order21_uart),
     .dc_x        (dc_x_ch3_21),
@@ -367,7 +442,8 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
     .dc_valid_y  (dc_valid_y_ch3_21)
 );
 
-// ---- 通道3 @ F1+2F2 -----------------------------------------------------
+// ---- 振荡器 2 (默认 F1+2F2) ---------------------------------------------
+wire signed [27:0] dc_x_ch3_12, dc_y_ch3_12;
 wire               dc_valid_x_ch3_12, dc_valid_y_ch3_12;
 
 lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
@@ -376,6 +452,9 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
     .adc_in      (adc_ch3),
     .ref_freq    (ref_freq_12_to_psd),
     .ref_phase   (48'd0),
+    .use_coh_ref (ref_freq_auto_uart),
+    .coh_ref_sine(coh_sin_osc2),
+    .coh_ref_cos (coh_cos_osc2),
     .tau         (tau12_uart),
     .iir_order   (order12_uart),
     .dc_x        (dc_x_ch3_12),
@@ -386,7 +465,8 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
     .dc_valid_y  (dc_valid_y_ch3_12)
 );
 
-// ---- 通道3 @ F1+F2  -----------------------------------------------------
+// ---- 振荡器 3 (默认 F1+F2) ----------------------------------------------
+wire signed [27:0] dc_x_ch3_11, dc_y_ch3_11;
 wire               dc_valid_x_ch3_11, dc_valid_y_ch3_11;
 
 lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
@@ -395,6 +475,9 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
     .adc_in      (adc_ch3),
     .ref_freq    (ref_freq_11_to_psd),
     .ref_phase   (48'd0),
+    .use_coh_ref (ref_freq_auto_uart),
+    .coh_ref_sine(coh_sin_osc3),
+    .coh_ref_cos (coh_cos_osc3),
     .tau         (tau11_uart),
     .iir_order   (order11_uart),
     .dc_x        (dc_x_ch3_11),
@@ -415,13 +498,13 @@ cic_compiler_0 u_cic_dc_ch3 (
     .m_axis_data_tdata   (cic_dc_ch3),  .m_axis_data_tvalid (cic_valid_dc_ch3)
 );
 
+wire signed [27:0] dc_ch3;
 wire               dc_valid_ch3;
 iir_lpf_cascade #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
     .clk(clk_65M), .rst_n(sys_rst_n), .en(cic_valid_dc_ch3),
     .shift_k(tau_dc_uart), .order(order_dc_uart),
     .din(cic_dc_ch3), .dout(dc_ch3), .valid_out(dc_valid_ch3)
 );
-=== PSD/DC disabled END =================================================== */
 
 
 // =========================================================================
@@ -563,8 +646,11 @@ usb_commend u_usb_commend (
     .freq_word_11(freq_word_11_uart),
     .sweep_thres(sweep_thres_uart),     // ★ LOCKSWY 命令下发的值
     .lock_x_thres(lock_x_thres_uart),   // ★ LOCKTHX 命令下发的值
-    // ★ 通道3 ref_freq 来源开关 (REFMODE 命令: 0=手动 / 1=PLL 硬件自动)
+    // ★ 通道3 ref_freq 来源 + 振荡器谐波系数
     .ref_freq_auto(ref_freq_auto_uart),
+    .osc1_n (osc1_n_uart), .osc1_m (osc1_m_uart),
+    .osc2_n (osc2_n_uart), .osc2_m (osc2_m_uart),
+    .osc3_n (osc3_n_uart), .osc3_m (osc3_m_uart),
     // ★ 通道3 4 路 IIR 阶数 (ORD21/ORD12/ORD11/ORDDC 命令各自独立: 1..4)
     .order21 (order21_uart),
     .order12 (order12_uart),
@@ -590,10 +676,11 @@ ila_0 u_ila_0 (
     // PSD 已禁用, 把 probe3~6 切到 PLL 闭环量, 便于在 ILA 里直接看锁相过程
     //   probe3/4 = ch1 X/Y (X≈幅度, Y≈相位误差→PI 输入)
     //   probe5/6 = ch2 X/Y
-    .probe3  (dc_x_ch1),                // 28bit
-    .probe4  (dc_y_ch1),                // 28bit
-    .probe5  (dc_x_ch2),                // 28bit
-    .probe6  (dc_y_ch2)                 // 28bit
+    // .probe3  (dc_x_ch1),                // 28bit
+    // .probe4  (dc_y_ch1),                // 28bit
+    // .probe5  (dc_x_ch2),                // 28bit
+    // .probe6  (dc_y_ch2)                 // 28bit
+    .probe3  (da_data)                // 14bit
 );
 
 

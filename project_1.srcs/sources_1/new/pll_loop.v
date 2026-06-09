@@ -54,6 +54,7 @@ module pll_loop #(
 
     // 输出
     output [47:0]                        dds_freq_out,// 锁定的 DDS 频率字
+    output [47:0]                        dds_phase_out, // ★ 本振 DDS 实时相位 (供谐波相干组合)
     output signed [IN_WIDTH-1:0]         dc_x,        // 同相幅值
     output signed [IN_WIDTH-1:0]         dc_y,        // 正交/相位误差
     output                               cic_valid_x,
@@ -71,6 +72,7 @@ module pll_loop #(
     wire signed [31:0] ref_sine_cos;
     wire signed [13:0] ref_sine = ref_sine_cos[29:16];
     wire signed [13:0] ref_cos  = ref_sine_cos[13:0];
+    wire [47:0]        ref_phase_acc;
 
     dds_compiler_1 u_dds_ref (
         .aclk                  (clk),
@@ -79,8 +81,10 @@ module pll_loop #(
         .m_axis_data_tvalid    (),
         .m_axis_data_tdata     (ref_sine_cos),
         .m_axis_phase_tvalid   (),
-        .m_axis_phase_tdata    ()
+        .m_axis_phase_tdata    (ref_phase_acc)
     );
+
+    assign dds_phase_out = ref_phase_acc;
 
     // ========================================================================
     // 2) 混频 (相敏检测)

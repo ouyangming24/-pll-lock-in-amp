@@ -62,8 +62,12 @@ module usb_commend(
     output reg signed [27:0] lock_x_thres,   // ???PLL X ???? LOCK ????? (LOCKTHX)
     // ★ 通道3 三路 ref_freq 来源选择 (REFMODE 命令下发)
     //   0 = 手动 (用 FRQ21/FRQ12/FRQ11 三个值, 默认)
-    //   1 = 自动 (硬件实时跟随 pll_freq_ch1/ch2 运算结果, 无软件下发延迟)
+    //   1 = 自动 (硬件实时: n*pll_freq_ch1 + m*pll_freq_ch2, 系数由 OSC1/2/3 下发)
     output reg ref_freq_auto,
+    // ★ 通道3 三路振荡器谐波系数 (OSC1/OSC2/OSC3 命令, 值打包: [15:8]=n, [7:0]=m)
+    output reg [7:0] osc1_n, osc1_m,
+    output reg [7:0] osc2_n, osc2_m,
+    output reg [7:0] osc3_n, osc3_m,
     // ★ 通道3 4 路 IIR 阶数 (各路独立设置, ORD21/ORD12/ORD11/ORDDC 命令下发)
     //   取值 1..4, 等效 6/12/18/24 dB/oct 阻带斜率 (仿 SR860 / Zurich MFLI 每通道独立 slope)
     //   非法值 (0 或 >4) 在 iir_lpf_cascade 内被视为 1 阶
@@ -89,40 +93,41 @@ module usb_commend(
     parameter WAIT_XYDATA = 3'd6;
     parameter WAIT_DELAY = 3'd7;
 
-    parameter CMD_FREQ    = 4'd1;
-    parameter CMD_KP      = 4'd2;
-    parameter CMD_KI      = 4'd3;
-    // parameter CMD_TAUX    = 4'd4; // ????
-    // parameter CMD_TAUY    = 4'd5; // ????
-    parameter CMD_PHAS    = 4'd6;
-    parameter CMD_XYOUT   = 4'd7;
-    parameter CMD_STOP    = 4'd8;
-    parameter CMD_FRQ2    = 4'd9;
-    parameter CMD_FRQ3    = 4'd10;
-    parameter CMD_LOCKSWY = 4'd11;   // ???Y ???????????????(SWEEP_THRES)
-    parameter CMD_LOCKTHX = 4'd12;   // ???X ???????????????(LOCK_X_THRES)
-    parameter CMD_TAU1X   = 5'd13;
-    parameter CMD_TAU1Y   = 5'd14;
-    parameter CMD_TAU2X   = 5'd15;
-    parameter CMD_TAU2Y   = 5'd16;
-    parameter CMD_TAU21   = 5'd17;   // ch3 @ 2F1+F2  IIR (X/Y 共用)
-    parameter CMD_TAU12   = 5'd18;   // ch3 @ F1+2F2  IIR (X/Y 共用)
-    parameter CMD_TAU11   = 5'd19;   // ch3 @ F1+F2   IIR (X/Y 共用)
-    parameter CMD_TAUDC   = 5'd20;   // ch3 DC 通路 IIR
-    parameter CMD_FRQ21   = 5'd21;   // ch3 @ 2F1+F2 ref_freq (48bit)
-    parameter CMD_FRQ12   = 5'd22;   // ch3 @ F1+2F2 ref_freq (48bit)
-    parameter CMD_FRQ11   = 5'd23;   // ch3 @ F1+F2  ref_freq (48bit)
-    parameter CMD_REFMODE = 5'd24;   // ch3 ref_freq 来源 (1bit: 0=手动, 1=PLL硬件自动)
-    parameter CMD_ORD21   = 5'd25;   // ch3 @ 2F1+F2  IIR 阶数 (1..4)
-    parameter CMD_ORD12   = 5'd26;   // ch3 @ F1+2F2  IIR 阶数 (1..4)
-    parameter CMD_ORD11   = 5'd27;   // ch3 @ F1+F2   IIR 阶数 (1..4)
-    parameter CMD_ORDDC   = 5'd28;   // ch3 DC 通路   IIR 阶数 (1..4)
-    parameter CMD_DMOD    = 5'd29;   // 信号发生器源选择 (0=内部DDS / 1=跟随CH1 / 2=跟随CH2)
-    parameter CMD_DFRQ    = 5'd30;   // 信号发生器内部DDS频率字 (48bit)
-    parameter CMD_DPHS    = 5'd31;   // 信号发生器内部DDS相位字 (48bit)
+    parameter CMD_FREQ    = 6'd1;
+    parameter CMD_KP      = 6'd2;
+    parameter CMD_KI      = 6'd3;
+    parameter CMD_PHAS    = 6'd6;
+    parameter CMD_XYOUT   = 6'd7;
+    parameter CMD_STOP    = 6'd8;
+    parameter CMD_FRQ2    = 6'd9;
+    parameter CMD_FRQ3    = 6'd10;
+    parameter CMD_LOCKSWY = 6'd11;
+    parameter CMD_LOCKTHX = 6'd12;
+    parameter CMD_TAU1X   = 6'd13;
+    parameter CMD_TAU1Y   = 6'd14;
+    parameter CMD_TAU2X   = 6'd15;
+    parameter CMD_TAU2Y   = 6'd16;
+    parameter CMD_TAU21   = 6'd17;
+    parameter CMD_TAU12   = 6'd18;
+    parameter CMD_TAU11   = 6'd19;
+    parameter CMD_TAUDC   = 6'd20;
+    parameter CMD_FRQ21   = 6'd21;
+    parameter CMD_FRQ12   = 6'd22;
+    parameter CMD_FRQ11   = 6'd23;
+    parameter CMD_REFMODE = 6'd24;
+    parameter CMD_ORD21   = 6'd25;
+    parameter CMD_ORD12   = 6'd26;
+    parameter CMD_ORD11   = 6'd27;
+    parameter CMD_ORDDC   = 6'd28;
+    parameter CMD_DMOD    = 6'd29;
+    parameter CMD_DFRQ    = 6'd30;
+    parameter CMD_DPHS    = 6'd31;   // 信号发生器内部DDS相位字 (48bit)
+    parameter CMD_OSC1    = 6'd32;   // 振荡器1: n*F1+m*F2 系数 ([15:8]=n,[7:0]=m)
+    parameter CMD_OSC2    = 6'd33;   // 振荡器2
+    parameter CMD_OSC3    = 6'd34;   // 振荡器3
 
     reg [2:0] curr_state;
-    reg [4:0] cmd_type;  // ??????????5 bit
+    reg [5:0] cmd_type;
     reg [7:0] cmd_buffer[0:9];
     reg [3:0] cmd_cnt;
     reg [47:0] value_buffer;
@@ -188,7 +193,7 @@ module usb_commend(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             curr_state <= IDLE;
-            cmd_type <= 5'd0;
+            cmd_type <= 6'd0;
             cmd_cnt <= 4'd0;
             value_buffer <= 48'd0;        
             msg_cnt <= 5'd0;
@@ -211,7 +216,11 @@ module usb_commend(
             freq_word_21 <= 48'd692861481134;   // 160 kHz
             freq_word_12 <= 48'd736165323705;   // 170 kHz
             freq_word_11 <= 48'd476342268280;   // 110 kHz
-            ref_freq_auto <= 1'b0;              // 默认手动 (用 FRQ21/12/11 三个值)
+            ref_freq_auto <= 1'b0;              // 默认手动; GUI 连接后会发 REFMODE:1
+            // ★ 振荡器默认系数: 2F1+F2 / F1+2F2 / F1+F2
+            osc1_n <= 8'd2;  osc1_m <= 8'd1;
+            osc2_n <= 8'd1;  osc2_m <= 8'd2;
+            osc3_n <= 8'd1;  osc3_m <= 8'd1;
             // ★ 4 路 IIR 阶数默认全 1 阶 (6 dB/oct, 与原 iir_lpf_ema 行为完全一致)
             order21       <= 3'd1;
             order12       <= 3'd1;
@@ -321,6 +330,22 @@ module usb_commend(
                             end
                             else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "P" && cmd_buffer[2] == "H" && cmd_buffer[3] == "S" && rec_data == ":") begin
                                 cmd_type <= CMD_DPHS;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            // ★ 通道3 振荡器谐波系数 OSC1/OSC2/OSC3 (值=[15:8]n,[7:0]m)
+                            else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "C" && cmd_buffer[3] == "1" && rec_data == ":") begin
+                                cmd_type <= CMD_OSC1;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "C" && cmd_buffer[3] == "2" && rec_data == ":") begin
+                                cmd_type <= CMD_OSC2;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "C" && cmd_buffer[3] == "3" && rec_data == ":") begin
+                                cmd_type <= CMD_OSC3;
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
@@ -444,13 +469,13 @@ module usb_commend(
                             end
                         end
                         else if (rec_data == "\r" || rec_data == "\n") begin
-                            cmd_type <= 5'd0;
+                            cmd_type <= 6'd0;
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;
                             msg_len <= 5'd16;  
                         end
                         else if (cmd_cnt >= 4'd8) begin
-                            cmd_type <= 5'd0;
+                            cmd_type <= 6'd0;
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;
                             msg_len <= 5'd16;  
@@ -562,6 +587,19 @@ module usb_commend(
                             else if (cmd_type == CMD_DPHS) begin
                                 dac_phase_word <= value_buffer;
                             end
+                            // ★ 振荡器谐波系数 (n,m 各 0..255)
+                            else if (cmd_type == CMD_OSC1) begin
+                                osc1_n <= value_buffer[15:8];
+                                osc1_m <= value_buffer[7:0];
+                            end
+                            else if (cmd_type == CMD_OSC2) begin
+                                osc2_n <= value_buffer[15:8];
+                                osc2_m <= value_buffer[7:0];
+                            end
+                            else if (cmd_type == CMD_OSC3) begin
+                                osc3_n <= value_buffer[15:8];
+                                osc3_m <= value_buffer[7:0];
+                            end
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;
                             msg_len <= 5'd18;  
@@ -592,7 +630,7 @@ module usb_commend(
                         else begin
                             curr_state <= IDLE;
                             cmd_cnt <= 4'd0;
-                            cmd_type <= 5'd0;
+                            cmd_type <= 6'd0;
                             value_buffer <= 48'd0;    
                         end
                     end

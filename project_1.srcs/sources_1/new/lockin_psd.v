@@ -36,8 +36,12 @@ module lockin_psd #(
 
     // 输入信号 + 参考频率
     input  signed [13:0]                 adc_in,
-    input  [47:0]                        ref_freq,    // 参考频率字 (直接喂给 DDS)
-    input  [47:0]                        ref_phase,   // 参考相位 (默认接 48'd0 即可)
+    input  [47:0]                        ref_freq,    // 参考频率字 (手动模式)
+    input  [47:0]                        ref_phase,   // 参考相位偏移 (手动模式)
+    // ★ 相干本振: 自动模式下由 CH1/CH2 相位组合生成的 sin/cos, 替代内部 DDS
+    input  wire                          use_coh_ref,
+    input  wire signed [13:0]            coh_ref_sine,
+    input  wire signed [13:0]            coh_ref_cos,
     // ★ X/Y 共用同一个 IIR 时间常数 (与 SR830 等商用锁相放大器一致)
     //   保证复数信号 X+jY 经过完全对称的滤波器, 避免引入伪相位偏差.
     input  [4:0]                         tau,         // X/Y 共用 IIR 平滑系数
@@ -63,6 +67,9 @@ module lockin_psd #(
     wire signed [13:0] ref_sine = ref_sine_cos[29:16];
     wire signed [13:0] ref_cos  = ref_sine_cos[13:0];
 
+    wire signed [13:0] mix_ref_sine = use_coh_ref ? coh_ref_sine : ref_sine;
+    wire signed [13:0] mix_ref_cos  = use_coh_ref ? coh_ref_cos  : ref_cos;
+
     dds_compiler_1 u_dds_ref (
         .aclk                  (clk),
         .s_axis_config_tvalid  (1'b1),
@@ -80,11 +87,11 @@ module lockin_psd #(
     wire signed [IN_WIDTH-1:0] mix_y;
 
     mult_hunpin u_mix_x (
-        .CLK (clk), .A (adc_in), .B (ref_sine), .P (mix_x)
+        .CLK (clk), .A (adc_in), .B (mix_ref_sine), .P (mix_x)
     );
 
     mult_hunpin u_mix_y (
-        .CLK (clk), .A (adc_in), .B (ref_cos),  .P (mix_y)
+        .CLK (clk), .A (adc_in), .B (mix_ref_cos),  .P (mix_y)
     );
 
     // ========================================================================
