@@ -67,12 +67,14 @@ AUTO_KI_BASE        = 50         # 在 AUTO_R_REF 基准幅度下的 KI
 AUTO_R_REF          = 2_000_000.0  # AGC 基准幅度 (LSB): KP = KP_BASE·R_REF/R
 AUTO_KP_RANGE       = (20, 5000)   # AGC 后 KP 钳位范围
 AUTO_KI_RANGE       = (2, 500)     # AGC 后 KI 钳位范围
-# 保持期 (hold): 判稳后切到的"最终超稳参数" — 用户实测最稳的一组.
-#   KP=1, KI=0 → 极窄一阶环, 频率读数最稳 (代价: 有稳态相位偏移, 慢漂跟踪弱);
+# 保持期 (hold): 判稳后切到的"最终超稳参数".
+#   KP=50, KI=5 → 保留积分项: 把稳态相位误差逼到 ~0 (相位读数 Θ 可重复/不随捕获落点漂),
+#   并能跟踪信号慢漂; 频率读数靠大后置平滑 (AUTO_SMOOTH_N) 仍可达 mHz.
+#   (旧值 KP=1/KI=0 频率读数最稳, 但 KI=0 留有随机静态相位误差, 谐波 Θ 不完全可重复.)
 #   tau_x=20 (fc≈152 mHz, 幅度/判据路) / tau_y=15 (fc≈4.86 Hz, 进环误差路).
 #   注意: KP/KI 在 FPGA 内两通道共享, 故为全局; tau 为本通道独立.
-AUTO_FINAL_KP       = 1
-AUTO_FINAL_KI       = 0
+AUTO_FINAL_KP       = 50
+AUTO_FINAL_KI       = 5
 AUTO_FINAL_TAU_X    = 20
 AUTO_FINAL_TAU_Y    = 15
 AUTO_SMOOTH_N       = 400        # 稳定后把后置平滑 N 开到这么大 → mHz
@@ -595,7 +597,7 @@ class MainWindow(QMainWindow):
             "填好对应起点后点此:\n"
             "① 下发中心频率 + 稳健捕获参数 → ② 等待硬件锁定 →\n"
             "③ 按幅度自动整定 KP/KI (软件 AGC) → ④ 频率连续稳定后,\n"
-            "自动切到最终超稳参数 (KP=1, KI=0, tau_x=20, tau_y=15) + 大平滑,\n"
+            "自动切到最终参数 (KP=50, KI=5, tau_x=20, tau_y=15) + 大平滑,\n"
             "读数稳到 mHz. 过程中再次点击 = 取消.\n"
             "注意: KP/KI 与锁定阈值为双通道共享, 给某通道做自动锁定时\n"
             "捕获期会临时改变全局增益, 可能短暂扰动另一已锁通道."
@@ -919,6 +921,11 @@ class MainWindow(QMainWindow):
             }
             ed_n.textChanged.connect(self._on_osc_coef_changed)
             ed_m.textChanged.connect(self._on_osc_coef_changed)
+            # ★ 编辑完成 (回车/失焦) 即自动下发该路系数, 避免"改了框没下发,
+            #   硬件仍是旧系数 → 三路参考不一致"的坑.
+            ed_n.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
+            ed_m.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
+            ed_frq.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
             self.ch3_oscs.append(osc)
             btn.clicked.connect(lambda _c=False, o=osc: self._send_one_osc(o))
 
@@ -970,6 +977,13 @@ class MainWindow(QMainWindow):
         else:
             self._send_freq_cmd(osc["frq_cmd"], osc["ed_frq"].text())
 
+    def _auto_push_osc(self, osc: dict):
+        """编辑完成后自动下发该路: 自动模式发 OSCx 系数, 手动模式发 FRQxx 频率.
+        (两种模式都覆盖, 避免"改了框没下发, 硬件还是旧值"的坑.)"""
+        if not getattr(self.dev, "is_connected", False):
+            return
+        self._send_one_osc(osc)
+
     def _send_all_osc_coefs(self, quiet: bool = False):
         """自动模式: 下发三路 OSC 系数 + REFMODE:1."""
         if not self.rb_ref_auto.isChecked():
@@ -1014,6 +1028,19 @@ class MainWindow(QMainWindow):
                 f2 = self._latest_freq_ch2
                 src = "lock"
         return f1, f2, src
+
+    def _update_osc_readback(self, d: dict):
+        """诊断: 用数据帧回读的硬件实际参考频率刷新各振荡器旁的 lbl_hz.
+        振荡器1→ref_hz_21, 振荡器2→ref_hz_12, 振荡器3→ref_hz_11.
+        这是硬件真正在用的频率, 可直接核对 OSC/FRQ 命令是否真的下发生效."""
+        if not getattr(self, "ch3_oscs", None):
+            return
+        keys = ("ref_hz_21", "ref_hz_12", "ref_hz_11")
+        for osc, k in zip(self.ch3_oscs, keys):
+            hz = d.get(k)
+            if hz is None:
+                continue
+            osc["lbl_hz"].setText(f"硬件={hz:,.3f} Hz")
 
     def _update_osc_hz_display(self):
         """自动模式: 按系数与 F1/F2 刷新各路估算频率 (仅显示, 不下发)."""
@@ -2325,6 +2352,9 @@ class MainWindow(QMainWindow):
         # 自动模式: 三路谐波 ref 实时跟随实测锁定频率 (节流: 每 5 帧刷新一次)
         if self.frame_count % 5 == 0:
             self._track_ref_freqs()
+
+        # ★ 诊断: 用回读的硬件实际参考频率覆盖显示 (放最后, 保证不被估算值盖掉)
+        self._update_osc_readback(data)
 
         if self.csv_writer:
             try:

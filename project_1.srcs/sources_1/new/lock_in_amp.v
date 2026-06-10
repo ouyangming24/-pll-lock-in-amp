@@ -657,18 +657,25 @@ wire [63:0] u64_pll_ch2  = {16'd0, pll_freq_ch2};
 // 锁定标志位 (位 0 = ch1 锁定, 位 1 = ch2 锁定)
 wire [31:0] s32_lock     = {30'd0, is_locked_ch2, is_locked_ch1};
 
-wire [639:0] x_y_fir_packed = {
-    32'hA5_5A_A5_5A,                            // [639:608] sync
-    s32_x_ch1,    s32_y_ch1,                    // [607:544]
-    s32_x_ch2,    s32_y_ch2,                    // [543:480]
-    s32_x_ch3_21, s32_y_ch3_21,                 // [479:416]
-    s32_x_ch3_12, s32_y_ch3_12,                 // [415:352]
-    s32_x_ch3_11, s32_y_ch3_11,                 // [351:288]
-    s32_dc_ch3,                                 // [287:256]
-    s32_adc_ch1, s32_adc_ch2, s32_adc_ch3,      // [255:160] 原始 ADC
-    u64_pll_ch1,                                // [159: 96]
-    u64_pll_ch2,                                // [ 95: 32]
-    s32_lock                                    // [ 31:  0]
+// ★ 诊断回读: 三路 PSD 实际生效的参考频率字 (48bit → 64bit 高位补 0)
+//   用于核对硬件到底收到了什么频率 (自动=f_osc*_auto, 手动=freq_word_*).
+wire [63:0] u64_ref_21 = {16'd0, ref_freq_21_to_psd};
+wire [63:0] u64_ref_12 = {16'd0, ref_freq_12_to_psd};
+wire [63:0] u64_ref_11 = {16'd0, ref_freq_11_to_psd};
+
+wire [831:0] x_y_fir_packed = {
+    32'hA5_5A_A5_5A,                            // sync
+    s32_x_ch1,    s32_y_ch1,
+    s32_x_ch2,    s32_y_ch2,
+    s32_x_ch3_21, s32_y_ch3_21,
+    s32_x_ch3_12, s32_y_ch3_12,
+    s32_x_ch3_11, s32_y_ch3_11,
+    s32_dc_ch3,
+    s32_adc_ch1, s32_adc_ch2, s32_adc_ch3,      // 原始 ADC
+    u64_pll_ch1,
+    u64_pll_ch2,
+    s32_lock,
+    u64_ref_21, u64_ref_12, u64_ref_11          // ★ NEW 诊断: 三路实际参考频率字
 };
 
 usb_commend u_usb_commend (

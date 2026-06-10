@@ -37,7 +37,7 @@ module usb_commend(
     input wire [7:0] rec_data,
     input wire rec_done,
     input wire tx_done,
-    input wire [639:0] x_y_fir,    // 80????????????????
+    input wire [831:0] x_y_fir,    // 104 字节回传帧 (含 3 路参考频率字回读)
     input wire m_axis_data_tvalid_fir_x,
     output reg [47:0] center_freq,
     output reg [15:0] pll_kp,
@@ -134,12 +134,12 @@ module usb_commend(
 
     reg xy_data_enable;
     reg [7:0] byte_cnt;
-    reg [639:0] xy_data_reg;       // 80 ??????????
+    reg [831:0] xy_data_reg;       // 104 字节回传帧寄存
     reg new_data_ready;
     reg data_sending;
 
     // ??????(?????), ???x_y_fir ??????????
-    localparam [7:0] FRAME_BYTES = 8'd80;
+    localparam [7:0] FRAME_BYTES = 8'd104;
 
     reg [31:0] delay_cnt;
     parameter DELAY_1S = 32'd50_000_00;
@@ -180,7 +180,7 @@ module usb_commend(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            xy_data_reg <= 640'd0;
+            xy_data_reg <= 832'd0;
             new_data_ready <= 1'b0;
         end else if (m_axis_data_tvalid_fir_x_posedge && xy_data_enable && !data_sending) begin
             xy_data_reg <= x_y_fir;
@@ -654,7 +654,7 @@ module usb_commend(
                         send_en <= 1'b1;
                         data_sending <= 1'b1;
                         // byte_cnt = 0 -> ??????????(?????0xA5) ?????
-                        send_data <= xy_data_reg[639-byte_cnt*8 -: 8];
+                        send_data <= xy_data_reg[831-byte_cnt*8 -: 8];
                         curr_state <= WAIT_XYDATA;
                     end
                 end

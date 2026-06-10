@@ -30,7 +30,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 # 协议常量 (与 docs/Interface_Spec_for_SW.md 保持一致)
 # ============================================================================
 SYNC_HEADER = b"\xA5\x5A\xA5\x5A"
-FRAME_LEN = 80                    # 4 sync + 11i + 3i + 2Q + 1i
+FRAME_LEN = 104                   # 4 sync + 11i + 3i + 2Q + 1i + 3Q(诊断: 三路参考频率字)
 F_CLK = 65_000_000                # DDS 时钟 (Hz)
 PHASE_BITS = 48                   # DDS 相位累加器位宽
 
@@ -46,10 +46,12 @@ FIELD_NAMES = [
     "adc_ch1", "adc_ch2", "adc_ch3",
     "pll_freq_ch1_word", "pll_freq_ch2_word",
     "lock_flags",
+    # ★ 诊断回读: 三路 PSD 实际生效的参考频率字 (硬件实际收到的值)
+    "ref_word_21", "ref_word_12", "ref_word_11",
 ]
 
-# struct 格式: 11 int32 + 3 int32 + 2 uint64 + 1 int32 (大端)
-FRAME_FMT = ">11i3iQQi"
+# struct 格式: 11 int32 + 3 int32 + 2 uint64 + 1 int32 + 3 uint64 (大端)
+FRAME_FMT = ">11i3iQQi3Q"
 
 
 # ============================================================================
@@ -81,6 +83,10 @@ def parse_frame(buf: bytes) -> dict:
     # 派生量, 方便 GUI 使用
     data["pll_freq_ch1_hz"] = freq_word_to_hz(data["pll_freq_ch1_word"])
     data["pll_freq_ch2_hz"] = freq_word_to_hz(data["pll_freq_ch2_word"])
+    # ★ 诊断: 三路参考频率字 → Hz (硬件实际生效值)
+    data["ref_hz_21"] = freq_word_to_hz(data["ref_word_21"])
+    data["ref_hz_12"] = freq_word_to_hz(data["ref_word_12"])
+    data["ref_hz_11"] = freq_word_to_hz(data["ref_word_11"])
     data["locked_ch1"] = bool(data["lock_flags"] & 0x1)
     data["locked_ch2"] = bool(data["lock_flags"] & 0x2)
     data["timestamp"] = time.time()
@@ -534,8 +540,14 @@ class MockDevice(QObject):
             "pll_freq_ch1_word": hz_to_freq_word(f1_hz),
             "pll_freq_ch2_word": hz_to_freq_word(f2_hz),
             "lock_flags":  (1 if locked_ch1 else 0) | (2 if locked_ch2 else 0),
+            "ref_word_21": hz_to_freq_word(2 * f1_hz + f2_hz),
+            "ref_word_12": hz_to_freq_word(f1_hz + 2 * f2_hz),
+            "ref_word_11": hz_to_freq_word(f1_hz + f2_hz),
             "pll_freq_ch1_hz": f1_hz,
             "pll_freq_ch2_hz": f2_hz,
+            "ref_hz_21": 2 * f1_hz + f2_hz,
+            "ref_hz_12": f1_hz + 2 * f2_hz,
+            "ref_hz_11": f1_hz + f2_hz,
             "locked_ch1": locked_ch1,
             "locked_ch2": locked_ch2,
             "timestamp": time.time(),
