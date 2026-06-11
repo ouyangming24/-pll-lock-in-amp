@@ -55,7 +55,9 @@ module lockin_psd #(
     output                               cic_valid_x,
     output                               cic_valid_y,
     output                               dc_valid_x,
-    output                               dc_valid_y
+    output                               dc_valid_y,
+    // ★ 实际用于混频的参考正弦 (自动=相干本振, 手动=内部DDS); 供信号发生器同步输出
+    output signed [13:0]                 ref_sine_o
 );
 
     // ========================================================================
@@ -69,6 +71,9 @@ module lockin_psd #(
 
     wire signed [13:0] mix_ref_sine = use_coh_ref ? coh_ref_sine : ref_sine;
     wire signed [13:0] mix_ref_cos  = use_coh_ref ? coh_ref_cos  : ref_cos;
+
+    // 导出实际混频正弦, 供信号发生器"跟随振荡器"时完全同步输出
+    assign ref_sine_o = mix_ref_sine;
 
     dds_compiler_1 u_dds_ref (
         .aclk                  (clk),

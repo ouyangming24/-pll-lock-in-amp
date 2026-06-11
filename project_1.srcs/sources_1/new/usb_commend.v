@@ -68,6 +68,9 @@ module usb_commend(
     output reg [7:0] osc1_n, osc1_m,
     output reg [7:0] osc2_n, osc2_m,
     output reg [7:0] osc3_n, osc3_m,
+    // ★ 三路振荡器输入信号源选择 (OSRC1/OSRC2/OSRC3 命令)
+    //   0 = CH3 (默认), 1 = CH4, 2 = CH3-CH4 差分
+    output reg [1:0] osc1_src, osc2_src, osc3_src,
     // ★ 通道3 4 路 IIR 阶数 (各路独立设置, ORD21/ORD12/ORD11/ORDDC 命令下发)
     //   取值 1..4, 等效 6/12/18/24 dB/oct 阻带斜率 (仿 SR860 / Zurich MFLI 每通道独立 slope)
     //   非法值 (0 或 >4) 在 iir_lpf_cascade 内被视为 1 阶
@@ -76,10 +79,13 @@ module usb_commend(
     output reg [2:0] order11,    // ch3 @ F1+F2   PSD 阶数
     output reg [2:0] order_dc,   // ch3 DC 通路   IIR 阶数
     // ★ 信号发生器 (DAC904) 控制
-    //   dac_src_mode: 0=内部DDS(指定频率/相位下发), 1=跟随CH1锁定频率, 2=跟随CH2锁定频率
-    output reg [1:0]  dac_src_mode,    // DMOD 命令
+    //   dac_src_mode: 0=内部DDS, 1=跟随CH1, 2=跟随CH2, 3/4/5=跟随振荡器1/2/3 (完全同步)
+    output reg [2:0]  dac_src_mode,    // DMOD 命令
     output reg [47:0] dac_freq_word,   // DFRQ 命令: 内部DDS频率字 (48bit)
     output reg [47:0] dac_phase_word,  // DPHS 命令: 内部DDS相位字 (48bit)
+    // ★ 信号发生器 幅值/偏置 (满量程 ±3V ↔ ±8192 LSB)
+    output reg signed [15:0] dac_amp,    // DAMP: 峰值幅度 (LSB, 0..8192)
+    output reg signed [15:0] dac_offset, // DOFS: 直流偏置 (LSB, -8192..8191)
     output reg send_en,
     output reg [7:0] send_data
 );
@@ -125,6 +131,11 @@ module usb_commend(
     parameter CMD_OSC1    = 6'd32;   // 振荡器1: n*F1+m*F2 系数 ([15:8]=n,[7:0]=m)
     parameter CMD_OSC2    = 6'd33;   // 振荡器2
     parameter CMD_OSC3    = 6'd34;   // 振荡器3
+    parameter CMD_OSRC1   = 6'd35;   // 振荡器1 输入源: 0=CH3,1=CH4,2=CH3-CH4
+    parameter CMD_OSRC2   = 6'd36;   // 振荡器2 输入源
+    parameter CMD_OSRC3   = 6'd37;   // 振荡器3 输入源
+    parameter CMD_DAMP    = 6'd38;   // 信号发生器峰值幅度 (LSB)
+    parameter CMD_DOFS    = 6'd39;   // 信号发生器直流偏置 (LSB, 有符号)
 
     reg [2:0] curr_state;
     reg [5:0] cmd_type;
@@ -221,15 +232,19 @@ module usb_commend(
             osc1_n <= 8'd2;  osc1_m <= 8'd1;
             osc2_n <= 8'd1;  osc2_m <= 8'd2;
             osc3_n <= 8'd1;  osc3_m <= 8'd1;
+            // ★ 三路振荡器输入源默认 CH3 (0)
+            osc1_src <= 2'd0;  osc2_src <= 2'd0;  osc3_src <= 2'd0;
             // ★ 4 路 IIR 阶数默认全 1 阶 (6 dB/oct, 与原 iir_lpf_ema 行为完全一致)
             order21       <= 3'd1;
             order12       <= 3'd1;
             order11       <= 3'd1;
             order_dc      <= 3'd1;
             // ★ 信号发生器默认: 内部DDS, ~50 kHz @ 65MHz (50000*2^48/65e6), 0 相位
-            dac_src_mode   <= 2'd0;
+            dac_src_mode   <= 3'd0;
             dac_freq_word  <= 48'd216519212854;
             dac_phase_word <= 48'd0;
+            dac_amp        <= 16'sd8192;   // 默认满幅 (±3V), 保持原行为
+            dac_offset     <= 16'sd0;      // 默认无偏置
             // ???PLL ?????????????????(????, ???????????????????
             sweep_thres  <= 28'd100_000;   // |dc_y| > 100K ?????LOCK
             lock_x_thres <= 28'd300_000;   // LOCK ?????? |dc_x| ??> 300K ????
@@ -333,6 +348,17 @@ module usb_commend(
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
+                            // ★ 信号发生器 幅值 DAMP / 偏置 DOFS (偏置按 16bit 二补码无符号十进制下发)
+                            else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "A" && cmd_buffer[2] == "M" && cmd_buffer[3] == "P" && rec_data == ":") begin
+                                cmd_type <= CMD_DAMP;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "O" && cmd_buffer[2] == "F" && cmd_buffer[3] == "S" && rec_data == ":") begin
+                                cmd_type <= CMD_DOFS;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
                             // ★ 通道3 振荡器谐波系数 OSC1/OSC2/OSC3 (值=[15:8]n,[7:0]m)
                             else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "C" && cmd_buffer[3] == "1" && rec_data == ":") begin
                                 cmd_type <= CMD_OSC1;
@@ -430,6 +456,22 @@ module usb_commend(
                             end
                             else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "R" && cmd_buffer[2] == "D" && cmd_buffer[3] == "D" && cmd_buffer[4] == "C" && rec_data == ":") begin
                                 cmd_type <= CMD_ORDDC;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            // ★ 三路振荡器输入源 OSRC1/OSRC2/OSRC3 (0=CH3,1=CH4,2=CH3-CH4)
+                            else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "R" && cmd_buffer[3] == "C" && cmd_buffer[4] == "1" && rec_data == ":") begin
+                                cmd_type <= CMD_OSRC1;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "R" && cmd_buffer[3] == "C" && cmd_buffer[4] == "2" && rec_data == ":") begin
+                                cmd_type <= CMD_OSRC2;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "R" && cmd_buffer[3] == "C" && cmd_buffer[4] == "3" && rec_data == ":") begin
+                                cmd_type <= CMD_OSRC3;
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
@@ -579,7 +621,13 @@ module usb_commend(
                             end
                             // ★ 信号发生器 (DAC904)
                             else if (cmd_type == CMD_DMOD) begin
-                                dac_src_mode <= value_buffer[1:0];
+                                dac_src_mode <= value_buffer[2:0];
+                            end
+                            else if (cmd_type == CMD_DAMP) begin
+                                dac_amp <= $signed(value_buffer[15:0]);
+                            end
+                            else if (cmd_type == CMD_DOFS) begin
+                                dac_offset <= $signed(value_buffer[15:0]);
                             end
                             else if (cmd_type == CMD_DFRQ) begin
                                 dac_freq_word <= value_buffer;
@@ -599,6 +647,16 @@ module usb_commend(
                             else if (cmd_type == CMD_OSC3) begin
                                 osc3_n <= value_buffer[15:8];
                                 osc3_m <= value_buffer[7:0];
+                            end
+                            // ★ 振荡器输入源选择 (0=CH3,1=CH4,2=CH3-CH4); >2 视为 0
+                            else if (cmd_type == CMD_OSRC1) begin
+                                osc1_src <= (value_buffer[1:0] <= 2'd2) ? value_buffer[1:0] : 2'd0;
+                            end
+                            else if (cmd_type == CMD_OSRC2) begin
+                                osc2_src <= (value_buffer[1:0] <= 2'd2) ? value_buffer[1:0] : 2'd0;
+                            end
+                            else if (cmd_type == CMD_OSRC3) begin
+                                osc3_src <= (value_buffer[1:0] <= 2'd2) ? value_buffer[1:0] : 2'd0;
                             end
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;

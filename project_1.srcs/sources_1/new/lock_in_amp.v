@@ -99,14 +99,20 @@ wire [47:0] tx2_freq_word_w;
 wire [47:0] freq_word_21_w, freq_word_12_w, freq_word_11_w;
 wire        ref_freq_auto_w;        // REFMODE: 0=手动 / 1=自动
 wire [7:0]  osc1_n_w, osc1_m_w, osc2_n_w, osc2_m_w, osc3_n_w, osc3_m_w;
+// ★ 三路振荡器输入源 (OSRC1/2/3: 0=CH3, 1=CH4, 2=CH3-CH4)
+wire [1:0]  osc1_src_w, osc2_src_w, osc3_src_w;
 // ★ 通道3 4 路 IIR 阶数 (各路独立, ORD21/ORD12/ORD11/ORDDC 命令: 1..4)
 wire [2:0]  order21_w, order12_w, order11_w, order_dc_w;
 // ★ PLL 锁定阈值 (由 USB 命令 LOCKSWY/LOCKTHX 动态下发)
 wire signed [27:0] sweep_thres_w, lock_x_thres_w;
-// ★ 信号发生器 (DAC904) 控制 (DMOD/DFRQ/DPHS, 已有独立 CDC 同步, 见下方 DAC 块)
-wire [1:0]  dac_src_mode_uart;     // 0=内部DDS / 1=跟随CH1 / 2=跟随CH2
+// ★ 信号发生器 (DAC904) 控制 (DMOD/DFRQ/DPHS/DAMP/DOFS, 已有独立 CDC 同步, 见下方 DAC 块)
+wire [2:0]  dac_src_mode_uart;     // 0=内部DDS / 1=跟随CH1 / 2=跟随CH2 / 3/4/5=跟随振荡器1/2/3
 wire [47:0] dac_freq_word_uart;    // 内部DDS频率字
 wire [47:0] dac_phase_word_uart;   // 内部DDS相位字
+wire signed [15:0] dac_amp_uart;   // 峰值幅度 (LSB, 0..8192)
+wire signed [15:0] dac_offset_uart;// 直流偏置 (LSB, 有符号)
+// ★ 三路振荡器实际混频参考正弦 (由各 lockin_psd 导出, 供 DAC "跟随振荡器" 同步输出)
+wire signed [13:0] osc1_ref_sine, osc2_ref_sine, osc3_ref_sine;
 
 // =========================================================================
 // ★ 跨时钟域同步 (sys_clk 50M → clk_65M): 配置总线两级寄存器
@@ -127,10 +133,11 @@ wire [4:0]  tau21_uart, tau12_uart, tau11_uart, tau_dc_uart;
 wire [47:0] freq_word_21_uart, freq_word_12_uart, freq_word_11_uart;
 wire        ref_freq_auto_uart;
 wire [7:0]  osc1_n_uart, osc1_m_uart, osc2_n_uart, osc2_m_uart, osc3_n_uart, osc3_m_uart;
+wire [1:0]  osc1_src_uart, osc2_src_uart, osc3_src_uart;
 wire [2:0]  order21_uart, order12_uart, order11_uart, order_dc_uart;
 wire signed [27:0] sweep_thres_uart, lock_x_thres_uart;
 
-localparam CFG_W = 16+16 +48+48 +5+5+5+5 +5+5+5+5 +48+48+48 +1 +8*6 +3*4 +28+28; // = 429
+localparam CFG_W = 16+16 +48+48 +5+5+5+5 +5+5+5+5 +48+48+48 +1 +8*6 +2*3 +3*4 +28+28; // = 435
 wire [CFG_W-1:0] cfg_raw = {
     pll_kp_w, pll_ki_w,
     tx1_freq_word_w, tx2_freq_word_w,
@@ -139,6 +146,7 @@ wire [CFG_W-1:0] cfg_raw = {
     freq_word_21_w, freq_word_12_w, freq_word_11_w,
     ref_freq_auto_w,
     osc1_n_w, osc1_m_w, osc2_n_w, osc2_m_w, osc3_n_w, osc3_m_w,
+    osc1_src_w, osc2_src_w, osc3_src_w,
     order21_w, order12_w, order11_w, order_dc_w,
     sweep_thres_w, lock_x_thres_w
 };
@@ -161,6 +169,7 @@ assign {
     freq_word_21_uart, freq_word_12_uart, freq_word_11_uart,
     ref_freq_auto_uart,
     osc1_n_uart, osc1_m_uart, osc2_n_uart, osc2_m_uart, osc3_n_uart, osc3_m_uart,
+    osc1_src_uart, osc2_src_uart, osc3_src_uart,
     order21_uart, order12_uart, order11_uart, order_dc_uart,
     sweep_thres_uart, lock_x_thres_uart
 } = cfg_sync;
@@ -328,19 +337,23 @@ pll_loop #(
 //   DFRQ/DMOD/DPHS 在 sys_clk(50M) 更新, DDS 在 clk_65M 运行 —— 必须先同步
 //   再打拍, 且仅在配置变化时脉冲 s_axis_config_tvalid (勿恒为 1).
 // =========================================================================
-reg [1:0]  dac_src_mode_meta, dac_src_mode_sync, dac_src_mode_65m;
+reg [2:0]  dac_src_mode_meta, dac_src_mode_sync, dac_src_mode_65m;
 reg [47:0] dac_freq_word_meta, dac_freq_word_65m;
 reg [47:0] dac_phase_word_meta, dac_phase_word_65m;
+reg signed [15:0] dac_amp_meta, dac_amp_65m;
+reg signed [15:0] dac_offset_meta, dac_offset_65m;
 
 always @(posedge clk_65M or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
-        dac_src_mode_meta  <= 2'd0;
-        dac_src_mode_sync  <= 2'd0;
-        dac_src_mode_65m   <= 2'd0;
+        dac_src_mode_meta  <= 3'd0;
+        dac_src_mode_sync  <= 3'd0;
+        dac_src_mode_65m   <= 3'd0;
         dac_freq_word_meta <= 48'd216519212854;   // 与 usb_commend 默认 ~50 kHz 一致
         dac_freq_word_65m  <= 48'd216519212854;
         dac_phase_word_meta <= 48'd0;
         dac_phase_word_65m  <= 48'd0;
+        dac_amp_meta    <= 16'sd8192; dac_amp_65m    <= 16'sd8192;  // 默认满幅
+        dac_offset_meta <= 16'sd0;    dac_offset_65m <= 16'sd0;
     end else begin
         dac_src_mode_meta  <= dac_src_mode_uart;
         dac_src_mode_sync  <= dac_src_mode_meta;
@@ -349,11 +362,13 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
         dac_freq_word_65m  <= dac_freq_word_meta;
         dac_phase_word_meta <= dac_phase_word_uart;
         dac_phase_word_65m  <= dac_phase_word_meta;
+        dac_amp_meta    <= dac_amp_uart;    dac_amp_65m    <= dac_amp_meta;
+        dac_offset_meta <= dac_offset_uart; dac_offset_65m <= dac_offset_meta;
     end
 end
 
-wire [47:0] dac_freq_sel = (dac_src_mode_65m == 2'd1) ? pll_freq_ch1 :
-                           (dac_src_mode_65m == 2'd2) ? pll_freq_ch2 :
+wire [47:0] dac_freq_sel = (dac_src_mode_65m == 3'd1) ? pll_freq_ch1 :
+                           (dac_src_mode_65m == 3'd2) ? pll_freq_ch2 :
                                                          dac_freq_word_65m;
 
 // DDS 配置: {phase_offset[47:0], phase_increment[47:0]}
@@ -391,9 +406,37 @@ dds_compiler_1 u_dds_dac (
     .m_axis_phase_tdata    ()
 );
 
+// ★ 信号源选择: 0/1/2 用内部DDS (dac_sine), 3/4/5 直接用振荡器1/2/3 的混频参考正弦
+//   (与该振荡器完全同频同相). 振荡器源在自动模式=相干本振, 手动模式=其内部DDS.
+wire signed [13:0] dac_osc_sine = (dac_src_mode_65m == 3'd3) ? osc1_ref_sine :
+                                  (dac_src_mode_65m == 3'd4) ? osc2_ref_sine :
+                                                               osc3_ref_sine;
+wire signed [13:0] dac_src_wave = (dac_src_mode_65m >= 3'd3) ? dac_osc_sine : dac_sine;
+
+// ★ 幅值/偏置: 满量程 ±3V ↔ ±8192 LSB. 缩放 = wave*amp>>13 (amp=8192 即满幅),
+//   再叠加偏置, 最后饱和到 14bit. 流水两拍打断乘加, 不压时序.
+reg signed [13:0] dac_src_wave_r;
+reg signed [16:0] dac_scaled_r;
+reg signed [17:0] dac_sum_r;
+always @(posedge clk_65M or negedge sys_rst_n) begin
+    if (!sys_rst_n) begin
+        dac_src_wave_r <= 14'sd0;
+        dac_scaled_r   <= 17'sd0;
+        dac_sum_r      <= 18'sd0;
+    end else begin
+        dac_src_wave_r <= dac_src_wave;
+        dac_scaled_r   <= (dac_src_wave_r * dac_amp_65m) >>> 13;   // 峰值≈dac_amp
+        dac_sum_r      <= dac_scaled_r + dac_offset_65m;
+    end
+end
+
+wire signed [13:0] dac_sat = (dac_sum_r >  18'sd8191) ?  14'sd8191 :
+                             (dac_sum_r < -18'sd8192) ? -14'sd8192 :
+                                                         dac_sum_r[13:0];
+
 // signed [13:0] (-8192..8191) → offset binary (0..16383), 喂给 DAC904.
 // 翻转 MSB 等价于 +8192, 且不会有 14'sd8192 溢出问题.
-wire [13:0] dac_wave = {~dac_sine[13], dac_sine[12:0]};
+wire [13:0] dac_wave = {~dac_sat[13], dac_sat[12:0]};
 
 da_wave_send u_da_wave_send (
     .CLK_DAC904 (clk_65M),
@@ -474,6 +517,23 @@ coherent_harm_lo u_coh_lo_osc3 (
     .harm_cos   (coh_cos_osc3)
 );
 
+// ---- 三路振荡器输入源选择: 0=CH3, 1=CH4, 2=CH3-CH4 差分 ------------------
+//   差分用 15bit 计算后饱和回 14bit, 防止满量程相减溢出.
+wire signed [14:0] diff_ch34 = $signed(adc_ch3) - $signed(adc_ch4);
+wire signed [13:0] diff_ch34_sat = (diff_ch34 >  15'sd8191) ?  14'sd8191 :
+                                   (diff_ch34 < -15'sd8192) ? -14'sd8192 :
+                                                               diff_ch34[13:0];
+
+wire signed [13:0] psd_in_osc1 = (osc1_src_uart == 2'd0) ? adc_ch3 :
+                                 (osc1_src_uart == 2'd1) ? adc_ch4 :
+                                                            diff_ch34_sat;
+wire signed [13:0] psd_in_osc2 = (osc2_src_uart == 2'd0) ? adc_ch3 :
+                                 (osc2_src_uart == 2'd1) ? adc_ch4 :
+                                                            diff_ch34_sat;
+wire signed [13:0] psd_in_osc3 = (osc3_src_uart == 2'd0) ? adc_ch3 :
+                                 (osc3_src_uart == 2'd1) ? adc_ch4 :
+                                                            diff_ch34_sat;
+
 // ---- 振荡器 1 (默认 2F1+F2) ---------------------------------------------
 wire signed [27:0] dc_x_ch3_21, dc_y_ch3_21;
 wire               dc_valid_x_ch3_21, dc_valid_y_ch3_21;
@@ -481,7 +541,7 @@ wire               dc_valid_x_ch3_21, dc_valid_y_ch3_21;
 lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
     .clk         (clk_65M),
     .rst_n       (sys_rst_n),
-    .adc_in      (adc_ch3),
+    .adc_in      (psd_in_osc1),
     .ref_freq    (ref_freq_21_to_psd),
     .ref_phase   (48'd0),
     .use_coh_ref (ref_freq_auto_uart),
@@ -494,7 +554,8 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
     .cic_valid_x (),
     .cic_valid_y (),
     .dc_valid_x  (dc_valid_x_ch3_21),
-    .dc_valid_y  (dc_valid_y_ch3_21)
+    .dc_valid_y  (dc_valid_y_ch3_21),
+    .ref_sine_o  (osc1_ref_sine)
 );
 
 // ---- 振荡器 2 (默认 F1+2F2) ---------------------------------------------
@@ -504,7 +565,7 @@ wire               dc_valid_x_ch3_12, dc_valid_y_ch3_12;
 lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
     .clk         (clk_65M),
     .rst_n       (sys_rst_n),
-    .adc_in      (adc_ch3),
+    .adc_in      (psd_in_osc2),
     .ref_freq    (ref_freq_12_to_psd),
     .ref_phase   (48'd0),
     .use_coh_ref (ref_freq_auto_uart),
@@ -517,7 +578,8 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
     .cic_valid_x (),
     .cic_valid_y (),
     .dc_valid_x  (dc_valid_x_ch3_12),
-    .dc_valid_y  (dc_valid_y_ch3_12)
+    .dc_valid_y  (dc_valid_y_ch3_12),
+    .ref_sine_o  (osc2_ref_sine)
 );
 
 // ---- 振荡器 3 (默认 F1+F2) ----------------------------------------------
@@ -527,7 +589,7 @@ wire               dc_valid_x_ch3_11, dc_valid_y_ch3_11;
 lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
     .clk         (clk_65M),
     .rst_n       (sys_rst_n),
-    .adc_in      (adc_ch3),
+    .adc_in      (psd_in_osc3),
     .ref_freq    (ref_freq_11_to_psd),
     .ref_phase   (48'd0),
     .use_coh_ref (ref_freq_auto_uart),
@@ -540,7 +602,8 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
     .cic_valid_x (),
     .cic_valid_y (),
     .dc_valid_x  (dc_valid_x_ch3_11),
-    .dc_valid_y  (dc_valid_y_ch3_11)
+    .dc_valid_y  (dc_valid_y_ch3_11),
+    .ref_sine_o  (osc3_ref_sine)
 );
 
 // ---- 通道3 DC 通路: 直接 CIC + IIR (无混频) ------------------------------
@@ -714,6 +777,8 @@ usb_commend u_usb_commend (
     .osc1_n (osc1_n_w), .osc1_m (osc1_m_w),
     .osc2_n (osc2_n_w), .osc2_m (osc2_m_w),
     .osc3_n (osc3_n_w), .osc3_m (osc3_m_w),
+    // ★ 三路振荡器输入源 (OSRC1/2/3: 0=CH3,1=CH4,2=CH3-CH4)
+    .osc1_src(osc1_src_w), .osc2_src(osc2_src_w), .osc3_src(osc3_src_w),
     // ★ 通道3 4 路 IIR 阶数 (ORD21/ORD12/ORD11/ORDDC 命令各自独立: 1..4)
     .order21 (order21_w),
     .order12 (order12_w),
@@ -723,6 +788,8 @@ usb_commend u_usb_commend (
     .dac_src_mode  (dac_src_mode_uart),
     .dac_freq_word (dac_freq_word_uart),
     .dac_phase_word(dac_phase_word_uart),
+    .dac_amp       (dac_amp_uart),
+    .dac_offset    (dac_offset_uart),
     .send_en(send_en),
     .send_data(send_data)
 );

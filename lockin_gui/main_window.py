@@ -871,11 +871,11 @@ class MainWindow(QMainWindow):
 
         self.ch3_oscs = []
         osc_defs = [
-            ("振荡器 1", "OSC1", "FRQ21", "160000", 2, 1),
-            ("振荡器 2", "OSC2", "FRQ12", "170000", 1, 2),
-            ("振荡器 3", "OSC3", "FRQ11", "110000", 1, 1),
+            ("振荡器 1", "OSC1", "FRQ21", "OSRC1", "160000", 2, 1),
+            ("振荡器 2", "OSC2", "FRQ12", "OSRC2", "170000", 1, 2),
+            ("振荡器 3", "OSC3", "FRQ11", "OSRC3", "110000", 1, 1),
         ]
-        for row, (label, osc_cmd, frq_cmd, frq_def, n_def, m_def) in enumerate(osc_defs):
+        for row, (label, osc_cmd, frq_cmd, osrc_cmd, frq_def, n_def, m_def) in enumerate(osc_defs):
             lbl = QLabel(label)
             lbl.setStyleSheet("font-size: 10pt;")
             lbl.setFixedWidth(72)
@@ -914,10 +914,20 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet("font-size: 11pt; font-weight: bold;")
             grid.addWidget(btn, row, 3)
 
+            # ★ 输入信号源选择: CH3(默认) / CH4 / CH3-CH4 差分 (OSRCx 命令)
+            cb_src = QComboBox()
+            cb_src.addItem("CH3", 0)
+            cb_src.addItem("CH4", 1)
+            cb_src.addItem("CH3-CH4", 2)
+            cb_src.setFixedHeight(30)
+            cb_src.setToolTip("该振荡器解调用的输入信号源:\nCH3 (默认) / CH4 / CH3-CH4 差分输入")
+            grid.addWidget(cb_src, row, 4)
+
             osc = {
                 "ed_n": ed_n, "ed_m": ed_m, "lbl_hz": lbl_hz,
                 "auto_w": auto_w, "ed_frq": ed_frq, "btn": btn,
                 "osc_cmd": osc_cmd, "frq_cmd": frq_cmd,
+                "osrc_cmd": osrc_cmd, "cb_src": cb_src,
             }
             ed_n.textChanged.connect(self._on_osc_coef_changed)
             ed_m.textChanged.connect(self._on_osc_coef_changed)
@@ -926,6 +936,8 @@ class MainWindow(QMainWindow):
             ed_n.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
             ed_m.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
             ed_frq.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
+            # ★ 切换输入源立即下发 OSRCx
+            cb_src.currentIndexChanged.connect(lambda _i=0, o=osc: self._send_osc_src(o))
             self.ch3_oscs.append(osc)
             btn.clicked.connect(lambda _c=False, o=osc: self._send_one_osc(o))
 
@@ -976,6 +988,17 @@ class MainWindow(QMainWindow):
                 self.on_log(f"  {osc['osc_cmd']}: n={n} m={m} (→ {val})")
         else:
             self._send_freq_cmd(osc["frq_cmd"], osc["ed_frq"].text())
+        # 输入源选择与模式无关, 一并下发 (OSRCx)
+        self._send_osc_src(osc, quiet=True)
+
+    def _send_osc_src(self, osc: dict, quiet: bool = False):
+        """下发某路振荡器的输入源选择 (OSRCx: 0=CH3 / 1=CH4 / 2=CH3-CH4)."""
+        if not getattr(self.dev, "is_connected", False):
+            return
+        src = osc["cb_src"].currentData()
+        self.dev.send_command(f"{osc['osrc_cmd']}:{int(src)}")
+        if not quiet:
+            self.on_log(f"  {osc['osrc_cmd']}: {osc['cb_src'].currentText()} (={src})")
 
     def _auto_push_osc(self, osc: dict):
         """编辑完成后自动下发该路: 自动模式发 OSCx 系数, 手动模式发 FRQxx 频率.
@@ -1256,6 +1279,9 @@ class MainWindow(QMainWindow):
         self.cb_dac_mode.addItem("内部 DDS (自定义)", 0)
         self.cb_dac_mode.addItem("跟随 CH1 锁定频率", 1)
         self.cb_dac_mode.addItem("跟随 CH2 锁定频率", 2)
+        self.cb_dac_mode.addItem("跟随振荡器1 (完全同步)", 3)
+        self.cb_dac_mode.addItem("跟随振荡器2 (完全同步)", 4)
+        self.cb_dac_mode.addItem("跟随振荡器3 (完全同步)", 5)
         self.cb_dac_mode.setFixedHeight(30)
         self.cb_dac_mode.setFixedWidth(268)
         self.cb_dac_mode.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
@@ -1284,6 +1310,34 @@ class MainWindow(QMainWindow):
         btn_ph.setStyleSheet("font-size: 11pt; font-weight: bold;")
         btn_ph.clicked.connect(lambda: self._send_dac_phase(self.ed_dac_phase.text()))
         grid.addWidget(btn_ph, 1, 2)
+
+        # 幅值 (Vp) 行: 0..3 V 峰值 (满量程 ±3V)
+        lbl_amp = QLabel("幅值 (Vp)"); lbl_amp.setFixedWidth(95); lbl_amp.setStyleSheet("font-size:10pt;")
+        grid.addWidget(lbl_amp, 2, 0)
+        self.ed_dac_amp = QLineEdit("3.0")
+        self.ed_dac_amp.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
+        self.ed_dac_amp.setAlignment(Qt.AlignCenter)
+        self.ed_dac_amp.setFixedWidth(268); self.ed_dac_amp.setFixedHeight(30)
+        self.ed_dac_amp.setToolTip("输出正弦峰值幅度 (V), 0~3 V (满量程 ±3V). 下发 DAMP (LSB).")
+        grid.addWidget(self.ed_dac_amp, 2, 1)
+        btn_amp = QPushButton("▶"); btn_amp.setFixedSize(42, 30)
+        btn_amp.setStyleSheet("font-size: 11pt; font-weight: bold;")
+        btn_amp.clicked.connect(lambda: self._send_dac_amp(self.ed_dac_amp.text()))
+        grid.addWidget(btn_amp, 2, 2)
+
+        # 偏置 (V) 行: -3..+3 V 直流偏置
+        lbl_ofs = QLabel("偏置 (V)"); lbl_ofs.setFixedWidth(95); lbl_ofs.setStyleSheet("font-size:10pt;")
+        grid.addWidget(lbl_ofs, 3, 0)
+        self.ed_dac_offset = QLineEdit("0")
+        self.ed_dac_offset.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
+        self.ed_dac_offset.setAlignment(Qt.AlignCenter)
+        self.ed_dac_offset.setFixedWidth(268); self.ed_dac_offset.setFixedHeight(30)
+        self.ed_dac_offset.setToolTip("输出直流偏置 (V), -3~+3 V. 下发 DOFS (LSB).\n注意: 幅值+偏置超过 ±3V 会被硬件饱和削顶.")
+        grid.addWidget(self.ed_dac_offset, 3, 1)
+        btn_ofs = QPushButton("▶"); btn_ofs.setFixedSize(42, 30)
+        btn_ofs.setStyleSheet("font-size: 11pt; font-weight: bold;")
+        btn_ofs.clicked.connect(lambda: self._send_dac_offset(self.ed_dac_offset.text()))
+        grid.addWidget(btn_ofs, 3, 2)
         outer.addLayout(grid)
 
         self._on_dac_mode_changed()   # 初始化频率框可用状态
@@ -1313,6 +1367,34 @@ class MainWindow(QMainWindow):
         word = int(round((deg % 360.0) / 360.0 * (1 << 48))) & ((1 << 48) - 1)
         self.dev.send_command(f"DPHS:{word}")
         self.on_log(f"  (DAC 相位 {deg:.3f}° → 相位字 {word})")
+
+    # DAC 满量程: ±3V ↔ ±8192 LSB
+    DAC_LSB_FS = 8192
+    DAC_VFS    = 3.0
+
+    def _send_dac_amp(self, v_str):
+        """峰值幅度 (V) → LSB (0..8192), 下发 DAMP."""
+        try:
+            v = float(v_str)
+        except ValueError:
+            self.on_log(f"[!] DAMP 幅值非法: {v_str}")
+            return
+        lsb = int(round(v / self.DAC_VFS * self.DAC_LSB_FS))
+        lsb = max(0, min(self.DAC_LSB_FS, lsb))
+        self.dev.send_command(f"DAMP:{lsb}")
+        self.on_log(f"  (DAC 幅值 {v:.3f} Vp → {lsb} LSB)")
+
+    def _send_dac_offset(self, v_str):
+        """直流偏置 (V) → LSB (-8192..8191), 按 16bit 二补码无符号十进制下发 DOFS."""
+        try:
+            v = float(v_str)
+        except ValueError:
+            self.on_log(f"[!] DOFS 偏置非法: {v_str}")
+            return
+        lsb = int(round(v / self.DAC_VFS * self.DAC_LSB_FS))
+        lsb = max(-self.DAC_LSB_FS, min(self.DAC_LSB_FS - 1, lsb))
+        self.dev.send_command(f"DOFS:{lsb & 0xFFFF}")
+        self.on_log(f"  (DAC 偏置 {v:.3f} V → {lsb} LSB)")
 
     def _smooth_freq(self, ch: int, raw: float, locked: bool) -> float:
         """对单通道锁定频率做滑动平均; 未锁/未启用/大跳变时旁路或重置窗口."""
@@ -1791,6 +1873,9 @@ class MainWindow(QMainWindow):
             self._send_ref_mode(quiet=True)
             if self.rb_ref_auto.isChecked():
                 self._send_all_osc_coefs(quiet=True)
+            # 三路输入源选择 (CH3/CH4/CH3-CH4) 与模式无关, 连接后统一下发一次
+            for osc in self.ch3_oscs:
+                self._send_osc_src(osc, quiet=True)
         else:
             self.btn_connect.setText("连接")
             self.btn_stream.setEnabled(False)
@@ -1954,10 +2039,12 @@ class MainWindow(QMainWindow):
         self._send_order_one("ORD12", self.cb_order12)
         self._send_order_one("ORD11", self.cb_order11)
         self._send_order_one("ORDDC", self.cb_orderdc)
-        # ★ 信号发生器 (DAC904): 模式 / 频率 / 相位
+        # ★ 信号发生器 (DAC904): 模式 / 频率 / 相位 / 幅值 / 偏置
         self._send_dac_mode()
         self._send_freq_cmd("DFRQ", self.ed_dac_freq.text())
         self._send_dac_phase(self.ed_dac_phase.text())
+        self._send_dac_amp(self.ed_dac_amp.text())
+        self._send_dac_offset(self.ed_dac_offset.text())
 
     def on_diag_clicked(self):
         """点击 [打印当前帧诊断] 按钮: 把最近一帧的全部解析结果 dump 到日志,
