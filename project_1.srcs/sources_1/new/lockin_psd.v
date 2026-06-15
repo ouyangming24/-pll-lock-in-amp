@@ -1,68 +1,44 @@
 `timescale 1ns / 1ps
 // =============================================================================
-//  lockin_psd.v
-//
-//  锁相放大器 (Phase-Sensitive Detector, PSD) ── 开环版本
-//
-//  功能:
-//      给定一个 ADC 信号 + 一个外部指定的参考频率 ref_freq, 在该频点
-//      做相敏检测, 输出 X/Y (同相/正交) 直流分量。
-//      与 pll_loop.v 的区别: 不带 PI 反馈, 参考频率由外部直接给定。
-//      适合:  - 多频点同时解调 (本工程通道3 在 2F1+F2、F1+2F2、F1+F2 上的应用)
-//             - 已知激励频率, 不需要锁相跟踪的场景
-//
-//  数据通路:
-//      adc_in ──┬─▶ × ref_sine ─▶ CIC ─▶ IIR_x ─▶ dc_x
-//               │                                   ▲
-//               └─▶ × ref_cos  ─▶ CIC ─▶ IIR_y ─▶ dc_y
-//                              ▲
-//                              │
-//                       ┌─────────────┐
-//                       │ dds_compiler│  ◀── ref_freq (外部直接给)
-//                       │ (本振)       │
-//                       └─────────────┘
-//
-//  外部依赖 IP/模块:
-//      - dds_compiler_1   : 本振参考 DDS
-//      - mult_hunpin      : 14×14 有符号乘法器
-//      - cic_compiler_0   : CIC 降采样滤波
-//      - iir_lpf_cascade  : 1~4 阶级联 IIR 指数平均低通 (运行时可选阶数)
+//  lockin_psd.v  —  开环 PSD
 // =============================================================================
 module lockin_psd #(
-    parameter IN_WIDTH = 28
+    parameter IN_WIDTH    = 28,
+    parameter COH_ADC_DLY   = 3
 )(
     input                                clk,
     input                                rst_n,
 
-    // 输入信号 + 参考频率
     input  signed [13:0]                 adc_in,
-    input  [47:0]                        ref_freq,    // 参考频率字 (手动模式)
-    input  [47:0]                        ref_phase,   // 参考相位偏移 (手动模式)
-    // ★ 相干本振: 自动模式下由 CH1/CH2 相位组合生成的 sin/cos, 替代内部 DDS
+    input  [47:0]                        ref_freq,
+    input  [47:0]                        ref_phase,
     input  wire                          use_coh_ref,
+    input  wire                          coh_ref_pll_direct, // 1=参考直接来自 PLL 本振, 勿延迟 ADC
     input  wire signed [13:0]            coh_ref_sine,
     input  wire signed [13:0]            coh_ref_cos,
-    // ★ X/Y 共用同一个 IIR 时间常数 (与 SR830 等商用锁相放大器一致)
-    //   保证复数信号 X+jY 经过完全对称的滤波器, 避免引入伪相位偏差.
-    input  [4:0]                         tau,         // X/Y 共用 IIR 平滑系数
-    // ★ IIR 滤波器阶数 (1~4): 等效 6/12/18/24 dB/oct 阻带斜率, 模仿 SR830
-    //   阶数越高 → 噪声抑制越强, 但建立时间也越长 (~N · tau)
+    input  [4:0]                         tau,
     input  [2:0]                         iir_order,
 
-    // 输出
     output signed [IN_WIDTH-1:0]         dc_x,
     output signed [IN_WIDTH-1:0]         dc_y,
     output                               cic_valid_x,
     output                               cic_valid_y,
     output                               dc_valid_x,
     output                               dc_valid_y,
-    // ★ 实际用于混频的参考正弦 (自动=相干本振, 手动=内部DDS); 供信号发生器同步输出
     output signed [13:0]                 ref_sine_o
 );
 
-    // ========================================================================
-    // 1) 本振参考 DDS (开环, 频率字直接由外部给)
-    // ========================================================================
+    reg signed [13:0] adc_dly [0:COH_ADC_DLY-1];
+    integer di;
+    always @(posedge clk) begin
+        adc_dly[0] <= adc_in;
+        for (di = 1; di < COH_ADC_DLY; di = di + 1)
+            adc_dly[di] <= adc_dly[di-1];
+    end
+
+    wire signed [13:0] adc_aligned = use_coh_ref ?
+        (coh_ref_pll_direct ? adc_in : adc_dly[COH_ADC_DLY-1]) : adc_in;
+
     wire [95:0] ref_dds_cfg = {ref_phase, ref_freq};
 
     wire signed [31:0] ref_sine_cos;
@@ -72,12 +48,11 @@ module lockin_psd #(
     wire signed [13:0] mix_ref_sine = use_coh_ref ? coh_ref_sine : ref_sine;
     wire signed [13:0] mix_ref_cos  = use_coh_ref ? coh_ref_cos  : ref_cos;
 
-    // 导出实际混频正弦, 供信号发生器"跟随振荡器"时完全同步输出
     assign ref_sine_o = mix_ref_sine;
 
     dds_compiler_1 u_dds_ref (
         .aclk                  (clk),
-        .s_axis_config_tvalid  (1'b1),
+        .s_axis_config_tvalid  (!use_coh_ref),
         .s_axis_config_tdata   (ref_dds_cfg),
         .m_axis_data_tvalid    (),
         .m_axis_data_tdata     (ref_sine_cos),
@@ -85,23 +60,17 @@ module lockin_psd #(
         .m_axis_phase_tdata    ()
     );
 
-    // ========================================================================
-    // 2) 混频 (相敏检测)
-    // ========================================================================
     wire signed [IN_WIDTH-1:0] mix_x;
     wire signed [IN_WIDTH-1:0] mix_y;
 
     mult_hunpin u_mix_x (
-        .CLK (clk), .A (adc_in), .B (mix_ref_sine), .P (mix_x)
+        .CLK (clk), .A (adc_aligned), .B (mix_ref_sine), .P (mix_x)
     );
 
     mult_hunpin u_mix_y (
-        .CLK (clk), .A (adc_in), .B (mix_ref_cos),  .P (mix_y)
+        .CLK (clk), .A (adc_aligned), .B (mix_ref_cos),  .P (mix_y)
     );
 
-    // ========================================================================
-    // 3) CIC 降采样
-    // ========================================================================
     wire signed [IN_WIDTH-1:0] cic_x;
     wire signed [IN_WIDTH-1:0] cic_y;
 
@@ -117,9 +86,6 @@ module lockin_psd #(
         .m_axis_data_tdata   (cic_y), .m_axis_data_tvalid (cic_valid_y)
     );
 
-    // ========================================================================
-    // 4) IIR 指数平均低通 (多阶级联, 阶数由 iir_order 运行时选择)
-    // ========================================================================
     iir_lpf_cascade #(
         .IN_WIDTH   (IN_WIDTH),
         .FRAC_WIDTH (32)

@@ -223,11 +223,12 @@ module usb_commend(
             tau_dc  <= 5'd2;
             phase_offset <= 48'd0;
             freq_word_2 <= 48'd433038425708 + 48'd433038425;
+            freq_word_3 <= 48'd519646110;   // CH2 扫频起点 ≈60 kHz (与 GUI 默认 F2 一致)
             // ★ 通道3 三路 ref_freq 默认值 (对应 F1=50k, F2=60k 时的 2F1+F2 / F1+2F2 / F1+F2)
             freq_word_21 <= 48'd692861481134;   // 160 kHz
             freq_word_12 <= 48'd736165323705;   // 170 kHz
             freq_word_11 <= 48'd476342268280;   // 110 kHz
-            ref_freq_auto <= 1'b0;              // 默认手动; GUI 连接后会发 REFMODE:1
+            ref_freq_auto <= 1'b1;              // 默认自动; GUI 可发 REFMODE:0 切手动
             // ★ 振荡器默认系数: 2F1+F2 / F1+2F2 / F1+F2
             osc1_n <= 8'd2;  osc1_m <= 8'd1;
             osc2_n <= 8'd1;  osc2_m <= 8'd2;

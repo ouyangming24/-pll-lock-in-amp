@@ -115,64 +115,105 @@ wire signed [15:0] dac_offset_uart;// 直流偏置 (LSB, 有符号)
 wire signed [13:0] osc1_ref_sine, osc2_ref_sine, osc3_ref_sine;
 
 // =========================================================================
-// ★ 跨时钟域同步 (sys_clk 50M → clk_65M): 配置总线两级寄存器
+// ★ 跨时钟域同步 (sys_clk 50M → clk_65M)
 //
-//   usb_commend 在 sys_clk(50M) 域更新这些"准静态"配置, 而 PLL/PSD/DDS 在
-//   clk_65M 域消费. 直接跨域 (原设计) 会因多比特 bit-skew 在某些拍锁到
-//   "半新半旧"的错误值 —— 对开环 PSD 尤其致命: 一路频率字错 = 该路解调全错
-//   (现象: 三振荡器设同值, 偏偏一路 R/Θ 完全不对). 这里把全部配置打包后
-//   统一打两拍同步, 配置仅在串口命令到来时变化, 两拍后即稳定且三路相干.
-//   配套约束: pin.xdc 中 set_clock_groups -asynchronous (sys_clk ↔ 65M).
-//
-//   消费端沿用原命名 (无 _w 后缀); 这些名字现在是"同步后"的稳定值.
+//   PLL 参数走窄总线 (204bit) 两拍同步; 振荡器/CH3 参数逐字段双触发器同步.
+//   435bit 宽总线曾导致 bit-skew → 某路 OSC 系数变 0 → 振荡器3 恒为 0.
+//   配套约束: pin.xdc set_clock_groups -asynchronous (sys_clk ↔ 65M).
 // =========================================================================
 wire [15:0] pll_kp, pll_ki;
 wire [47:0] tx1_freq_word, tx2_freq_word;
 wire [4:0]  tau1_x_uart, tau1_y_uart, tau2_x_uart, tau2_y_uart;
-wire [4:0]  tau21_uart, tau12_uart, tau11_uart, tau_dc_uart;
-wire [47:0] freq_word_21_uart, freq_word_12_uart, freq_word_11_uart;
-wire        ref_freq_auto_uart;
-wire [7:0]  osc1_n_uart, osc1_m_uart, osc2_n_uart, osc2_m_uart, osc3_n_uart, osc3_m_uart;
-wire [1:0]  osc1_src_uart, osc2_src_uart, osc3_src_uart;
-wire [2:0]  order21_uart, order12_uart, order11_uart, order_dc_uart;
 wire signed [27:0] sweep_thres_uart, lock_x_thres_uart;
 
-localparam CFG_W = 16+16 +48+48 +5+5+5+5 +5+5+5+5 +48+48+48 +1 +8*6 +2*3 +3*4 +28+28; // = 435
-wire [CFG_W-1:0] cfg_raw = {
+// CH3 / 振荡器: 逐字段同步后的稳定值 (reg, 在下方 always 块赋值)
+reg [4:0]  tau21_uart, tau12_uart, tau11_uart, tau_dc_uart;
+reg [47:0] freq_word_21_uart, freq_word_12_uart, freq_word_11_uart;
+reg        ref_freq_auto_uart;
+reg [7:0]  osc1_n_uart, osc1_m_uart, osc2_n_uart, osc2_m_uart;
+reg [7:0]  osc3_n_uart, osc3_m_uart;
+reg [1:0]  osc1_src_uart, osc2_src_uart, osc3_src_uart;
+reg [2:0]  order21_uart, order12_uart, order11_uart, order_dc_uart;
+
+localparam CFG_PLL_W = 16+16 +48+48 +5+5+5+5 +28+28; // = 204
+localparam [47:0] CFG_DEF_TX1 = 48'd433038425708 + 48'd433038425;
+localparam [47:0] CFG_DEF_TX2 = 48'd519646110;
+localparam [CFG_PLL_W-1:0] CFG_PLL_DEFAULT = {
+    16'd500, 16'd50,
+    CFG_DEF_TX1, CFG_DEF_TX2,
+    5'd20, 5'd8, 5'd20, 5'd8,
+    28'sd100_000, 28'sd300_000
+};
+wire [CFG_PLL_W-1:0] cfg_pll_raw = {
     pll_kp_w, pll_ki_w,
     tx1_freq_word_w, tx2_freq_word_w,
     tau1_x_w, tau1_y_w, tau2_x_w, tau2_y_w,
-    tau21_w, tau12_w, tau11_w, tau_dc_w,
-    freq_word_21_w, freq_word_12_w, freq_word_11_w,
-    ref_freq_auto_w,
-    osc1_n_w, osc1_m_w, osc2_n_w, osc2_m_w, osc3_n_w, osc3_m_w,
-    osc1_src_w, osc2_src_w, osc3_src_w,
-    order21_w, order12_w, order11_w, order_dc_w,
     sweep_thres_w, lock_x_thres_w
 };
-reg [CFG_W-1:0] cfg_meta, cfg_sync;
+reg [CFG_PLL_W-1:0] cfg_pll_meta, cfg_pll_sync;
 always @(posedge clk_65M or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
-        cfg_meta <= {CFG_W{1'b0}};
-        cfg_sync <= {CFG_W{1'b0}};
+        cfg_pll_meta <= CFG_PLL_DEFAULT;
+        cfg_pll_sync <= CFG_PLL_DEFAULT;
     end else begin
-        cfg_meta <= cfg_raw;
-        cfg_sync <= cfg_meta;
+        cfg_pll_meta <= cfg_pll_raw;
+        cfg_pll_sync <= cfg_pll_meta;
     end
 end
-// 解包顺序必须与上面 cfg_raw 打包顺序完全一致
 assign {
     pll_kp, pll_ki,
     tx1_freq_word, tx2_freq_word,
     tau1_x_uart, tau1_y_uart, tau2_x_uart, tau2_y_uart,
-    tau21_uart, tau12_uart, tau11_uart, tau_dc_uart,
-    freq_word_21_uart, freq_word_12_uart, freq_word_11_uart,
-    ref_freq_auto_uart,
-    osc1_n_uart, osc1_m_uart, osc2_n_uart, osc2_m_uart, osc3_n_uart, osc3_m_uart,
-    osc1_src_uart, osc2_src_uart, osc3_src_uart,
-    order21_uart, order12_uart, order11_uart, order_dc_uart,
     sweep_thres_uart, lock_x_thres_uart
-} = cfg_sync;
+} = cfg_pll_sync;
+
+// 振荡器 / CH3 专用 CDC: 每字段独立双触发器 (消除宽总线 bit-skew)
+reg        ref_auto_meta;
+reg [4:0]  tau21_meta, tau12_meta, tau11_meta, tau_dc_meta;
+reg [47:0] frq21_meta, frq12_meta, frq11_meta;
+reg [7:0]  o1n_meta, o1m_meta, o2n_meta, o2m_meta, o3n_meta, o3m_meta;
+reg [1:0]  os1_meta, os2_meta, os3_meta;
+reg [2:0]  ord21_meta, ord12_meta, ord11_meta, ord_dc_meta;
+
+always @(posedge clk_65M or negedge sys_rst_n) begin
+    if (!sys_rst_n) begin
+        ref_freq_auto_uart <= 1'b1;
+        tau21_uart <= 5'd2;  tau12_uart <= 5'd2;
+        tau11_uart <= 5'd2;  tau_dc_uart <= 5'd2;
+        freq_word_21_uart <= 48'd692861481134;
+        freq_word_12_uart <= 48'd736165323705;
+        freq_word_11_uart <= 48'd476342268280;
+        osc1_n_uart <= 8'd2;  osc1_m_uart <= 8'd1;
+        osc2_n_uart <= 8'd1;  osc2_m_uart <= 8'd2;
+        osc3_n_uart <= 8'd1;  osc3_m_uart <= 8'd1;
+        osc1_src_uart <= 2'd0; osc2_src_uart <= 2'd0; osc3_src_uart <= 2'd0;
+        order21_uart <= 3'd1; order12_uart <= 3'd1;
+        order11_uart <= 3'd1; order_dc_uart <= 3'd1;
+    end else begin
+        ref_auto_meta   <= ref_freq_auto_w;
+        ref_freq_auto_uart <= ref_auto_meta;
+        tau21_meta <= tau21_w;   tau21_uart <= tau21_meta;
+        tau12_meta <= tau12_w;   tau12_uart <= tau12_meta;
+        tau11_meta <= tau11_w;   tau11_uart <= tau11_meta;
+        tau_dc_meta <= tau_dc_w; tau_dc_uart <= tau_dc_meta;
+        frq21_meta <= freq_word_21_w; freq_word_21_uart <= frq21_meta;
+        frq12_meta <= freq_word_12_w; freq_word_12_uart <= frq12_meta;
+        frq11_meta <= freq_word_11_w; freq_word_11_uart <= frq11_meta;
+        o1n_meta <= osc1_n_w; osc1_n_uart <= o1n_meta;
+        o1m_meta <= osc1_m_w; osc1_m_uart <= o1m_meta;
+        o2n_meta <= osc2_n_w; osc2_n_uart <= o2n_meta;
+        o2m_meta <= osc2_m_w; osc2_m_uart <= o2m_meta;
+        o3n_meta <= osc3_n_w; osc3_n_uart <= o3n_meta;
+        o3m_meta <= osc3_m_w; osc3_m_uart <= o3m_meta;
+        os1_meta <= osc1_src_w; osc1_src_uart <= os1_meta;
+        os2_meta <= osc2_src_w; osc2_src_uart <= os2_meta;
+        os3_meta <= osc3_src_w; osc3_src_uart <= os3_meta;
+        ord21_meta <= order21_w; order21_uart <= ord21_meta;
+        ord12_meta <= order12_w; order12_uart <= ord12_meta;
+        ord11_meta <= order11_w; order11_uart <= ord11_meta;
+        ord_dc_meta <= order_dc_w; order_dc_uart <= ord_dc_meta;
+    end
+end
 
 
 // =========================================================================
@@ -208,6 +249,7 @@ ad_wave_rec u_ad_wave_rec_2 (
 // =========================================================================
 wire [47:0]         pll_freq_ch1;
 wire [47:0]         pll_phase_ch1;
+wire signed [13:0]  pll_sin_ch1, pll_cos_ch1;
 wire signed [27:0]  dc_x_ch1, dc_y_ch1;
 wire                cic_valid_x_ch1, cic_valid_y_ch1;
 wire                dc_valid_x_ch1,  dc_valid_y_ch1;
@@ -240,6 +282,8 @@ pll_loop #(
     .lock_x_thres (lock_x_thres_uart),
     .dds_freq_out (pll_freq_ch1),
     .dds_phase_out(pll_phase_ch1),
+    .ref_sine_out (pll_sin_ch1),
+    .ref_cos_out  (pll_cos_ch1),
     .dc_x         (dc_x_ch1),
     .dc_y         (dc_y_ch1),
     .cic_valid_x  (cic_valid_x_ch1),
@@ -255,6 +299,7 @@ pll_loop #(
 // =========================================================================
 wire [47:0]         pll_freq_ch2;
 wire [47:0]         pll_phase_ch2;
+wire signed [13:0]  pll_sin_ch2, pll_cos_ch2;
 wire signed [27:0]  dc_x_ch2, dc_y_ch2;
 wire                cic_valid_x_ch2, cic_valid_y_ch2;
 wire                dc_valid_x_ch2,  dc_valid_y_ch2;
@@ -277,6 +322,8 @@ pll_loop #(
     .lock_x_thres (lock_x_thres_uart),
     .dds_freq_out (pll_freq_ch2),
     .dds_phase_out(pll_phase_ch2),
+    .ref_sine_out (pll_sin_ch2),
+    .ref_cos_out  (pll_cos_ch2),
     .dc_x         (dc_x_ch2),
     .dc_y         (dc_y_ch2),
     .cic_valid_x  (cic_valid_x_ch2),
@@ -287,8 +334,18 @@ pll_loop #(
 );
 
 
+// PLL 本振 sin/cos 打一拍 (DAC 跟随 / 相干谐波合成共用)
+reg signed [13:0] pll_sin1_r, pll_cos1_r, pll_sin2_r, pll_cos2_r;
+always @(posedge clk_65M) begin
+    pll_sin1_r <= pll_sin_ch1;
+    pll_cos1_r <= pll_cos_ch1;
+    pll_sin2_r <= pll_sin_ch2;
+    pll_cos2_r <= pll_cos_ch2;
+end
+
+
 // =========================================================================
-// ★ 测试信号 DDS (tx1 / tx2)
+// ★ 信号发生器 (DAC904)
 //    输出可送 DAC, 频率即跟随 PLL 锁定结果
 // =========================================================================
 // wire [95:0]        dds_tx1_config = {tx1_phase_word, pll_freq_ch1};
@@ -367,51 +424,92 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
     end
 end
 
-wire [47:0] dac_freq_sel = (dac_src_mode_65m == 3'd1) ? pll_freq_ch1 :
-                           (dac_src_mode_65m == 3'd2) ? pll_freq_ch2 :
-                                                         dac_freq_word_65m;
-
-// DDS 配置: {phase_offset[47:0], phase_increment[47:0]}
-wire [95:0] dac_dds_cfg_next = {dac_phase_word_65m, dac_freq_sel};
-
-reg [95:0] dac_dds_cfg_reg;
-reg [95:0] dac_dds_cfg_prev;
-reg        dac_cfg_valid;
-
+// 跟随 CH1/CH2 时频率字来自 PLL, 先打一拍再 mux, 避免 pll_freq → DDS 长路径
+reg [47:0] pll_freq_ch1_dac_r, pll_freq_ch2_dac_r;
 always @(posedge clk_65M or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
-        dac_dds_cfg_reg  <= {48'd0, 48'd216519212854};
-        dac_dds_cfg_prev <= 96'd0;
-        dac_cfg_valid    <= 1'b1;
+        pll_freq_ch1_dac_r <= 48'd0;
+        pll_freq_ch2_dac_r <= 48'd0;
     end else begin
-        dac_cfg_valid <= 1'b0;
-        if (dac_dds_cfg_next != dac_dds_cfg_prev) begin
-            dac_dds_cfg_reg  <= dac_dds_cfg_next;
-            dac_dds_cfg_prev <= dac_dds_cfg_next;
-            dac_cfg_valid    <= 1'b1;
-        end
+        pll_freq_ch1_dac_r <= pll_freq_ch1;
+        pll_freq_ch2_dac_r <= pll_freq_ch2;
     end
 end
 
+wire [47:0] dac_freq_sel = (dac_src_mode_65m == 3'd1) ? pll_freq_ch1_dac_r :
+                           (dac_src_mode_65m == 3'd2) ? pll_freq_ch2_dac_r :
+                                                         dac_freq_word_65m;
+
+// DDS 配置: 与 pll_loop 相同 —— 每拍 tvalid=1, 频率/相位仅在变化时更新 hold 寄存器
+wire        dac_in_follow = (dac_src_mode_65m == 3'd1) || (dac_src_mode_65m == 3'd2);
+wire [47:0] dac_freq_target = dac_freq_sel;
+
+reg [47:0] dac_freq_hold;
+reg [47:0] dac_phase_hold;
+reg [2:0]  dac_src_mode_hold;
+
+wire dac_freq_changed = dac_in_follow ?
+    (dac_freq_target[47:20] != dac_freq_hold[47:20]) :
+    (dac_freq_target != dac_freq_hold);
+wire dac_phase_changed = (dac_phase_word_65m != dac_phase_hold);
+wire dac_mode_changed  = (dac_src_mode_65m != dac_src_mode_hold);
+
+always @(posedge clk_65M or negedge sys_rst_n) begin
+    if (!sys_rst_n) begin
+        dac_freq_hold      <= 48'd216519212854;
+        dac_phase_hold     <= 48'd0;
+        dac_src_mode_hold  <= 3'd0;
+    end else if (dac_mode_changed || dac_freq_changed || dac_phase_changed) begin
+        dac_freq_hold     <= dac_freq_target;
+        dac_phase_hold    <= dac_phase_word_65m;
+        dac_src_mode_hold <= dac_src_mode_65m;
+    end
+end
+
+wire [95:0] dac_dds_cfg = {dac_phase_hold, dac_freq_hold};
+
 wire signed [31:0] dac_sine_cos;
-wire signed [13:0] dac_sine = dac_sine_cos[29:16];   // 取正弦 (cos 在 [13:0])
 
 dds_compiler_1 u_dds_dac (
     .aclk                  (clk_65M),
-    .s_axis_config_tvalid  (dac_cfg_valid),
-    .s_axis_config_tdata   (dac_dds_cfg_reg),
+    .s_axis_config_tvalid  (1'b1),
+    .s_axis_config_tdata   (dac_dds_cfg),
     .m_axis_data_tvalid    (),
     .m_axis_data_tdata     (dac_sine_cos),
     .m_axis_phase_tvalid   (),
     .m_axis_phase_tdata    ()
 );
 
+wire signed [13:0] dac_sine = dac_sine_cos[29:16];
+
 // ★ 信号源选择: 0/1/2 用内部DDS (dac_sine), 3/4/5 直接用振荡器1/2/3 的混频参考正弦
-//   (与该振荡器完全同频同相). 振荡器源在自动模式=相干本振, 手动模式=其内部DDS.
-wire signed [13:0] dac_osc_sine = (dac_src_mode_65m == 3'd3) ? osc1_ref_sine :
-                                  (dac_src_mode_65m == 3'd4) ? osc2_ref_sine :
-                                                               osc3_ref_sine;
-wire signed [13:0] dac_src_wave = (dac_src_mode_65m >= 3'd3) ? dac_osc_sine : dac_sine;
+//   振荡器 ref_sine 来自 PSD 深路径, 先寄存再 mux, 避免跨模块长组合路径压时序.
+reg signed [13:0] osc1_ref_sine_r, osc2_ref_sine_r, osc3_ref_sine_r;
+reg signed [13:0] dac_sine_r;
+reg [2:0]         dac_src_mode_wave_r;
+always @(posedge clk_65M or negedge sys_rst_n) begin
+    if (!sys_rst_n) begin
+        osc1_ref_sine_r     <= 14'sd0;
+        osc2_ref_sine_r     <= 14'sd0;
+        osc3_ref_sine_r     <= 14'sd0;
+        dac_sine_r          <= 14'sd0;
+        dac_src_mode_wave_r <= 3'd0;
+    end else begin
+        osc1_ref_sine_r     <= osc1_ref_sine;
+        osc2_ref_sine_r     <= osc2_ref_sine;
+        osc3_ref_sine_r     <= osc3_ref_sine;
+        dac_sine_r          <= dac_sine;
+        dac_src_mode_wave_r <= dac_src_mode_65m;
+    end
+end
+
+wire signed [13:0] dac_osc_sine = (dac_src_mode_wave_r == 3'd3) ? osc1_ref_sine_r :
+                                  (dac_src_mode_wave_r == 3'd4) ? osc2_ref_sine_r :
+                                                                  osc3_ref_sine_r;
+wire signed [13:0] dac_pll_sine = (dac_src_mode_wave_r == 3'd1) ? pll_sin1_r :
+                                  (dac_src_mode_wave_r == 3'd2) ? pll_sin2_r :
+                                                                  dac_sine_r;
+wire signed [13:0] dac_src_wave = (dac_src_mode_wave_r >= 3'd3) ? dac_osc_sine : dac_pll_sine;
 
 // ★ 幅值/偏置: 满量程 ±3V ↔ ±8192 LSB. 缩放 = wave*amp>>13 (amp=8192 即满幅),
 //   再叠加偏置, 最后饱和到 14bit. 流水两拍打断乘加, 不压时序.
@@ -458,6 +556,14 @@ da_wave_send u_da_wave_send (
 //                       系数 n,m 由 OSC1/OSC2/OSC3 下发
 // =========================================================================
 
+// n=m=0 时相干本振恒为 sin(0); CDC 偶发错位时防呆回退到各振荡器默认系数
+wire [7:0] osc1_n_eff = (osc1_n_uart == 8'd0 && osc1_m_uart == 8'd0) ? 8'd2 : osc1_n_uart;
+wire [7:0] osc1_m_eff = (osc1_n_uart == 8'd0 && osc1_m_uart == 8'd0) ? 8'd1 : osc1_m_uart;
+wire [7:0] osc2_n_eff = (osc2_n_uart == 8'd0 && osc2_m_uart == 8'd0) ? 8'd1 : osc2_n_uart;
+wire [7:0] osc2_m_eff = (osc2_n_uart == 8'd0 && osc2_m_uart == 8'd0) ? 8'd2 : osc2_m_uart;
+wire [7:0] osc3_n_eff = (osc3_n_uart == 8'd0 && osc3_m_uart == 8'd0) ? 8'd1 : osc3_n_uart;
+wire [7:0] osc3_m_eff = (osc3_n_uart == 8'd0 && osc3_m_uart == 8'd0) ? 8'd1 : osc3_m_uart;
+
 // ★ 自动模式参考频率 n*F1+m*F2: 48×8 乘加, 在 clk_65M 域寄存一拍打断长路径
 //   (配置准静态, 加 1 拍延迟无影响; 自动模式 PSD 实际用相干本振混频, 此频率字
 //    仅配置其内部 DDS, 不在临界采样路径上).
@@ -468,71 +574,125 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
         f_osc2_auto <= 56'd0;
         f_osc3_auto <= 56'd0;
     end else begin
-        f_osc1_auto <= pll_freq_ch1 * osc1_n_uart + pll_freq_ch2 * osc1_m_uart;
-        f_osc2_auto <= pll_freq_ch1 * osc2_n_uart + pll_freq_ch2 * osc2_m_uart;
-        f_osc3_auto <= pll_freq_ch1 * osc3_n_uart + pll_freq_ch2 * osc3_m_uart;
+        f_osc1_auto <= pll_freq_ch1 * osc1_n_eff + pll_freq_ch2 * osc1_m_eff;
+        f_osc2_auto <= pll_freq_ch1 * osc2_n_eff + pll_freq_ch2 * osc2_m_eff;
+        f_osc3_auto <= pll_freq_ch1 * osc3_n_eff + pll_freq_ch2 * osc3_m_eff;
     end
 end
 
-wire [47:0] ref_freq_21_to_psd;
-wire [47:0] ref_freq_12_to_psd;
-wire [47:0] ref_freq_11_to_psd;
+wire [47:0] ref_freq_21_comb = ref_freq_auto_uart ? f_osc1_auto[47:0] : freq_word_21_uart;
+wire [47:0] ref_freq_12_comb = ref_freq_auto_uart ? f_osc2_auto[47:0] : freq_word_12_uart;
+wire [47:0] ref_freq_11_comb = ref_freq_auto_uart ? f_osc3_auto[47:0] : freq_word_11_uart;
 
-assign ref_freq_21_to_psd = ref_freq_auto_uart ? f_osc1_auto[47:0] : freq_word_21_uart;
-assign ref_freq_12_to_psd = ref_freq_auto_uart ? f_osc2_auto[47:0] : freq_word_12_uart;
-assign ref_freq_11_to_psd = ref_freq_auto_uart ? f_osc3_auto[47:0] : freq_word_11_uart;
+reg [47:0] ref_freq_21_to_psd, ref_freq_12_to_psd, ref_freq_11_to_psd;
+always @(posedge clk_65M or negedge sys_rst_n) begin
+    if (!sys_rst_n) begin
+        ref_freq_21_to_psd <= 48'd0;
+        ref_freq_12_to_psd <= 48'd0;
+        ref_freq_11_to_psd <= 48'd0;
+    end else begin
+        ref_freq_21_to_psd <= ref_freq_21_comb;
+        ref_freq_12_to_psd <= ref_freq_12_comb;
+        ref_freq_11_to_psd <= ref_freq_11_comb;
+    end
+end
 
-// ---- 相干谐波本振 (自动模式: 复用 CH1/CH2 PLL 相位) -----------------------
+// ---- 相干谐波本振: 由 PLL 本振 sin/cos 合成 sin(n·θ1+m·θ2) ------------------
 wire signed [13:0] coh_sin_osc1, coh_cos_osc1;
 wire signed [13:0] coh_sin_osc2, coh_cos_osc2;
 wire signed [13:0] coh_sin_osc3, coh_cos_osc3;
 
 coherent_harm_lo u_coh_lo_osc1 (
-    .clk        (clk_65M),
-    .phase_ch1  (pll_phase_ch1),
-    .phase_ch2  (pll_phase_ch2),
-    .harm_n     (osc1_n_uart),
-    .harm_m     (osc1_m_uart),
-    .harm_sine  (coh_sin_osc1),
-    .harm_cos   (coh_cos_osc1)
+    .clk    (clk_65M),
+    .sin1   (pll_sin1_r),
+    .cos1   (pll_cos1_r),
+    .sin2   (pll_sin2_r),
+    .cos2   (pll_cos2_r),
+    .harm_n (osc1_n_eff),
+    .harm_m (osc1_m_eff),
+    .harm_sine (coh_sin_osc1),
+    .harm_cos  (coh_cos_osc1)
 );
 
 coherent_harm_lo u_coh_lo_osc2 (
-    .clk        (clk_65M),
-    .phase_ch1  (pll_phase_ch1),
-    .phase_ch2  (pll_phase_ch2),
-    .harm_n     (osc2_n_uart),
-    .harm_m     (osc2_m_uart),
-    .harm_sine  (coh_sin_osc2),
-    .harm_cos   (coh_cos_osc2)
+    .clk    (clk_65M),
+    .sin1   (pll_sin1_r),
+    .cos1   (pll_cos1_r),
+    .sin2   (pll_sin2_r),
+    .cos2   (pll_cos2_r),
+    .harm_n (osc2_n_eff),
+    .harm_m (osc2_m_eff),
+    .harm_sine (coh_sin_osc2),
+    .harm_cos  (coh_cos_osc2)
 );
 
 coherent_harm_lo u_coh_lo_osc3 (
-    .clk        (clk_65M),
-    .phase_ch1  (pll_phase_ch1),
-    .phase_ch2  (pll_phase_ch2),
-    .harm_n     (osc3_n_uart),
-    .harm_m     (osc3_m_uart),
-    .harm_sine  (coh_sin_osc3),
-    .harm_cos   (coh_cos_osc3)
+    .clk    (clk_65M),
+    .sin1   (pll_sin1_r),
+    .cos1   (pll_cos1_r),
+    .sin2   (pll_sin2_r),
+    .cos2   (pll_cos2_r),
+    .harm_n (osc3_n_eff),
+    .harm_m (osc3_m_eff),
+    .harm_sine (coh_sin_osc3),
+    .harm_cos  (coh_cos_osc3)
 );
 
-// ---- 三路振荡器输入源选择: 0=CH3, 1=CH4, 2=CH3-CH4 差分 ------------------
-//   差分用 15bit 计算后饱和回 14bit, 防止满量程相减溢出.
-wire signed [14:0] diff_ch34 = $signed(adc_ch3) - $signed(adc_ch4);
+// 自动模式: n·m 为 1·F1 / 1·F2 时直接复用 PLL 本振 (与 CH1/CH2 相位/幅值一致)
+wire signed [13:0] coh1_sin = (ref_freq_auto_uart && osc1_n_eff == 8'd1 && osc1_m_eff == 8'd0) ? pll_sin1_r :
+                              (ref_freq_auto_uart && osc1_n_eff == 8'd0 && osc1_m_eff == 8'd1) ? pll_sin2_r :
+                              coh_sin_osc1;
+wire signed [13:0] coh1_cos = (ref_freq_auto_uart && osc1_n_eff == 8'd1 && osc1_m_eff == 8'd0) ? pll_cos1_r :
+                              (ref_freq_auto_uart && osc1_n_eff == 8'd0 && osc1_m_eff == 8'd1) ? pll_cos2_r :
+                              coh_cos_osc1;
+wire signed [13:0] coh2_sin = (ref_freq_auto_uart && osc2_n_eff == 8'd1 && osc2_m_eff == 8'd0) ? pll_sin1_r :
+                              (ref_freq_auto_uart && osc2_n_eff == 8'd0 && osc2_m_eff == 8'd1) ? pll_sin2_r :
+                              coh_sin_osc2;
+wire signed [13:0] coh2_cos = (ref_freq_auto_uart && osc2_n_eff == 8'd1 && osc2_m_eff == 8'd0) ? pll_cos1_r :
+                              (ref_freq_auto_uart && osc2_n_eff == 8'd0 && osc2_m_eff == 8'd1) ? pll_cos2_r :
+                              coh_cos_osc2;
+wire signed [13:0] coh3_sin = (ref_freq_auto_uart && osc3_n_eff == 8'd1 && osc3_m_eff == 8'd0) ? pll_sin1_r :
+                              (ref_freq_auto_uart && osc3_n_eff == 8'd0 && osc3_m_eff == 8'd1) ? pll_sin2_r :
+                              coh_sin_osc3;
+wire signed [13:0] coh3_cos = (ref_freq_auto_uart && osc3_n_eff == 8'd1 && osc3_m_eff == 8'd0) ? pll_cos1_r :
+                              (ref_freq_auto_uart && osc3_n_eff == 8'd0 && osc3_m_eff == 8'd1) ? pll_cos2_r :
+                              coh_cos_osc3;
+
+wire coh1_pll_direct = ref_freq_auto_uart &&
+    ((osc1_n_eff == 8'd1 && osc1_m_eff == 8'd0) || (osc1_n_eff == 8'd0 && osc1_m_eff == 8'd1));
+wire coh2_pll_direct = ref_freq_auto_uart &&
+    ((osc2_n_eff == 8'd1 && osc2_m_eff == 8'd0) || (osc2_n_eff == 8'd0 && osc2_m_eff == 8'd1));
+wire coh3_pll_direct = ref_freq_auto_uart &&
+    ((osc3_n_eff == 8'd1 && osc3_m_eff == 8'd0) || (osc3_n_eff == 8'd0 && osc3_m_eff == 8'd1));
+
+// ---- 三路振荡器输入源选择 + 打一拍再进 PSD (打断 ADC→混频长路径, 修时序) ------
+reg signed [13:0] adc_ch3_r, adc_ch4_r;
+always @(posedge clk_65M) begin
+    adc_ch3_r <= adc_ch3;
+    adc_ch4_r <= adc_ch4;
+end
+
+wire signed [14:0] diff_ch34 = $signed(adc_ch3_r) - $signed(adc_ch4_r);
 wire signed [13:0] diff_ch34_sat = (diff_ch34 >  15'sd8191) ?  14'sd8191 :
                                    (diff_ch34 < -15'sd8192) ? -14'sd8192 :
                                                                diff_ch34[13:0];
 
-wire signed [13:0] psd_in_osc1 = (osc1_src_uart == 2'd0) ? adc_ch3 :
-                                 (osc1_src_uart == 2'd1) ? adc_ch4 :
-                                                            diff_ch34_sat;
-wire signed [13:0] psd_in_osc2 = (osc2_src_uart == 2'd0) ? adc_ch3 :
-                                 (osc2_src_uart == 2'd1) ? adc_ch4 :
-                                                            diff_ch34_sat;
-wire signed [13:0] psd_in_osc3 = (osc3_src_uart == 2'd0) ? adc_ch3 :
-                                 (osc3_src_uart == 2'd1) ? adc_ch4 :
-                                                            diff_ch34_sat;
+wire signed [13:0] psd_in_osc1_c = (osc1_src_uart == 2'd0) ? adc_ch3_r :
+                                   (osc1_src_uart == 2'd1) ? adc_ch4_r :
+                                                              diff_ch34_sat;
+wire signed [13:0] psd_in_osc2_c = (osc2_src_uart == 2'd0) ? adc_ch3_r :
+                                   (osc2_src_uart == 2'd1) ? adc_ch4_r :
+                                                              diff_ch34_sat;
+wire signed [13:0] psd_in_osc3_c = (osc3_src_uart == 2'd0) ? adc_ch3_r :
+                                   (osc3_src_uart == 2'd1) ? adc_ch4_r :
+                                                              diff_ch34_sat;
+
+reg signed [13:0] psd_in_osc1, psd_in_osc2, psd_in_osc3;
+always @(posedge clk_65M) begin
+    psd_in_osc1 <= psd_in_osc1_c;
+    psd_in_osc2 <= psd_in_osc2_c;
+    psd_in_osc3 <= psd_in_osc3_c;
+end
 
 // ---- 振荡器 1 (默认 2F1+F2) ---------------------------------------------
 wire signed [27:0] dc_x_ch3_21, dc_y_ch3_21;
@@ -545,8 +705,9 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
     .ref_freq    (ref_freq_21_to_psd),
     .ref_phase   (48'd0),
     .use_coh_ref (ref_freq_auto_uart),
-    .coh_ref_sine(coh_sin_osc1),
-    .coh_ref_cos (coh_cos_osc1),
+    .coh_ref_pll_direct(coh1_pll_direct),
+    .coh_ref_sine(coh1_sin),
+    .coh_ref_cos (coh1_cos),
     .tau         (tau21_uart),
     .iir_order   (order21_uart),
     .dc_x        (dc_x_ch3_21),
@@ -569,8 +730,9 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
     .ref_freq    (ref_freq_12_to_psd),
     .ref_phase   (48'd0),
     .use_coh_ref (ref_freq_auto_uart),
-    .coh_ref_sine(coh_sin_osc2),
-    .coh_ref_cos (coh_cos_osc2),
+    .coh_ref_pll_direct(coh2_pll_direct),
+    .coh_ref_sine(coh2_sin),
+    .coh_ref_cos (coh2_cos),
     .tau         (tau12_uart),
     .iir_order   (order12_uart),
     .dc_x        (dc_x_ch3_12),
@@ -593,8 +755,9 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
     .ref_freq    (ref_freq_11_to_psd),
     .ref_phase   (48'd0),
     .use_coh_ref (ref_freq_auto_uart),
-    .coh_ref_sine(coh_sin_osc3),
-    .coh_ref_cos (coh_cos_osc3),
+    .coh_ref_pll_direct(coh3_pll_direct),
+    .coh_ref_sine(coh3_sin),
+    .coh_ref_cos (coh3_cos),
     .tau         (tau11_uart),
     .iir_order   (order11_uart),
     .dc_x        (dc_x_ch3_11),
@@ -908,5 +1071,15 @@ usb_commend u_usb_commend (
 // // =========================================================================
 // assign pl_led1 = eth_idelay_locked ? eth_rx_eth_hdr_activity : 1'b0;
 // assign pl_led2 = eth_idelay_locked ? eth_tx_axis_activity    : eth_idelay_failed;
+
+// eth_lockin_top 未例化时: 输出端口仍需驱动, 并避免 eth_pins.xdc 产生无效时序路径
+assign eth_txc   = 1'b0;
+assign eth_txctl = 1'b0;
+assign eth_txd   = 4'b0;
+assign eth_nrst  = 1'b1;   // PHY 释放复位 (无 MAC 时保持空闲)
+assign eth_mdc   = 1'b0;
+assign eth_mdio  = 1'bz;
+assign pl_led1   = 1'b0;
+assign pl_led2   = 1'b0;
 
 endmodule

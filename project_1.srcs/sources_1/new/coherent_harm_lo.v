@@ -2,52 +2,60 @@
 // =============================================================================
 //  coherent_harm_lo.v
 //
-//  相位相干谐波本振: 由 CH1/CH2 PLL 本振相位实时组合
-//
-//    θ_harm = n·θ1 + m·θ2   (θ1/θ2 为 pll_loop 内 DDS 相位累加器输出)
-//    输出 sin(θ_harm), cos(θ_harm)
-//
-//  与「独立 DDS + 仅借频率字」相比: 相位与 CH1/CH2 锁定本振严格相干,
-//  上电/切模式后 Θ 读数稳定 (不再随机 0~360°).
-//
-//  实现: 每拍用 comb_phase 作 DDS 相位偏移, 频率字=0 (相位完全跟随 CH1/CH2).
+//  sin(n·θ1 + m·θ2), cos(n·θ1 + m·θ2) 由 PLL 本振 sin/cos 合成 (与 CH1/CH2 混频参考一致).
+//  sin(n·θ1+m·θ2) = sin(n·θ1)cos(m·θ2) + cos(n·θ1)sin(m·θ2)
 // =============================================================================
 module coherent_harm_lo (
-    input  wire        clk,
-    input  wire [47:0] phase_ch1,
-    input  wire [47:0] phase_ch2,
-    input  wire [7:0]  harm_n,
-    input  wire [7:0]  harm_m,
-    output wire signed [13:0] harm_sine,
-    output wire signed [13:0] harm_cos
+    input  wire               clk,
+    input  wire signed [13:0] sin1,
+    input  wire signed [13:0] cos1,
+    input  wire signed [13:0] sin2,
+    input  wire signed [13:0] cos2,
+    input  wire [7:0]         harm_n,
+    input  wire [7:0]         harm_m,
+    output reg signed [13:0]  harm_sine,
+    output reg signed [13:0]  harm_cos
 );
 
-    // θ_harm = n·θ1 + m·θ2. 48×8 乘加路径较长, 在 clk 域寄存两级流水打断,
-    // 降低 65M 域组合延迟 (sin/cos 同步延迟, 仅引入恒定相位偏移, 不影响相干性).
-    reg [55:0] prod1, prod2;
-    reg [47:0] comb_phase;
+    function signed [13:0] sat14;
+        input signed [27:0] v;
+        begin
+            if (v > 28'sd8191)
+                sat14 = 14'sd8191;
+            else if (v < -28'sd8192)
+                sat14 = -14'sd8192;
+            else
+                sat14 = v[13:0];
+        end
+    endfunction
+
+    reg [7:0] n_r, m_r;
     always @(posedge clk) begin
-        prod1      <= phase_ch1 * harm_n;
-        prod2      <= phase_ch2 * harm_m;
-        comb_phase <= prod1[47:0] + prod2[47:0];
+        n_r <= harm_n;
+        m_r <= harm_m;
     end
 
-    // {phase_offset, phase_increment}; increment=0 → 仅相位查找, 不独立积分
-    wire [95:0] harm_dds_cfg = {comb_phase, 48'd0};
+    wire signed [13:0] sin_n, cos_n, sin_m, cos_m;
 
-    wire signed [31:0] harm_sine_cos;
-
-    dds_compiler_1 u_dds_harm (
-        .aclk                  (clk),
-        .s_axis_config_tvalid  (1'b1),
-        .s_axis_config_tdata   (harm_dds_cfg),
-        .m_axis_data_tvalid    (),
-        .m_axis_data_tdata     (harm_sine_cos),
-        .m_axis_phase_tvalid   (),
-        .m_axis_phase_tdata    ()
+    harm_sin_cos_n #(.MAX_N(8)) u_hn (
+        .clk(clk), .sin_a(sin1), .cos_a(cos1), .n_in(n_r),
+        .sin_na(sin_n), .cos_na(cos_n)
     );
 
-    assign harm_sine = harm_sine_cos[29:16];
-    assign harm_cos  = harm_sine_cos[13:0];
+    harm_sin_cos_n #(.MAX_N(8)) u_hm (
+        .clk(clk), .sin_a(sin2), .cos_a(cos2), .n_in(m_r),
+        .sin_na(sin_m), .cos_na(cos_m)
+    );
+
+    wire signed [27:0] sp = sin_n * cos_m + cos_n * sin_m;
+    wire signed [27:0] cp = cos_n * cos_m - sin_n * sin_m;
+
+    reg signed [13:0] harm_sin_r, harm_cos_r;
+    always @(posedge clk) begin
+        harm_sin_r <= sat14(sp >>> 13);
+        harm_cos_r <= sat14(cp >>> 13);
+        harm_sine  <= harm_sin_r;
+        harm_cos   <= harm_cos_r;
+    end
 
 endmodule

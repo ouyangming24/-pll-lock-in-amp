@@ -8,9 +8,9 @@ PyQt5 主窗口 ── 商用锁相放大器风格 GUI
 │ 通道1 PLL 锁定频率 F1(t)        │ 通道2 PLL 锁定频率 F2(t)        │
 │ F1 = 1234.567 Hz  [🟢锁定]     │ F2 = 5678.901 Hz  [🟢锁定]     │
 ├────────────────────────────────┼────────────────────────────────┤
-│ 通道3 谐波 + DC (多曲线)        │ 通道3 ADC 输入波形             │
+│ 解调值 (多曲线)                 │ 通道3 ADC 输入波形             │
 │  信号▼ 分量▼ [+添加] [清空]    │                                │
-│  [● 2F1+F2·X ×] [● F1+F2·R ×] │                                │
+│  [● 振荡器1·X ×] [● 振荡器3·R ×]│                                │
 └────────────────────────────────┴────────────────────────────────┘
 """
 
@@ -490,77 +490,171 @@ class MainWindow(QMainWindow):
         self._set_dark_theme()
 
     # ------------------------------------------------------------- 参数面板
-    def _build_param_panel(self) -> QWidget:
-        panel = QWidget()
-        # ★ 参数面板宽度: 用 minimumWidth + 可拉伸策略, 让它在 QScrollArea 里
-        #   始终填满 viewport (而不是固定死宽度导致右侧空白 / 被滚动条裁切).
-        #   配合 IIR 行的弹性 fc 列, 拉宽时内容自动变宽, 永不遮挡单位 / 按钮.
-        panel.setMinimumWidth(450)
-        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        v = QVBoxLayout(panel)
-        v.setSpacing(6)
+    def _section_label(self, text: str, *, highlight: bool = False) -> QLabel:
+        """分组内小节标题 (橙色框内用暖色, 普通框用蓝色)."""
+        color = "#f9a" if highlight else "#9bd"
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            f"color: {color}; font-size: 9pt; font-weight: bold;"
+            " padding: 6px 0 2px 0; border-bottom: 1px solid #444;")
+        return lbl
 
-        gb_pll = QGroupBox("PLL 锁相环参数")
-        g_pll = QGridLayout(gb_pll)
+    def _setup_tau_grid(self, grid: QGridLayout):
+        grid.setVerticalSpacing(6)
+        grid.setHorizontalSpacing(8)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 0)
+        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(3, 0)
+        grid.setColumnStretch(4, 0)
+
+    def _setup_order_grid(self, grid: QGridLayout):
+        grid.setVerticalSpacing(6)
+        grid.setHorizontalSpacing(8)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 0)
+        grid.setColumnStretch(3, 0)
+        grid.setColumnStretch(4, 1)
+
+    def _build_pll_settings_group(self) -> QGroupBox:
+        """锁相环相关参数: 橙色高亮框, 集中环路/扫频/标定/平滑/阈值."""
+        gb = QGroupBox("锁相环设置")
+        gb.setObjectName("gbHighlight")
+        gb.setToolTip(
+            "CH1/CH2 PLL 环路增益、IIR 时间常数、扫频起点、自动锁定、\n"
+            "相位偏移、锁定阈值、时基标定与读数平滑 — 与频率捕获/锁定直接相关."
+        )
+        v = QVBoxLayout(gb)
+        v.setSpacing(8)
+        v.setContentsMargins(10, 14, 10, 10)
+
+        v.addWidget(self._section_label("环路增益 (KP / KI)", highlight=True))
+        g_pll = QGridLayout()
         self._setup_normal_grid(g_pll)
         self.ed_kp = self._mk_param_row(g_pll, 0, "KP", "500", "KP")
         self.ed_ki = self._mk_param_row(g_pll, 1, "KI", "50", "KI")
-        v.addWidget(gb_pll)
+        v.addLayout(g_pll)
 
-        gb_tau = QGroupBox(f"⚙ IIR 滤波时间常数  (k = {TAU_MIN} ~ {TAU_MAX}, fs = {IIR_FS_HZ/1e6:.0f} MHz)")
-        gb_tau.setObjectName("gbHighlight")
-        gb_tau.setToolTip(
-            "k 是 IIR 一阶 EMA 的位移量 (shift_k), 滤波器系数 α = 2^-k.\n"
+        tau_tip = (
+            f"k 是 IIR 一阶 EMA 的位移量 (shift_k), 滤波器系数 α = 2^-k.\n"
+            f"采样率 fs = {IIR_FS_HZ/1e6:.0f} MHz (CIC 降采样后).\n"
+            "k 越大 → 截止频率 fc 越低, 滤波越慢, 噪声越小."
+        )
+        v.addWidget(self._section_label(
+            f"IIR 时间常数 CH1/CH2  (k = {TAU_MIN} ~ {TAU_MAX})", highlight=True))
+        g_tau_pll = QGridLayout()
+        self._setup_tau_grid(g_tau_pll)
+        self.ed_t1x = self._mk_tau_row(g_tau_pll, 0, "CH1_X (PLL)", "20", "TAU1X")
+        self.ed_t1y = self._mk_tau_row(g_tau_pll, 1, "CH1_Y (PLL)", "8",  "TAU1Y")
+        self.ed_t2x = self._mk_tau_row(g_tau_pll, 2, "CH2_X (PLL)", "20", "TAU2X")
+        self.ed_t2y = self._mk_tau_row(g_tau_pll, 3, "CH2_Y (PLL)", "8",  "TAU2Y")
+        for ed in (self.ed_t1x, self.ed_t1y, self.ed_t2x, self.ed_t2y):
+            ed.setToolTip(tau_tip)
+        v.addLayout(g_tau_pll)
+
+        v.addWidget(self._section_label("扫频起始频率 (Hz)", highlight=True))
+        g_freq = QGridLayout()
+        self._setup_normal_grid(g_freq)
+        self.ed_f1 = self._mk_freq_row(g_freq, 0, "F1 起点", "50000", "FRQ2")
+        self.ed_f2 = self._mk_freq_row(g_freq, 1, "F2 起点", "60000", "FRQ3")
+        v.addLayout(g_freq)
+
+        auto_tip = (
+            "填好对应起点后点此:\n"
+            "① 下发中心频率 + 稳健捕获参数 → ② 等待硬件锁定 →\n"
+            "③ 按幅度自动整定 KP/KI (软件 AGC) → ④ 频率连续稳定后,\n"
+            "自动切到最终参数 (KP=50, KI=5, tau_x=20, tau_y=15) + 大平滑,\n"
+            "读数稳到 mHz. 过程中再次点击 = 取消.\n"
+            "注意: KP/KI 与锁定阈值为双通道共享, 给某通道做自动锁定时\n"
+            "捕获期会临时改变全局增益, 可能短暂扰动另一已锁通道."
+        )
+        v.addWidget(self._section_label("一键自动锁定", highlight=True))
+        auto_h = QHBoxLayout()
+        self.btn_auto_lock = QPushButton("⚡ 一键自动锁定 CH1")
+        self.btn_auto_lock.setStyleSheet(
+            "background:#2a6cc0; color:#fff; font-weight:bold; padding:6px;")
+        self.btn_auto_lock.setToolTip(auto_tip)
+        self.btn_auto_lock.clicked.connect(lambda: self._on_auto_lock_clicked(1))
+        self.btn_auto_lock2 = QPushButton("⚡ 一键自动锁定 CH2")
+        self.btn_auto_lock2.setStyleSheet(
+            "background:#2a6cc0; color:#fff; font-weight:bold; padding:6px;")
+        self.btn_auto_lock2.setToolTip(auto_tip)
+        self.btn_auto_lock2.clicked.connect(lambda: self._on_auto_lock_clicked(2))
+        auto_h.addWidget(self.btn_auto_lock)
+        auto_h.addWidget(self.btn_auto_lock2)
+        v.addLayout(auto_h)
+
+        v.addWidget(self._section_label("相位偏移", highlight=True))
+        g_phs = QGridLayout()
+        self._setup_normal_grid(g_phs)
+        self.ed_phs = self._mk_param_row(g_phs, 0, "PHAS", "0", "PHAS")
+        v.addLayout(g_phs)
+
+        v.addWidget(self._section_label("锁定阈值 (按信号强度调)", highlight=True))
+        lock_tip = (
+            "信号强 (≥25%满量程) → 800000 / 3000000\n"
+            "中等 / 不知道       → 100000 / 300000  (默认)\n"
+            "信号弱 (<5%满量程)   → 20000  / 50000\n"
+            "若锁出的频率一直在中心频率附近抖动, 通常是阈值太大, 请调小."
+        )
+        g_lock = QGridLayout()
+        self._setup_normal_grid(g_lock)
+        self.ed_swy = self._mk_param_row(g_lock, 0, "SWEEP_Y", "100000", "LOCKSWY")
+        self.ed_thx = self._mk_param_row(g_lock, 1, "LOCK_X",  "300000", "LOCKTHX")
+        for ed in (self.ed_swy, self.ed_thx):
+            ed.setToolTip(lock_tip)
+        v.addLayout(g_lock)
+
+        v.addWidget(self._section_label("时基标定 (晶振 ppm 修正)", highlight=True))
+        self._add_clk_cal_section(v)
+
+        v.addWidget(self._section_label("锁定频率平滑 (读数精度)", highlight=True))
+        self._add_freq_smooth_section(v)
+
+        return gb
+
+    def _build_osc_settings_group(self) -> QGroupBox:
+        """振荡器频率/系数/输入源 + 解调 IIR 时间常数与阶数."""
+        gb = QGroupBox("振荡器设置")
+        gb.setObjectName("gbOsc")
+        gb.setToolTip(
+            "通道3 三路振荡器参考频率、输入源选择,\n"
+            "以及各振荡器与直流通路的 IIR 滤波时间常数 / 阶数."
+        )
+        v = QVBoxLayout(gb)
+        v.setSpacing(8)
+        v.setContentsMargins(10, 14, 10, 10)
+
+        v.addWidget(self._section_label("频率 / 系数 / 输入源"))
+        self._add_ch3_osc_section(v)
+
+        tau_tip = (
+            f"k 是 IIR 一阶 EMA 的位移量 (shift_k), 滤波器系数 α = 2^-k.\n"
             f"采样率 fs = {IIR_FS_HZ/1e6:.0f} MHz (CIC 降采样后).\n"
             "k 越大 → 截止频率 fc 越低, 滤波越慢, 噪声越小.\n"
             "k = 0 表示无滤波 (全通), k 范围 0~31."
         )
-        g_tau = QGridLayout(gb_tau)
-        g_tau.setVerticalSpacing(6)
-        g_tau.setHorizontalSpacing(8)
-        g_tau.setContentsMargins(10, 14, 10, 10)
-        # ★ 所有列固定: Label(95) + LineEdit(115) + fc(145) + Btn(42) + 3×间距(24) + 边距(20) = 441
-        #   panel 固定 460, 边距余 19px 自然贴右边, 完全不受 resize 影响.
-        g_tau.setColumnStretch(0, 0)
-        g_tau.setColumnStretch(1, 0)
-        g_tau.setColumnStretch(2, 1)   # ★ fc 列弹性: 吸收富余, 单位完整且按钮始终可见
-        g_tau.setColumnStretch(3, 0)
-        g_tau.setColumnStretch(4, 0)
-        self.ed_t1x  = self._mk_tau_row(g_tau, 0,  "CH1_X (PLL)",       "20", "TAU1X")
-        self.ed_t1y  = self._mk_tau_row(g_tau, 1,  "CH1_Y (PLL)",       "8",  "TAU1Y")
-        self.ed_t2x  = self._mk_tau_row(g_tau, 2,  "CH2_X (PLL)",       "20", "TAU2X")
-        self.ed_t2y  = self._mk_tau_row(g_tau, 3,  "CH2_Y (PLL)",       "8",  "TAU2Y")
-        # 通道3 三路谐波: X/Y 共用单一 TC (与商用 SR830 等保持一致), 不分开设置
-        self.ed_t21  = self._mk_tau_row(g_tau, 4,  "2F1+F2 (谐波)",     "20", "TAU21")
-        self.ed_t12  = self._mk_tau_row(g_tau, 5,  "F1+2F2 (谐波)",     "20", "TAU12")
-        self.ed_t11  = self._mk_tau_row(g_tau, 6,  "F1+F2  (谐波)",     "20", "TAU11")
-        self.ed_tdc  = self._mk_tau_row(g_tau, 7,  "DC (无混频)",       "20", "TAUDC")
-        v.addWidget(gb_tau)
+        v.addWidget(self._section_label(
+            f"IIR 时间常数  (k = {TAU_MIN} ~ {TAU_MAX}, fs = {IIR_FS_HZ/1e6:.0f} MHz)"))
+        g_tau = QGridLayout()
+        self._setup_tau_grid(g_tau)
+        self.ed_t21 = self._mk_tau_row(g_tau, 0, "振荡器1:", "20", "TAU21")
+        self.ed_t12 = self._mk_tau_row(g_tau, 1, "振荡器2:", "20", "TAU12")
+        self.ed_t11 = self._mk_tau_row(g_tau, 2, "振荡器3:", "20", "TAU11")
+        self.ed_tdc = self._mk_tau_row(g_tau, 3, "直流:",    "20", "TAUDC")
+        for ed in (self.ed_t21, self.ed_t12, self.ed_t11, self.ed_tdc):
+            ed.setToolTip(tau_tip)
+        v.addLayout(g_tau)
 
-        # ★ IIR 阶数 (CH3 各路独立) — 每路独立选择 1..4 阶
-        #   实现: N 个相同 tau 的一阶 EMA 串联 (与 SR860 / Zurich MFLI 每通道独立 slope 一致).
-        #   每加一阶, 阻带衰减斜率 +6 dB/oct, 建立时间 ≈ N · τ_单阶.
-        gb_ord = QGroupBox("⚙ IIR 阶数 (CH3 各路独立, 1..4 阶 = 6/12/18/24 dB/oct)")
-        gb_ord.setObjectName("gbHighlight")
-        gb_ord.setToolTip(
-            "通道3 每路 IIR 滤波器单独设置阶数 (3 路谐波 + DC 共 4 个独立设置).\n"
-            "实现: N 个相同 tau 的一阶 EMA 级联 (无过冲, 时域单调收敛).\n"
-            "阶数 ↑  → 阻带斜率 ↑ (噪声抑制 ↑), 建立时间 ≈ N · τ_单阶."
-        )
-        g_ord = QGridLayout(gb_ord)
-        g_ord.setVerticalSpacing(6)
-        g_ord.setHorizontalSpacing(8)
-        g_ord.setContentsMargins(10, 14, 10, 10)
-        # ★ 全部固定宽度, 末尾加吸收列消化富余
-        g_ord.setColumnStretch(0, 0)
-        g_ord.setColumnStretch(1, 0)
-        g_ord.setColumnStretch(3, 0)
-        g_ord.setColumnStretch(4, 1)
-        self.cb_order21 = self._mk_order_row(g_ord, 0, "2F1+F2 (谐波)", "ORD21")
-        self.cb_order12 = self._mk_order_row(g_ord, 1, "F1+2F2 (谐波)", "ORD12")
-        self.cb_order11 = self._mk_order_row(g_ord, 2, "F1+F2  (谐波)", "ORD11")
-        self.cb_orderdc = self._mk_order_row(g_ord, 3, "DC (无混频)",   "ORDDC")
-        # 便捷功能: "全部统一为 ▼" → 一键把 4 个下拉框设为相同值并立即下发
+        v.addWidget(self._section_label("IIR 阶数 (1..4 阶 = 6/12/18/24 dB/oct)"))
+        g_ord = QGridLayout()
+        self._setup_order_grid(g_ord)
+        self.cb_order21 = self._mk_order_row(g_ord, 0, "振荡器1:", "ORD21")
+        self.cb_order12 = self._mk_order_row(g_ord, 1, "振荡器2:", "ORD12")
+        self.cb_order11 = self._mk_order_row(g_ord, 2, "振荡器3:", "ORD11")
+        self.cb_orderdc = self._mk_order_row(g_ord, 3, "直流:",    "ORDDC")
         lbl_quick = QLabel("快捷统一")
         lbl_quick.setStyleSheet("font-size: 10pt; color: #f9a;")
         lbl_quick.setFixedWidth(95)
@@ -583,73 +677,28 @@ class MainWindow(QMainWindow):
             " background:#a36; color:#fff;")
         btn_apply_all.clicked.connect(self._on_apply_order_all)
         g_ord.addWidget(btn_apply_all, 4, 3)
-        v.addWidget(gb_ord)
+        v.addLayout(g_ord)
 
-        gb_freq = QGroupBox("通道频率扫频起点 (Hz)")
-        g_freq = QGridLayout(gb_freq)
-        self._setup_normal_grid(g_freq)
-        self.ed_f1 = self._mk_freq_row(g_freq, 0, "F1 起点", "50000", "FRQ2")
-        self.ed_f2 = self._mk_freq_row(g_freq, 1, "F2 起点", "60000", "FRQ3")
-        v.addWidget(gb_freq)
+        return gb
 
-        # ★ 一键自动锁定 (CH1 / CH2)
-        auto_tip = (
-            "填好对应起点后点此:\n"
-            "① 下发中心频率 + 稳健捕获参数 → ② 等待硬件锁定 →\n"
-            "③ 按幅度自动整定 KP/KI (软件 AGC) → ④ 频率连续稳定后,\n"
-            "自动切到最终参数 (KP=50, KI=5, tau_x=20, tau_y=15) + 大平滑,\n"
-            "读数稳到 mHz. 过程中再次点击 = 取消.\n"
-            "注意: KP/KI 与锁定阈值为双通道共享, 给某通道做自动锁定时\n"
-            "捕获期会临时改变全局增益, 可能短暂扰动另一已锁通道."
-        )
-        auto_h = QHBoxLayout()
-        self.btn_auto_lock = QPushButton("⚡ 一键自动锁定 CH1")
-        self.btn_auto_lock.setStyleSheet(
-            "background:#2a6cc0; color:#fff; font-weight:bold; padding:6px;")
-        self.btn_auto_lock.setToolTip(auto_tip)
-        self.btn_auto_lock.clicked.connect(lambda: self._on_auto_lock_clicked(1))
-        self.btn_auto_lock2 = QPushButton("⚡ 一键自动锁定 CH2")
-        self.btn_auto_lock2.setStyleSheet(
-            "background:#2a6cc0; color:#fff; font-weight:bold; padding:6px;")
-        self.btn_auto_lock2.setToolTip(auto_tip)
-        self.btn_auto_lock2.clicked.connect(lambda: self._on_auto_lock_clicked(2))
-        auto_h.addWidget(self.btn_auto_lock)
-        auto_h.addWidget(self.btn_auto_lock2)
-        v.addLayout(auto_h)
+    def _build_param_panel(self) -> QWidget:
+        panel = QWidget()
+        # ★ 参数面板宽度: 用 minimumWidth + 可拉伸策略, 让它在 QScrollArea 里
+        #   始终填满 viewport (而不是固定死宽度导致右侧空白 / 被滚动条裁切).
+        #   配合 IIR 行的弹性 fc 列, 拉宽时内容自动变宽, 永不遮挡单位 / 按钮.
+        panel.setMinimumWidth(450)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        v = QVBoxLayout(panel)
+        v.setSpacing(6)
 
-        # ★ 信号发生器
+        v.addWidget(self._build_pll_settings_group())
+        v.addWidget(self._build_osc_settings_group())
         v.addWidget(self._build_dac_group())
 
-        # ★ 时基(晶振)标定: 修正锁定频率读数的固定 ppm 误差
-        v.addWidget(self._build_clk_cal_group())
-
-        # ★ 锁定频率后置平滑: 读数精度与环路带宽解耦 (环路调快, 读数仍稳)
-        v.addWidget(self._build_freq_smooth_group())
-
-        v.addWidget(self._build_ch3_osc_group())
         self.rb_ref_auto.toggled.connect(self._on_ref_mode_toggled)
         self.ed_f1.textChanged.connect(self._on_f1f2_text_changed)
         self.ed_f2.textChanged.connect(self._on_f1f2_text_changed)
         self._on_ref_mode_toggled(True)
-
-        gb_phs = QGroupBox("相位偏移 (FRQ2 通道)")
-        g_phs = QGridLayout(gb_phs)
-        self._setup_normal_grid(g_phs)
-        self.ed_phs = self._mk_param_row(g_phs, 0, "PHAS", "0", "PHAS")
-        v.addWidget(gb_phs)
-
-        gb_lock = QGroupBox("PLL 锁定阈值 (按信号强度调)")
-        gb_lock.setToolTip(
-            "信号强 (≥25%满量程) → 800000 / 3000000\n"
-            "中等 / 不知道       → 100000 / 300000  (默认)\n"
-            "信号弱 (<5%满量程)   → 20000  / 50000\n"
-            "若锁出的频率一直在中心频率附近抖动, 通常是阈值太大, 请调小."
-        )
-        g_lock = QGridLayout(gb_lock)
-        self._setup_normal_grid(g_lock)
-        self.ed_swy = self._mk_param_row(g_lock, 0, "SWEEP_Y", "100000", "LOCKSWY")
-        self.ed_thx = self._mk_param_row(g_lock, 1, "LOCK_X",  "300000", "LOCKTHX")
-        v.addWidget(gb_lock)
 
         btn_send_all = QPushButton("⟹ 一键下发所有参数")
         btn_send_all.setStyleSheet("background:#3a5; color:white; font-weight:bold; padding:6px;")
@@ -703,7 +752,7 @@ class MainWindow(QMainWindow):
         """
         lbl = QLabel(label)
         lbl.setStyleSheet("font-size: 10pt;")
-        lbl.setFixedWidth(105)            # ★ 105 容纳 "2F1+F2 (谐波)" 等 CJK 标签, 不被截断
+        lbl.setFixedWidth(105)            # ★ 105 容纳 "振荡器1" 等 CJK 标签, 不被截断
         grid.addWidget(lbl, row, 0)
 
         ed = QLineEdit(default)
@@ -838,15 +887,11 @@ class MainWindow(QMainWindow):
     #   - 切换时, 若是切到"自动", 立刻用 F1/F2 重算一次写回输入框 (不会触发
     #     textChanged 递归, 因为我们没监听 ed_fr21/12/11 的 textChanged).
     #   - 若 F1/F2 输入非法 (例如空字符串), _update_ref_freqs_from_f1f2 不抛异常,
-    def _build_ch3_osc_group(self) -> QGroupBox:
+    def _add_ch3_osc_section(self, parent: QVBoxLayout):
         """通道3 三路振荡器: 自动=n×F1+m×F2 系数下发 OSCx; 手动=绝对频率 FRQxx."""
-        gb = QGroupBox("通道3 振荡器 (谐波参考)")
-        gb.setToolTip(
-            "自动 (REFMODE:1): 设置 ×F1 / ×F2 系数, 点 ▶ 发 OSC1/2/3.\n"
-            "  FPGA 用 CH1/CH2 PLL 本振相位相干组合 n·θ1+m·θ2 (上电后 Θ 稳定).\n"
-            "手动 (REFMODE:0): 直接指定参考频率 (Hz), 发 FRQ21/12/11."
-        )
-        outer = QVBoxLayout(gb)
+        outer = QVBoxLayout()
+        outer.setSpacing(6)
+        outer.setContentsMargins(0, 0, 0, 0)
 
         mode_h = QHBoxLayout()
         mode_h.addWidget(QLabel("模式:"))
@@ -864,23 +909,46 @@ class MainWindow(QMainWindow):
         self.btn_send_all_osc = btn_all
         outer.addWidget(btn_all)
 
-        grid = QGridLayout()
-        grid.setVerticalSpacing(6)
-        grid.setHorizontalSpacing(6)
-        grid.setContentsMargins(4, 4, 4, 4)
-
         self.ch3_oscs = []
         osc_defs = [
-            ("振荡器 1", "OSC1", "FRQ21", "OSRC1", "160000", 2, 1),
-            ("振荡器 2", "OSC2", "FRQ12", "OSRC2", "170000", 1, 2),
-            ("振荡器 3", "OSC3", "FRQ11", "OSRC3", "110000", 1, 1),
+            ("振荡器1", "OSC1", "FRQ21", "OSRC1", "160000", 2, 1),
+            ("振荡器2", "OSC2", "FRQ12", "OSRC2", "170000", 1, 2),
+            ("振荡器3", "OSC3", "FRQ11", "OSRC3", "110000", 1, 1),
         ]
-        for row, (label, osc_cmd, frq_cmd, osrc_cmd, frq_def, n_def, m_def) in enumerate(osc_defs):
-            lbl = QLabel(label)
-            lbl.setStyleSheet("font-size: 10pt;")
-            lbl.setFixedWidth(72)
-            grid.addWidget(lbl, row, 0)
+        for label, osc_cmd, frq_cmd, osrc_cmd, frq_def, n_def, m_def in osc_defs:
+            row_w = QWidget()
+            rh = QHBoxLayout(row_w)
+            rh.setContentsMargins(0, 0, 0, 0)
+            rh.setSpacing(6)
 
+            lbl = QLabel(f"{label}:")
+            lbl.setStyleSheet("font-size: 10pt;")
+            lbl.setFixedWidth(78)
+            rh.addWidget(lbl)
+
+            ed_frq = QLineEdit(frq_def)
+            ed_frq.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
+            ed_frq.setAlignment(Qt.AlignCenter)
+            ed_frq.setFixedWidth(100)
+            ed_frq.setFixedHeight(30)
+            ed_frq.setToolTip("手动模式: 直接指定参考频率 (Hz)")
+            rh.addWidget(ed_frq)
+
+            btn = QPushButton("▶")
+            btn.setFixedSize(36, 30)
+            btn.setStyleSheet("font-size: 11pt; font-weight: bold;")
+            rh.addWidget(btn)
+
+            cb_src = QComboBox()
+            cb_src.addItem("CH3", 0)
+            cb_src.addItem("CH4", 1)
+            cb_src.addItem("CH3-CH4", 2)
+            cb_src.setFixedHeight(30)
+            cb_src.setFixedWidth(88)
+            cb_src.setToolTip("该振荡器解调用的输入信号源:\nCH3 (默认) / CH4 / CH3-CH4 差分输入")
+            rh.addWidget(cb_src)
+
+            # ×F1 / ×F2 系数放在输入源等设置参数之后
             auto_w = QWidget()
             ah = QHBoxLayout(auto_w)
             ah.setContentsMargins(0, 0, 0, 0)
@@ -895,33 +963,14 @@ class MainWindow(QMainWindow):
             lbl_hz = QLabel("≈ --- Hz")
             lbl_hz.setStyleSheet("font-size: 10pt; color: #8ad;")
             lbl_hz.setMinimumWidth(110)
-            ah.addWidget(QLabel("×F1"))
             ah.addWidget(ed_n)
-            ah.addWidget(QLabel("+ ×F2"))
+            ah.addWidget(QLabel("× F1"))
+            ah.addWidget(QLabel("+"))
             ah.addWidget(ed_m)
+            ah.addWidget(QLabel("× F2"))
             ah.addWidget(lbl_hz)
-            ah.addStretch()
-            grid.addWidget(auto_w, row, 1)
-
-            ed_frq = QLineEdit(frq_def)
-            ed_frq.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
-            ed_frq.setAlignment(Qt.AlignCenter)
-            ed_frq.setFixedHeight(30)
-            grid.addWidget(ed_frq, row, 2)
-
-            btn = QPushButton("▶")
-            btn.setFixedSize(36, 30)
-            btn.setStyleSheet("font-size: 11pt; font-weight: bold;")
-            grid.addWidget(btn, row, 3)
-
-            # ★ 输入信号源选择: CH3(默认) / CH4 / CH3-CH4 差分 (OSRCx 命令)
-            cb_src = QComboBox()
-            cb_src.addItem("CH3", 0)
-            cb_src.addItem("CH4", 1)
-            cb_src.addItem("CH3-CH4", 2)
-            cb_src.setFixedHeight(30)
-            cb_src.setToolTip("该振荡器解调用的输入信号源:\nCH3 (默认) / CH4 / CH3-CH4 差分输入")
-            grid.addWidget(cb_src, row, 4)
+            rh.addWidget(auto_w)
+            rh.addStretch()
 
             osc = {
                 "ed_n": ed_n, "ed_m": ed_m, "lbl_hz": lbl_hz,
@@ -931,18 +980,14 @@ class MainWindow(QMainWindow):
             }
             ed_n.textChanged.connect(self._on_osc_coef_changed)
             ed_m.textChanged.connect(self._on_osc_coef_changed)
-            # ★ 编辑完成 (回车/失焦) 即自动下发该路系数, 避免"改了框没下发,
-            #   硬件仍是旧系数 → 三路参考不一致"的坑.
             ed_n.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
             ed_m.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
             ed_frq.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
-            # ★ 切换输入源立即下发 OSRCx
             cb_src.currentIndexChanged.connect(lambda _i=0, o=osc: self._send_osc_src(o))
             self.ch3_oscs.append(osc)
             btn.clicked.connect(lambda _c=False, o=osc: self._send_one_osc(o))
-
-        outer.addLayout(grid)
-        return gb
+            outer.addWidget(row_w)
+        parent.addLayout(outer)
 
     def _on_ref_mode_toggled(self, is_auto: bool):
         """切换自动(系数+OSC)/手动(频率+FRQ)面板."""
@@ -962,10 +1007,32 @@ class MainWindow(QMainWindow):
         auto = self.rb_ref_auto.isChecked()
         mode = 1 if auto else 0
         self.dev.send_command(f"REFMODE:{mode}")
+        # 手动模式: 用 PLL 实测频率刷新 FRQ 并下发, 避免默认频率与锁定值偏差导致幅值≈0
+        if not auto and getattr(self.dev, "is_connected", False):
+            self._push_manual_frq_from_pll(quiet=True)
         if quiet:
             return
-        label = "硬件自动 (n·F1+m·F2)" if auto else "手动 (FRQ21/12/11)"
+        label = "硬件自动 (n·F1+m·F2)" if auto else "手动 (PLL 频率 → FRQ21/12/11)"
         self.on_log(f"[i] 通道3 ref 来源 = {label} (REFMODE:{mode})")
+
+    def _push_manual_frq_from_pll(self, quiet: bool = False):
+        """手动模式: 按 OSC 系数与 PLL 锁定频率计算各路 FRQxx 并下发."""
+        src = self._ref_source_f1f2()
+        if src is None or not getattr(self, "ch3_oscs", None):
+            return
+        f1, f2, src_tag = src
+        for osc in self.ch3_oscs:
+            try:
+                n = int(osc["ed_n"].text())
+                m = int(osc["ed_m"].text())
+                hz = n * f1 + m * f2
+                osc["ed_frq"].setText(str(int(round(hz))))
+                self._send_freq_cmd(osc["frq_cmd"], osc["ed_frq"].text())
+            except ValueError:
+                continue
+        if not quiet:
+            tag = "锁定频率" if src_tag == "lock" else "标称 F1/F2"
+            self.on_log(f"[i] 手动模式已按 {tag} 刷新并下发 FRQ21/12/11")
 
     def _pack_osc_val(self, n: int, m: int) -> int:
         return ((n & 0xFF) << 8) | (m & 0xFF)
@@ -1091,18 +1158,9 @@ class MainWindow(QMainWindow):
     # (经 clk_wiz 倍频到 65MHz). 这是纯比例误差 (f_显 = f_真 / k, 过原点, 无截距),
     # 所以标定一个点即可确定 k = f_真 / f_显; 填多个点取平均更稳.
     #   修正后: 显示 pll_freq_hz *= k ; 下发 word = hz_to_freq_word(hz / k).
-    def _build_clk_cal_group(self) -> QGroupBox:
-        gb = QGroupBox("时基标定 (晶振 ppm 修正)")
-        gb.setObjectName("gbHighlight")
-        gb.setToolTip(
-            "锁定频率的'基础误差'来自板载晶振相对理想 65MHz 的 ppm 偏差.\n"
-            "纯比例误差 → 标定 1 个点即可, 多填几点取平均更稳.\n"
-            "用法: '设定真值'填信号源真实频率, '实测显示'填 GUI 锁定稳定后的读数,\n"
-            "点'计算并应用'即可; 也可直接在下方输入 ppm 手动设置.\n"
-            "提示: 标定要等开机十几分钟、温度稳定后做, 用尽量准的信号源."
-        )
-        outer = QVBoxLayout(gb)
-        outer.setContentsMargins(10, 12, 10, 8)
+    def _add_clk_cal_section(self, parent: QVBoxLayout):
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
 
         grid = QGridLayout()
@@ -1159,7 +1217,7 @@ class MainWindow(QMainWindow):
         self.lbl_clk_cal = QLabel("当前: k = 1.0000000  (时钟偏差 +0.00 ppm)")
         self.lbl_clk_cal.setStyleSheet("font-size:9pt; color:#5d5;")
         outer.addWidget(self.lbl_clk_cal)
-        return gb
+        parent.addLayout(outer)
 
     def _set_clk_cal(self, k: float, note: str = ""):
         """统一设置时基标定系数 k, 刷新 UI 与日志. 越界 (±10万ppm) 拒绝."""
@@ -1210,17 +1268,9 @@ class MainWindow(QMainWindow):
     # 可以调快 (快速锁定), 读数精度则靠这级平均做到 mHz. 关键是大跳变检测:
     # 当瞬时值偏离窗口均值超过阈值 (换频 / 大跳变), 立即清空窗口跟随新值,
     # 不被旧频率拖累 —— 这正是"大跳变也能快速稳定"的做法.
-    def _build_freq_smooth_group(self) -> QGroupBox:
-        gb = QGroupBox("锁定频率平滑 (读数精度)")
-        gb.setObjectName("gbHighlight")
-        gb.setToolTip(
-            "对已锁定的频率读数做独立后置平均, 与 PLL 环路带宽解耦:\n"
-            "→ 环路 / IIR 可以调快 (快速锁定), 读数仍能平均到 mHz 级.\n"
-            "大跳变 (超过'跳变阈值') 会自动清空窗口、立即跟随新频率, 不被旧值拖累.\n"
-            "失锁时自动旁路 (直接显示瞬时值)."
-        )
-        outer = QVBoxLayout(gb)
-        outer.setContentsMargins(10, 12, 10, 8)
+    def _add_freq_smooth_section(self, parent: QVBoxLayout):
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
 
         row1 = QHBoxLayout()
@@ -1252,7 +1302,7 @@ class MainWindow(QMainWindow):
         btn.clicked.connect(self._on_freq_sm_changed)
         grid.addWidget(btn, 0, 2, 2, 1)
         outer.addLayout(grid)
-        return gb
+        parent.addLayout(outer)
 
     # ------------------------------------------- 信号发生器 (DAC904)
     # 三种工作模式 (DMOD):
@@ -1262,6 +1312,7 @@ class MainWindow(QMainWindow):
     # 频率字换算与锁相一致 (含时基标定 _clk_cal); 相位按 角度→48bit 相位字 换算.
     def _build_dac_group(self) -> QGroupBox:
         gb = QGroupBox("信号发生器")
+        gb.setObjectName("gbDac")
         gb.setToolTip(
             "硬件: DAC904 (offset binary, 14bit), 采样时钟 = clk_65M.\n"
             "模式: 内部DDS = 自定义频率/相位独立信号源;\n"
@@ -1609,8 +1660,8 @@ class MainWindow(QMainWindow):
         self.curve_freq_ch2 = self.panel_ch2.plot.plot(
             pen=pg.mkPen("#fa6", width=PEN_W), name="f2_hz")
 
-        # 下左: 通道3 谐波分量 + DC (★ 支持任意多条曲线同时显示)
-        self.panel_ch3_har = PlotPanel("通道3 谐波分量 + DC", y_label="幅值")
+        # 下左: 通道3 解调值 (振荡器1/2/3 + 直流, ★ 支持任意多条曲线同时显示)
+        self.panel_ch3_har = PlotPanel("解调值", y_label="幅值")
 
         # ── 顶部控制栏: 信号 ▼   分量 ▼   [+ 添加]  [清空] ──
         har_ctrl_layout = QHBoxLayout()
@@ -1618,7 +1669,7 @@ class MainWindow(QMainWindow):
         har_ctrl_layout.setSpacing(6)
 
         self.cb_har_select = QComboBox()
-        self.cb_har_select.addItems(["2F1+F2", "F1+2F2", "F1+F2", "DC"])
+        self.cb_har_select.addItems(["振荡器1", "振荡器2", "振荡器3", "直流"])
         self.cb_har_select.setMinimumWidth(90)
         self.cb_har_select.currentIndexChanged.connect(self._on_har_select_changed)
 
@@ -1744,10 +1795,10 @@ class MainWindow(QMainWindow):
                      " font-family:Consolas, monospace; font-size:9pt;")
         VAL_DEFAULT = "X: ---.--- mV    Y: ---.--- mV"
 
-        self.lbl_har_21 = QLabel(f"2F1+F2 │ {VAL_DEFAULT}")
-        self.lbl_har_12 = QLabel(f"F1+2F2 │ {VAL_DEFAULT}")
-        self.lbl_har_11 = QLabel(f"F1+F2  │ {VAL_DEFAULT}")
-        self.lbl_har_dc = QLabel( "DC     │ ---.--- mV")
+        self.lbl_har_21 = QLabel(f"振荡器1 │ {VAL_DEFAULT}")
+        self.lbl_har_12 = QLabel(f"振荡器2 │ {VAL_DEFAULT}")
+        self.lbl_har_11 = QLabel(f"振荡器3 │ {VAL_DEFAULT}")
+        self.lbl_har_dc = QLabel( "直流     │ ---.--- mV")
         for lbl in (self.lbl_har_21, self.lbl_har_12,
                     self.lbl_har_11, self.lbl_har_dc):
             lbl.setStyleSheet(VAL_STYLE)
@@ -1771,8 +1822,8 @@ class MainWindow(QMainWindow):
         self.har_curves = []
         self._har_color_idx = 0
 
-        # 初始默认添加一条 (2F1+F2, X) 以保持开机就有曲线显示
-        self._add_har_curve("2F1+F2", "X (同相)")
+        # 初始默认添加一条 (振荡器1, X) 以保持开机就有曲线显示
+        self._add_har_curve("振荡器1", "X (同相)")
 
         self._on_har_select_changed(0)  # 初始化下拉框联动 (DC ↔ 分量禁用)
 
@@ -1822,7 +1873,7 @@ class MainWindow(QMainWindow):
             QWidget { background: #2a2a2a; color: #ddd; font-family: 'Microsoft YaHei UI'; font-size: 10pt; }
             QGroupBox { border: 1px solid #555; border-radius: 4px; margin-top: 10px; padding-top: 6px; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #4af; font-weight: bold; }
-            /* ★ 高亮分组: 用于 "IIR 时间常数" 和 "IIR 阶数" 等高频调整的关键参数 */
+            /* ★ 高亮分组: 锁相环设置 (橙色框) */
             QGroupBox#gbHighlight {
                 border: 2px solid #f80;
                 border-radius: 6px;
@@ -1834,6 +1885,32 @@ class MainWindow(QMainWindow):
             QGroupBox#gbHighlight::title {
                 subcontrol-origin: margin; left: 10px; padding: 0 8px;
                 color: #ffaa44; font-weight: bold; font-size: 11pt;
+            }
+            /* ★ 振荡器设置 (绿色框) */
+            QGroupBox#gbOsc {
+                border: 2px solid #3c8;
+                border-radius: 6px;
+                margin-top: 14px;
+                padding-top: 10px;
+                background: #262f28;
+                font-size: 11pt;
+            }
+            QGroupBox#gbOsc::title {
+                subcontrol-origin: margin; left: 10px; padding: 0 8px;
+                color: #6ec; font-weight: bold; font-size: 11pt;
+            }
+            /* ★ 信号发生器 (蓝色框) */
+            QGroupBox#gbDac {
+                border: 2px solid #48f;
+                border-radius: 6px;
+                margin-top: 14px;
+                padding-top: 10px;
+                background: #262a2f;
+                font-size: 11pt;
+            }
+            QGroupBox#gbDac::title {
+                subcontrol-origin: margin; left: 10px; padding: 0 8px;
+                color: #6af; font-weight: bold; font-size: 11pt;
             }
             QLineEdit { background: #1e1e1e; border: 1px solid #555; border-radius: 3px; padding: 3px; }
             QLineEdit:focus { border-color: #4af; }
@@ -2114,7 +2191,7 @@ class MainWindow(QMainWindow):
         """
         if not hasattr(self, "cb_har_select"):
             return
-        is_dc = self.cb_har_select.currentText() == "DC"
+        is_dc = self.cb_har_select.currentText() == "直流"
         if is_dc:
             self.cb_comp_select.setCurrentIndex(2)   # R (幅值)
             self.cb_comp_select.setEnabled(False)
@@ -2203,7 +2280,7 @@ class MainWindow(QMainWindow):
         self._add_har_curve(sig, comp)
 
     def _add_har_curve(self, sig: str, comp: str):
-        """实际创建一条曲线 + 对应的 chip 标签. sig 是 ``2F1+F2 / F1+2F2 / F1+F2 / DC``,
+        """实际创建一条曲线 + 对应的 chip 标签. sig 是 ``振荡器1 / 振荡器2 / 振荡器3 / 直流``,
         comp 是分量下拉框文字 (含括号), 例如 ``X (同相)``.
         """
         # 同名曲线只保留一条, 防止用户重复点 "+"
@@ -2287,12 +2364,12 @@ class MainWindow(QMainWindow):
         chip.btn_x = btn_x    # 方便外部 connect
         return chip
 
-    # 信号 → (X 键, Y 键) 映射 (DC 没有 Y, 用 None 占位)
+    # 信号 → (X 键, Y 键) 映射 (直流没有 Y, 用 None 占位)
     _HAR_SIG_KEYS = {
-        "2F1+F2": ("ch3_x_21", "ch3_y_21"),
-        "F1+2F2": ("ch3_x_12", "ch3_y_12"),
-        "F1+F2":  ("ch3_x_11", "ch3_y_11"),
-        "DC":     ("ch3_dc",   None),
+        "振荡器1": ("ch3_x_21", "ch3_y_21"),
+        "振荡器2": ("ch3_x_12", "ch3_y_12"),
+        "振荡器3": ("ch3_x_11", "ch3_y_11"),
+        "直流":    ("ch3_dc",   None),
     }
 
     def _refresh_har_curves(self, t: np.ndarray):
@@ -2321,7 +2398,7 @@ class MainWindow(QMainWindow):
             kx, ky = self._HAR_SIG_KEYS[sig]
 
             # ★ DC 通路走独立换算因子, 其它三路谐波走有混频的换算因子
-            this_v_lsb = v_lsb_dc if sig == "DC" else v_lsb
+            this_v_lsb = v_lsb_dc if sig == "直流" else v_lsb
             arr_x = np.asarray(self.buf[kx], dtype=float) * this_v_lsb
             if ky is None:
                 arr_y = np.zeros_like(arr_x)
@@ -2352,9 +2429,9 @@ class MainWindow(QMainWindow):
 
     # 谐波 X/Y 数据键名映射 (顺序与 lbl_har_21/12/11 对应)
     _HAR_KEYS = (
-        ("2F1+F2", "ch3_x_21", "ch3_y_21"),
-        ("F1+2F2", "ch3_x_12", "ch3_y_12"),
-        ("F1+F2 ", "ch3_x_11", "ch3_y_11"),
+        ("振荡器1", "ch3_x_21", "ch3_y_21"),
+        ("振荡器2", "ch3_x_12", "ch3_y_12"),
+        ("振荡器3", "ch3_x_11", "ch3_y_11"),
     )
 
     def _on_har_disp_toggled(self, *_):
@@ -2397,7 +2474,7 @@ class MainWindow(QMainWindow):
         # DC: 只有幅值 (无相位), 两种模式都一样. ★ 用独立的 mv_lsb_dc (无混频通路).
         # DC 物理上是直流, 严格说没有 RMS 概念, 但为显示一致, 这里也按全局 scale 缩放.
         dc_mv = d.get("ch3_dc", 0) * self._mv_per_lsb_dc * scale
-        self.lbl_har_dc.setText(f"DC     │ {dc_mv:>+11.3f} {unit}   (无 Θ)")
+        self.lbl_har_dc.setText(f"直流     │ {dc_mv:>+11.3f} {unit}   (无 Θ)")
 
     # ============================================================ 数据接收
     def on_frame(self, data: dict):
