@@ -54,9 +54,7 @@ module pll_loop #(
 
     // 输出
     output [47:0]                        dds_freq_out,// 锁定的 DDS 频率字
-    output [47:0]                        dds_phase_out, // 本振 DDS 实时相位
-    output signed [13:0]                 ref_sine_out,  // ★ 本振正弦 (供谐波合成 / DAC 跟随)
-    output signed [13:0]                 ref_cos_out,   // ★ 本振余弦
+    output [47:0]                        dds_phase_out, // ★ 本振 DDS 实时相位 (供谐波相干组合)
     output signed [IN_WIDTH-1:0]         dc_x,        // 同相幅值
     output signed [IN_WIDTH-1:0]         dc_y,        // 正交/相位误差
     output                               cic_valid_x,
@@ -87,8 +85,6 @@ module pll_loop #(
     );
 
     assign dds_phase_out = ref_phase_acc;
-    assign ref_sine_out  = ref_sine;
-    assign ref_cos_out   = ref_cos;
 
     // ========================================================================
     // 2) 混频 (相敏检测)

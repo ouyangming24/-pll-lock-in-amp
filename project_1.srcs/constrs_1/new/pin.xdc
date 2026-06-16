@@ -2,12 +2,8 @@
 #�?�序约�?
 create_clock -period 20.000 -name sys_clk [get_ports sys_clk]
 
-# CDC: sys_clk(50MHz) and clk_wiz output 65MHz are asynchronous to each other.
-#   usb_commend/FT245 run on sys_clk(50M); PLL/PSD/DDS run on clk_out1_clk_wiz_0(65M).
-#   Multi-bit config buses between the two domains are double-registered in
-#   lock_in_amp.v (CDC sync block). Declare async clock groups to remove the
-#   bogus setup analysis on these crossings (was WNS ~= -16ns, 5000+ failing
-#   endpoints, which made the open-loop PSDs latch corrupted frequency words).
+# CDC: sys_clk(50MHz) 仅作 clk_wiz 参考; FT245/usb_commend 已迁至 clk_65M 与 PLL/PSD 同域.
+#   若仍保留 set_clock_groups, 仅用于隔离未用的 sys_clk 寄存器 (如有).
 set_clock_groups -asynchronous \
   -group [get_clocks sys_clk] \
   -group [get_clocks clk_out1_clk_wiz_0]
