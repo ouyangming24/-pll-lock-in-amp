@@ -437,7 +437,10 @@ class MockDevice(QObject):
             "OSRC1": 0,             # 0=CH3, 1=CH4, 2=CH3-CH4
             "OSRC2": 0,
             "OSRC3": 0,
-            # 通道3 4 路 IIR 阶数 (各路独立, 1..4 = 6/12/18/24 dB/oct)
+            "OHN1": 1,
+            "OHN2": 1,
+            "OHN3": 1,
+            # 通道3 4 路 IIR 阶数
             "ORD21":   1,
             "ORD12":   1,
             "ORD11":   1,

@@ -72,6 +72,10 @@ module usb_commend(
     output reg [1:0] osc1_src,
     output reg [1:0] osc2_src,
     output reg [1:0] osc3_src,
+    // ★ 三路振荡器谐波阶数 N (OHN1/2/3 命令, 默认 1; 最终 f_ref = f_base × N)
+    output reg [7:0] osc1_oh,
+    output reg [7:0] osc2_oh,
+    output reg [7:0] osc3_oh,
     // ★ 通道3 4 路 IIR 阶数 (各路独立设置, ORD21/ORD12/ORD11/ORDDC 命令下发)
     //   取值 1..4, 等效 6/12/18/24 dB/oct 阻带斜率 (仿 SR860 / Zurich MFLI 每通道独立 slope)
     //   非法值 (0 或 >4) 在 iir_lpf_cascade 内被视为 1 阶
@@ -132,6 +136,9 @@ module usb_commend(
     parameter CMD_OSRC1   = 6'd35;   // 振荡器1 ADC 源: 0=CH3, 1=CH4, 2=CH3-CH4
     parameter CMD_OSRC2   = 6'd36;
     parameter CMD_OSRC3   = 6'd37;
+    parameter CMD_OHN1    = 6'd38;   // 振荡器1 谐波阶数 N (f_ref = f_base × N)
+    parameter CMD_OHN2    = 6'd39;
+    parameter CMD_OHN3    = 6'd40;
 
     reg [2:0] curr_state;
     reg [5:0] cmd_type;
@@ -231,6 +238,9 @@ module usb_commend(
             osc1_src <= 2'd0;   // 默认 CH3
             osc2_src <= 2'd0;
             osc3_src <= 2'd0;
+            osc1_oh  <= 8'd1;   // 谐波阶数 N, 默认基频 (1×)
+            osc2_oh  <= 8'd1;
+            osc3_oh  <= 8'd1;
             // ★ 4 路 IIR 阶数默认全 1 阶 (6 dB/oct, 与原 iir_lpf_ema 行为完全一致)
             order21       <= 3'd1;
             order12       <= 3'd1;
@@ -356,6 +366,22 @@ module usb_commend(
                             end
                             else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "C" && cmd_buffer[3] == "3" && rec_data == ":") begin
                                 cmd_type <= CMD_OSC3;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            // ★ 振荡器谐波阶数 OHN1/2/3 (N≥1, 0 视为 1)
+                            else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "H" && cmd_buffer[2] == "N" && cmd_buffer[3] == "1" && rec_data == ":") begin
+                                cmd_type <= CMD_OHN1;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "H" && cmd_buffer[2] == "N" && cmd_buffer[3] == "2" && rec_data == ":") begin
+                                cmd_type <= CMD_OHN2;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "H" && cmd_buffer[2] == "N" && cmd_buffer[3] == "3" && rec_data == ":") begin
+                                cmd_type <= CMD_OHN3;
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
@@ -637,6 +663,15 @@ module usb_commend(
                             else if (cmd_type == CMD_OSRC3) begin
                                 if (value_buffer[1:0] <= 2'd2)
                                     osc3_src <= value_buffer[1:0];
+                            end
+                            else if (cmd_type == CMD_OHN1) begin
+                                osc1_oh <= (value_buffer[7:0] == 8'd0) ? 8'd1 : value_buffer[7:0];
+                            end
+                            else if (cmd_type == CMD_OHN2) begin
+                                osc2_oh <= (value_buffer[7:0] == 8'd0) ? 8'd1 : value_buffer[7:0];
+                            end
+                            else if (cmd_type == CMD_OHN3) begin
+                                osc3_oh <= (value_buffer[7:0] == 8'd0) ? 8'd1 : value_buffer[7:0];
                             end
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;

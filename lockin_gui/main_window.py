@@ -175,6 +175,26 @@ G_DC = (1 << (ADC_BITS - 1)) / ADC_FS_V * CIC_GAIN_EFF       # ≈ 454 LSB/V
 V_PER_LSB_DC  = CALIB_K_DC / G_DC          # 码值 → V (DC 通路, K_DC 独立)
 MV_PER_LSB_DC = V_PER_LSB_DC * 1000.0      # ≈ 2.20 mV/LSB
 
+# 幅值显示自动换单位: ≥1 V → V; ≥1 mV → mV; 否则 µV (均保留 4 位小数)
+VOLT_DISPLAY_DECIMALS = 4
+
+
+def auto_voltage_display_unit(abs_v: float) -> tuple[float, str]:
+    """|V| → (伏特→显示单位的乘数, 基础单位 'V'/'mV'/'µV')."""
+    if abs_v >= 1.0:
+        return 1.0, "V"
+    if abs_v >= 1e-3:
+        return 1e3, "mV"
+    return 1e6, "µV"
+
+
+def auto_voltage_display_unit_for(*volts: float) -> tuple[float, str]:
+    """多路幅值按最大 |V| 统一单位; 全零时默认 mV."""
+    abs_max = max((abs(v) for v in volts), default=0.0)
+    if abs_max == 0.0:
+        return 1e3, "mV"
+    return auto_voltage_display_unit(abs_max)
+
 
 def tau_to_fc_hz(k: int, fs: float = IIR_FS_HZ) -> float:
     """tau (shift_k) → 一阶 IIR EMA 的 -3dB 截止频率 (Hz).
@@ -897,15 +917,15 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(6)
         grid.setHorizontalSpacing(6)
         grid.setContentsMargins(4, 4, 4, 4)
-        grid.setColumnStretch(3, 1)
+        grid.setColumnStretch(4, 1)
 
         self.ch3_oscs = []
         osc_defs = [
-            (f"{OSC1_LBL}:", "OSC1", "OSRC1", "FRQ21", "160000", 2, 1),
-            (f"{OSC2_LBL}:", "OSC2", "OSRC2", "FRQ12", "170000", 1, 2),
-            (f"{OSC3_LBL}:", "OSC3", "OSRC3", "FRQ11", "110000", 1, 1),
+            (f"{OSC1_LBL}:", "OSC1", "OSRC1", "OHN1", "FRQ21", "160000", 2, 1),
+            (f"{OSC2_LBL}:", "OSC2", "OSRC2", "OHN2", "FRQ12", "170000", 1, 2),
+            (f"{OSC3_LBL}:", "OSC3", "OSRC3", "OHN3", "FRQ11", "110000", 1, 1),
         ]
-        for row, (label, osc_cmd, osrc_cmd, frq_cmd, frq_def, n_def, m_def) in enumerate(osc_defs):
+        for row, (label, osc_cmd, osrc_cmd, ohn_cmd, frq_cmd, frq_def, n_def, m_def) in enumerate(osc_defs):
             lbl = QLabel(label)
             lbl.setStyleSheet("font-size: 10pt; font-weight: bold;")
             lbl.setFixedWidth(72)
@@ -924,6 +944,21 @@ class MainWindow(QMainWindow):
             cb_src.setToolTip("该路振荡器解调所用的 ADC 输入源 (OSRC 命令)")
             grid.addWidget(cb_src, row, 2)
 
+            ed_oh = QLineEdit("1")
+            ed_oh.setFixedWidth(36)
+            ed_oh.setFixedHeight(28)
+            ed_oh.setAlignment(Qt.AlignCenter)
+            ed_oh.setStyleSheet("font-size: 11pt; padding: 2px;")
+            ed_oh.setToolTip("谐波阶数 N (OHN): 最终解调频率 = 基准频率 × N")
+
+            harm_w = QWidget()
+            hw = QHBoxLayout(harm_w)
+            hw.setContentsMargins(0, 0, 0, 0)
+            hw.setSpacing(2)
+            hw.addWidget(QLabel("× N"))
+            hw.addWidget(ed_oh)
+            grid.addWidget(harm_w, row, 3)
+
             auto_w = QWidget()
             ah = QHBoxLayout(auto_w)
             ah.setContentsMargins(0, 0, 0, 0)
@@ -935,35 +970,40 @@ class MainWindow(QMainWindow):
                 ed.setFixedHeight(28)
                 ed.setAlignment(Qt.AlignCenter)
                 ed.setStyleSheet("font-size: 11pt; padding: 2px;")
-            lbl_hz = QLabel("≈ --- Hz")
-            lbl_hz.setStyleSheet("font-size: 10pt; color: #8ad;")
-            lbl_hz.setMinimumWidth(120)
             ah.addWidget(ed_n)
             ah.addWidget(QLabel("× F1 +"))
             ah.addWidget(ed_m)
             ah.addWidget(QLabel("× F2"))
-            ah.addWidget(lbl_hz)
             ah.addStretch()
-            grid.addWidget(auto_w, row, 3)
+            grid.addWidget(auto_w, row, 4)
 
             ed_frq = QLineEdit(frq_def)
             ed_frq.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
             ed_frq.setAlignment(Qt.AlignCenter)
             ed_frq.setFixedHeight(30)
-            grid.addWidget(ed_frq, row, 3)
+            ed_frq.setToolTip("手动模式: 基准频率 (Hz), 最终 = 此值 × N")
+            grid.addWidget(ed_frq, row, 4)
+
+            lbl_hz = QLabel("≈ --- Hz")
+            lbl_hz.setStyleSheet("font-size: 10pt; color: #8ad;")
+            lbl_hz.setMinimumWidth(120)
+            grid.addWidget(lbl_hz, row, 5)
 
             osc = {
-                "ed_n": ed_n, "ed_m": ed_m, "lbl_hz": lbl_hz,
+                "ed_n": ed_n, "ed_m": ed_m, "ed_oh": ed_oh, "lbl_hz": lbl_hz,
                 "auto_w": auto_w, "ed_frq": ed_frq, "btn": btn,
                 "cb_src": cb_src,
-                "osc_cmd": osc_cmd, "osrc_cmd": osrc_cmd, "frq_cmd": frq_cmd,
+                "osc_cmd": osc_cmd, "osrc_cmd": osrc_cmd,
+                "ohn_cmd": ohn_cmd, "frq_cmd": frq_cmd,
             }
             cb_src.currentIndexChanged.connect(
                 lambda _i, o=osc: self._auto_push_osc_src(o))
             ed_n.textChanged.connect(self._on_osc_coef_changed)
             ed_m.textChanged.connect(self._on_osc_coef_changed)
+            ed_oh.textChanged.connect(self._on_osc_coef_changed)
             ed_n.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
             ed_m.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
+            ed_oh.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
             ed_frq.editingFinished.connect(lambda o=osc: self._auto_push_osc(o))
             self.ch3_oscs.append(osc)
             btn.clicked.connect(lambda _c=False, o=osc: self._send_one_osc(o))
@@ -979,8 +1019,7 @@ class MainWindow(QMainWindow):
             osc["ed_frq"].setVisible(not auto)
             osc["btn"].setEnabled(True)
         self.btn_send_all_osc.setVisible(auto)
-        if auto:
-            self._update_osc_hz_display()
+        self._update_osc_hz_display()
         if self.dev.is_connected:
             self._send_ref_mode()
 
@@ -1019,9 +1058,36 @@ class MainWindow(QMainWindow):
         if not quiet:
             self.on_log("[i] 已下发三路振荡器 ADC 输入源")
 
+    def _parse_osc_harm(self, osc: dict) -> int | None:
+        try:
+            n = int(osc["ed_oh"].text())
+        except ValueError:
+            self.on_log(f"[!] {osc['ohn_cmd']} 非法")
+            return None
+        if not (1 <= n <= 255):
+            self.on_log(f"[!] {osc['ohn_cmd']} 须 1..255")
+            return None
+        return n
+
+    def _send_osc_harm(self, osc: dict, quiet: bool = False):
+        """下发谐波阶数 OHNx: 最终 f_ref = f_base × N."""
+        n = self._parse_osc_harm(osc)
+        if n is None:
+            return
+        self.dev.send_command(f"{osc['ohn_cmd']}:{n}")
+        if not quiet:
+            self.on_log(f"  {osc['ohn_cmd']}: N={n}")
+
+    def _send_all_osc_harm(self, quiet: bool = False):
+        for osc in self.ch3_oscs:
+            self._send_osc_harm(osc, quiet=True)
+        if not quiet:
+            self.on_log("[i] 已下发三路振荡器谐波阶数 N")
+
     def _send_one_osc(self, osc: dict, quiet: bool = False):
-        """下发单路振荡器: ADC 源 + 自动发 OSCx 系数 / 手动发 FRQxx 频率."""
+        """下发单路振荡器: ADC 源 + 谐波 N + 自动 OSC / 手动 FRQ."""
         self._send_osc_src(osc, quiet=True)
+        self._send_osc_harm(osc, quiet=True)
         if self.rb_ref_auto.isChecked():
             try:
                 n = int(osc["ed_n"].text())
@@ -1105,24 +1171,43 @@ class MainWindow(QMainWindow):
                 continue
             osc["lbl_hz"].setText(f"硬件={hz:,.3f} Hz")
 
+    def _osc_harm_factor(self, osc: dict) -> float:
+        try:
+            n = int(osc["ed_oh"].text())
+            return float(n) if n >= 1 else 1.0
+        except ValueError:
+            return 1.0
+
     def _update_osc_hz_display(self):
-        """自动模式: 按系数与 F1/F2 刷新各路估算频率 (仅显示, 不下发)."""
-        src = self._ref_source_f1f2()
-        if src is None or not getattr(self, "ch3_oscs", None):
+        """按模式刷新各路估算/最终解调频率 (基准 × 谐波 N)."""
+        if not getattr(self, "ch3_oscs", None):
             return
-        f1, f2, _ = src
-        for osc in self.ch3_oscs:
-            try:
-                n = int(osc["ed_n"].text())
-                m = int(osc["ed_m"].text())
-                hz = n * f1 + m * f2
-                osc["lbl_hz"].setText(f"≈ {hz:.3f} Hz")
-            except ValueError:
-                osc["lbl_hz"].setText("≈ --- Hz")
+        auto = self.rb_ref_auto.isChecked()
+        if auto:
+            src = self._ref_source_f1f2()
+            if src is None:
+                return
+            f1, f2, _ = src
+            for osc in self.ch3_oscs:
+                try:
+                    n = int(osc["ed_n"].text())
+                    m = int(osc["ed_m"].text())
+                    hz = (n * f1 + m * f2) * self._osc_harm_factor(osc)
+                    osc["lbl_hz"].setText(f"≈ {hz:.3f} Hz")
+                except ValueError:
+                    osc["lbl_hz"].setText("≈ --- Hz")
+        else:
+            for osc in self.ch3_oscs:
+                try:
+                    base = float(osc["ed_frq"].text())
+                    hz = base * self._osc_harm_factor(osc)
+                    osc["lbl_hz"].setText(f"≈ {hz:.3f} Hz")
+                except ValueError:
+                    osc["lbl_hz"].setText("≈ --- Hz")
 
     def _track_ref_freqs(self):
-        """每帧 (自动模式): 仅刷新估算频率显示."""
-        if getattr(self, "rb_ref_auto", None) is None or not self.rb_ref_auto.isChecked():
+        """每帧刷新振荡器频率显示 (自动/手动均含 ×N)."""
+        if getattr(self, "rb_ref_auto", None) is None:
             return
         self._update_osc_hz_display()
 
@@ -1634,6 +1719,7 @@ class MainWindow(QMainWindow):
             "电压幅度显示单位:\n"
             "  V_peak = 信号峰值 V₀  (FPGA 原生输出, 默认)\n"
             "  V_rms  = 有效值 V₀/√2 (与 SR830/Zurich 商用锁相对齐)\n"
+            "幅值自动换单位: ≥1 V → V; ≥1 mV → mV; 更小 → µV (4 位小数).\n"
             "影响: 4 路实时数值 + 所有谐波/DC 曲线; 相位 Θ 不变."
         )
         self.cb_amp_unit.currentIndexChanged.connect(self._on_amp_unit_changed)
@@ -1719,15 +1805,15 @@ class MainWindow(QMainWindow):
         self.panel_ch3_har.layout().insertWidget(2, self.har_chips_host)
 
         # ── 实时值显示 (4 路同时显示, 与曲线选择无关) ──
-        # 三路谐波: X / Y / R / Θ ;  DC 只有幅值. 电压 mV, 相位保留 3 位小数.
+        # 三路谐波: X/Y 或 R/Θ; 电压自动 V/mV/µV, 4 位小数; 相位 Θ 保留 3 位.
         VAL_STYLE = ("color:#ddd; background:#1a1a1a; padding:2px 6px;"
                      " font-family:Consolas, monospace; font-size:9pt;")
-        VAL_DEFAULT = "X: ---.--- mV    Y: ---.--- mV"
+        VAL_DEFAULT = "X: ---    Y: ---"
 
         self.lbl_har_21 = QLabel(f"{OSC1_LBL} │ {VAL_DEFAULT}")
         self.lbl_har_12 = QLabel(f"{OSC2_LBL} │ {VAL_DEFAULT}")
         self.lbl_har_11 = QLabel(f"{OSC3_LBL} │ {VAL_DEFAULT}")
-        self.lbl_har_dc = QLabel(f"{DC_LBL}   │ ---.--- mV")
+        self.lbl_har_dc = QLabel(f"{DC_LBL}   │ ---")
         for lbl in (self.lbl_har_21, self.lbl_har_12,
                     self.lbl_har_11, self.lbl_har_dc):
             lbl.setStyleSheet(VAL_STYLE)
@@ -1892,6 +1978,7 @@ class MainWindow(QMainWindow):
                 self._send_all_osc_coefs(quiet=True)
             else:
                 self._send_all_osc_src(quiet=True)
+                self._send_all_osc_harm(quiet=True)
         else:
             self.btn_connect.setText("连接")
             self.btn_stream.setEnabled(False)
@@ -2047,6 +2134,7 @@ class MainWindow(QMainWindow):
         else:
             self._send_ref_mode(quiet=True)
             self._send_all_osc_src(quiet=True)
+            self._send_all_osc_harm(quiet=True)
             for osc in self.ch3_oscs:
                 self._send_freq_cmd(osc["frq_cmd"], osc["ed_frq"].text())
         self._send_int_cmd("LOCKSWY", self.ed_swy.text())
@@ -2146,10 +2234,15 @@ class MainWindow(QMainWindow):
         return 1.0 if self.cb_amp_unit.currentText() == "V_peak" else (1.0 / self._SQRT2)
 
     def _amp_unit_str(self, base: str = "mV") -> str:
-        """返回单位后缀, 例: 'mV' → 'mV' 或 'mVrms';  'V' → 'V' 或 'Vrms'."""
+        """返回单位后缀, 例: 'mV' → 'mV' 或 'mVrms';  'µV' → 'µVrms'."""
         if hasattr(self, "cb_amp_unit") and self.cb_amp_unit.currentText() == "V_rms":
             return base + "rms"
         return base
+
+    def _fmt_volt(self, v_volts: float, mult: float, base_unit: str) -> str:
+        """格式化为 '±x.xxxx unit' (伏特输入, mult/base_unit 由 auto_voltage_display_unit* 决定)."""
+        unit = self._amp_unit_str(base_unit)
+        return f"{v_volts * mult:+.{VOLT_DISPLAY_DECIMALS}f} {unit}"
 
     def _on_amp_unit_changed(self, _idx=0):
         """切换 V_peak ↔ V_rms: 立即刷新一次实时数值 + 曲线."""
@@ -2314,28 +2407,24 @@ class MainWindow(QMainWindow):
         """遍历 self.har_curves, 把每条曲线的数据 setData 进去.
 
         - 电压类 (X/Y/R/DC) 跟随全局 V_peak / V_rms 单位切换 (Θ 不变).
-        - Y 轴单位智能切换:
-            全是电压类 → "电压 (V)"  或 "电压 (Vrms)"
-            全是相位   → "相位 (°)"
-            混合       → "电压 (V) / 相位 (°)"
+        - 电压纵轴按当前曲线幅度自动 V / mV / µV.
         """
         if not self.har_curves:
             self.panel_ch3_har.plot.setLabel("left", "幅值")
             return
 
-        scale    = self._amp_scale()            # 1.0 或 1/√2
-        unit_v   = self._amp_unit_str("V")      # "V" 或 "Vrms"
-        v_lsb    = self._v_per_lsb              # X/Y/R (有混频) 通路
-        v_lsb_dc = self._v_per_lsb_dc           # DC (无混频) 通路, 比 v_lsb 大 4096 倍
+        scale    = self._amp_scale()
+        v_lsb    = self._v_per_lsb
+        v_lsb_dc = self._v_per_lsb_dc
 
-        has_voltage = False
-        has_phase   = False
+        pending_voltage: list[tuple[dict, np.ndarray]] = []
+        has_phase = False
+
         for it in self.har_curves:
             sig  = it["sig"]
             comp = it["comp"]
             kx, ky = self._HAR_SIG_KEYS[sig]
 
-            # ★ DC 通路走独立换算因子, 其它三路谐波走有混频的换算因子
             this_v_lsb = v_lsb_dc if sig == DC_LBL else v_lsb
             arr_x = np.asarray(self.buf[kx], dtype=float) * this_v_lsb
             if ky is None:
@@ -2344,26 +2433,38 @@ class MainWindow(QMainWindow):
                 arr_y = np.asarray(self.buf[ky], dtype=float) * this_v_lsb
 
             if comp.startswith("X"):
-                y_data = arr_x * scale
-                has_voltage = True
+                y_volts = arr_x * scale
+                pending_voltage.append((it, y_volts))
             elif comp.startswith("Y"):
-                y_data = arr_y * scale
-                has_voltage = True
+                y_volts = arr_y * scale
+                pending_voltage.append((it, y_volts))
             elif comp.startswith("R"):
-                y_data = np.sqrt(arr_x * arr_x + arr_y * arr_y) * scale
-                has_voltage = True
-            else:  # Θ - 相位与单位无关
+                y_volts = np.sqrt(arr_x * arr_x + arr_y * arr_y) * scale
+                pending_voltage.append((it, y_volts))
+            else:  # Θ
                 y_data = np.degrees(np.arctan2(arr_y, arr_x))
+                it["curve"].setData(t, y_data)
                 has_phase = True
 
-            it["curve"].setData(t, y_data)
+        has_voltage = bool(pending_voltage)
+        if has_voltage:
+            max_abs = 0.0
+            for _, y_volts in pending_voltage:
+                if y_volts.size:
+                    max_abs = max(max_abs, float(np.max(np.abs(y_volts))))
+            mult, base_u = auto_voltage_display_unit_for(max_abs)
+            unit_v = self._amp_unit_str(base_u)
+            for it, y_volts in pending_voltage:
+                it["curve"].setData(t, y_volts * mult)
 
         if has_voltage and has_phase:
             self.panel_ch3_har.plot.setLabel("left", f"电压 ({unit_v}) / 相位 (°)")
         elif has_phase:
             self.panel_ch3_har.plot.setLabel("left", "相位 (°)")
-        else:
+        elif has_voltage:
             self.panel_ch3_har.plot.setLabel("left", f"电压 ({unit_v})")
+        else:
+            self.panel_ch3_har.plot.setLabel("left", "幅值")
 
     # 谐波 X/Y 数据键名映射 (顺序与 lbl_har_21/12/11 对应)
     _HAR_KEYS = (
@@ -2381,38 +2482,39 @@ class MainWindow(QMainWindow):
 
     def _update_har_text(self, *_):
         """每一帧把 4 路 (3 谐波 + DC) 的实时值全部刷新.
-        与下拉框选择无关 (下拉框只控制波形画哪一路).
-        电压单位 mV/mVrms 由全局 cb_amp_unit 控制; 相位 Θ 永远 °.
+        电压按幅度自动 V/mV/µV (4 位小数); 相位 Θ 仍用 °.
         """
         d = self._last_frame
         if d is None:
             return
 
-        scale  = self._amp_scale()             # 1.0 (peak) 或 1/√2 (rms)
-        unit   = self._amp_unit_str("mV")      # "mV" 或 "mVrms"
-        mv_lsb = self._mv_per_lsb              # 运行时标定后的电压换算因子
+        scale  = self._amp_scale()
+        v_lsb  = self._v_per_lsb
 
-        # 3 路谐波: 按当前模式显示 X/Y 或 R/Θ (只显示两个量, 避免被截断)
         rt = (self._har_disp_mode == "rt")
         for lbl, (name, kx, ky) in zip(
             (self.lbl_har_21, self.lbl_har_12, self.lbl_har_11),
             self._HAR_KEYS,
         ):
-            x_mv = d.get(kx, 0) * mv_lsb * scale
-            y_mv = d.get(ky, 0) * mv_lsb * scale
+            x_v = d.get(kx, 0) * v_lsb * scale
+            y_v = d.get(ky, 0) * v_lsb * scale
             if rt:
-                r_mv = math.sqrt(x_mv * x_mv + y_mv * y_mv)
-                theta_deg = math.degrees(math.atan2(y_mv, x_mv))
+                r_v = math.sqrt(x_v * x_v + y_v * y_v)
+                theta_deg = math.degrees(math.atan2(y_v, x_v))
+                mult, base = auto_voltage_display_unit_for(r_v)
                 lbl.setText(
-                    f"{name} │ R: {r_mv:>11.3f} {unit}    Θ: {theta_deg:>+9.3f}°")
+                    f"{name} │ R: {self._fmt_volt(r_v, mult, base):>16}"
+                    f"    Θ: {theta_deg:>+9.3f}°")
             else:
+                mult, base = auto_voltage_display_unit_for(x_v, y_v)
                 lbl.setText(
-                    f"{name} │ X: {x_mv:>+11.3f} {unit}    Y: {y_mv:>+11.3f} {unit}")
+                    f"{name} │ X: {self._fmt_volt(x_v, mult, base):>16}"
+                    f"    Y: {self._fmt_volt(y_v, mult, base):>16}")
 
-        # DC: 只有幅值 (无相位), 两种模式都一样. ★ 用独立的 mv_lsb_dc (无混频通路).
-        # DC 物理上是直流, 严格说没有 RMS 概念, 但为显示一致, 这里也按全局 scale 缩放.
-        dc_mv = d.get("ch3_dc", 0) * self._mv_per_lsb_dc * scale
-        self.lbl_har_dc.setText(f"{DC_LBL}   │ {dc_mv:>+11.3f} {unit}   (无 Θ)")
+        dc_v = d.get("ch3_dc", 0) * self._v_per_lsb_dc * scale
+        mult, base = auto_voltage_display_unit_for(dc_v)
+        self.lbl_har_dc.setText(
+            f"{DC_LBL}   │ {self._fmt_volt(dc_v, mult, base):>16}   (无 Θ)")
 
     # ============================================================ 数据接收
     def on_frame(self, data: dict):

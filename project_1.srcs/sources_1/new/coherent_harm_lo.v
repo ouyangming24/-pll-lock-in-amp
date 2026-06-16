@@ -4,7 +4,7 @@
 //
 //  相位相干谐波本振: 由 CH1/CH2 PLL 本振相位实时组合
 //
-//    θ_harm = n·θ1 + m·θ2   (θ1/θ2 为 pll_loop 内 DDS 相位累加器输出)
+//    θ_harm = N · (n·θ1 + m·θ2)   (N = 谐波阶数 OHN, 默认 1, 类 Zurich 解调器)
 //    输出 sin(θ_harm), cos(θ_harm)
 //
 //  与「独立 DDS + 仅借频率字」相比: 相位与 CH1/CH2 锁定本振严格相干,
@@ -18,18 +18,23 @@ module coherent_harm_lo (
     input  wire [47:0] phase_ch2,
     input  wire [7:0]  harm_n,
     input  wire [7:0]  harm_m,
+    input  wire [7:0]  harm_order,   // 谐波阶数 N (OHN), 0 视为 1
     output wire signed [13:0] harm_sine,
     output wire signed [13:0] harm_cos
 );
 
-    // θ_harm = n·θ1 + m·θ2. 48×8 乘加路径较长, 在 clk 域寄存两级流水打断,
-    // 降低 65M 域组合延迟 (sin/cos 同步延迟, 仅引入恒定相位偏移, 不影响相干性).
+    wire [7:0] order_eff = (harm_order == 8'd0) ? 8'd1 : harm_order;
+
+    // θ_harm = N·(n·θ1 + m·θ2). 乘加 + ×N 分三级流水.
     reg [55:0] prod1, prod2;
+    reg [47:0] comb_sum;
     reg [47:0] comb_phase;
+    wire [55:0] comb_prod = comb_sum * order_eff;
     always @(posedge clk) begin
         prod1      <= phase_ch1 * harm_n;
         prod2      <= phase_ch2 * harm_m;
-        comb_phase <= prod1[47:0] + prod2[47:0];
+        comb_sum   <= prod1[47:0] + prod2[47:0];
+        comb_phase <= comb_prod[47:0];
     end
 
     // {phase_offset, phase_increment}; increment=0 → 仅相位查找, 不独立积分

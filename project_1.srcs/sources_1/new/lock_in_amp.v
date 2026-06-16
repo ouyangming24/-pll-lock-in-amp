@@ -101,6 +101,7 @@ wire [47:0] freq_word_21_w, freq_word_12_w, freq_word_11_w;
 wire        ref_freq_auto_w;        // REFMODE: 0=手动 / 1=自动
 wire [7:0]  osc1_n_w, osc1_m_w, osc2_n_w, osc2_m_w, osc3_n_w, osc3_m_w;
 wire [1:0]  osc1_src_w, osc2_src_w, osc3_src_w;
+wire [7:0]  osc1_oh_w, osc2_oh_w, osc3_oh_w;
 // ★ 通道3 4 路 IIR 阶数 (各路独立, ORD21/ORD12/ORD11/ORDDC 命令: 1..4)
 wire [2:0]  order21_w, order12_w, order11_w, order_dc_w;
 // ★ PLL 锁定阈值 (由 USB 命令 LOCKSWY/LOCKTHX 动态下发)
@@ -345,36 +346,42 @@ da_wave_send u_da_wave_send (
 // =========================================================================
 // ★ 通道3 ref_freq 来源 mux
 //
-//   REFMODE = 0 (手动): ref_freq = FRQ21 / FRQ12 / FRQ11, 内部独立 DDS
-//   REFMODE = 1 (自动): 相干本振 sin(n·θ1+m·θ2), θ1/θ2 来自 CH1/CH2 PLL 本振相位
-//                       系数 n,m 由 OSC1/OSC2/OSC3 下发
+//   REFMODE = 0 (手动): ref_freq = FRQxx × N, 内部独立 DDS
+//   REFMODE = 1 (自动): 相干本振 sin(N·(n·θ1+m·θ2)); 系数 n,m 由 OSC; N 由 OHN
 // =========================================================================
 
-// ★ 自动模式参考频率 n*F1+m*F2: 48×8 乘加, 在 clk_65M 域寄存一拍打断长路径
-//   (配置准静态, 加 1 拍延迟无影响; 自动模式 PSD 实际用相干本振混频, 此频率字
-//    仅配置其内部 DDS, 不在临界采样路径上).
-reg [55:0] f_osc1_auto, f_osc2_auto, f_osc3_auto;
+wire [7:0] oh1_eff = (osc1_oh_w == 8'd0) ? 8'd1 : osc1_oh_w;
+wire [7:0] oh2_eff = (osc2_oh_w == 8'd0) ? 8'd1 : osc2_oh_w;
+wire [7:0] oh3_eff = (osc3_oh_w == 8'd0) ? 8'd1 : osc3_oh_w;
+
+// 基准频率 (自动: n·F1+m·F2; 手动: FRQxx) → ×N 得最终参考频率字 (诊断/手动 DDS)
+reg [55:0] f_base_21, f_base_12, f_base_11;
+wire [63:0] f_harm_21 = f_base_21 * oh1_eff;
+wire [63:0] f_harm_12 = f_base_12 * oh2_eff;
+wire [63:0] f_harm_11 = f_base_11 * oh3_eff;
+reg [47:0] ref_freq_21_to_psd, ref_freq_12_to_psd, ref_freq_11_to_psd;
 always @(posedge clk_65M or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
-        f_osc1_auto <= 56'd0;
-        f_osc2_auto <= 56'd0;
-        f_osc3_auto <= 56'd0;
+        f_base_21 <= 56'd0;
+        f_base_12 <= 56'd0;
+        f_base_11 <= 56'd0;
+        ref_freq_21_to_psd <= 48'd0;
+        ref_freq_12_to_psd <= 48'd0;
+        ref_freq_11_to_psd <= 48'd0;
     end else begin
-        f_osc1_auto <= pll_freq_ch1 * osc1_n_w + pll_freq_ch2 * osc1_m_w;
-        f_osc2_auto <= pll_freq_ch1 * osc2_n_w + pll_freq_ch2 * osc2_m_w;
-        f_osc3_auto <= pll_freq_ch1 * osc3_n_w + pll_freq_ch2 * osc3_m_w;
+        f_base_21 <= ref_freq_auto_w ? (pll_freq_ch1 * osc1_n_w + pll_freq_ch2 * osc1_m_w)
+                                     : {8'd0, freq_word_21_w};
+        f_base_12 <= ref_freq_auto_w ? (pll_freq_ch1 * osc2_n_w + pll_freq_ch2 * osc2_m_w)
+                                     : {8'd0, freq_word_12_w};
+        f_base_11 <= ref_freq_auto_w ? (pll_freq_ch1 * osc3_n_w + pll_freq_ch2 * osc3_m_w)
+                                     : {8'd0, freq_word_11_w};
+        ref_freq_21_to_psd <= f_harm_21[47:0];
+        ref_freq_12_to_psd <= f_harm_12[47:0];
+        ref_freq_11_to_psd <= f_harm_11[47:0];
     end
 end
 
-wire [47:0] ref_freq_21_to_psd;
-wire [47:0] ref_freq_12_to_psd;
-wire [47:0] ref_freq_11_to_psd;
-
-assign ref_freq_21_to_psd = ref_freq_auto_w ? f_osc1_auto[47:0] : freq_word_21_w;
-assign ref_freq_12_to_psd = ref_freq_auto_w ? f_osc2_auto[47:0] : freq_word_12_w;
-assign ref_freq_11_to_psd = ref_freq_auto_w ? f_osc3_auto[47:0] : freq_word_11_w;
-
-// ---- 相干谐波本振 (自动模式: 复用 CH1/CH2 PLL 相位) -----------------------
+// ---- 相干谐波本振 (自动模式: N·(n·θ1+m·θ2)) ------------------------------
 wire signed [13:0] coh_sin_osc1, coh_cos_osc1;
 wire signed [13:0] coh_sin_osc2, coh_cos_osc2;
 wire signed [13:0] coh_sin_osc3, coh_cos_osc3;
@@ -385,6 +392,7 @@ coherent_harm_lo u_coh_lo_osc1 (
     .phase_ch2  (pll_phase_ch2),
     .harm_n     (osc1_n_w),
     .harm_m     (osc1_m_w),
+    .harm_order (oh1_eff),
     .harm_sine  (coh_sin_osc1),
     .harm_cos   (coh_cos_osc1)
 );
@@ -395,6 +403,7 @@ coherent_harm_lo u_coh_lo_osc2 (
     .phase_ch2  (pll_phase_ch2),
     .harm_n     (osc2_n_w),
     .harm_m     (osc2_m_w),
+    .harm_order (oh2_eff),
     .harm_sine  (coh_sin_osc2),
     .harm_cos   (coh_cos_osc2)
 );
@@ -405,6 +414,7 @@ coherent_harm_lo u_coh_lo_osc3 (
     .phase_ch2  (pll_phase_ch2),
     .harm_n     (osc3_n_w),
     .harm_m     (osc3_m_w),
+    .harm_order (oh3_eff),
     .harm_sine  (coh_sin_osc3),
     .harm_cos   (coh_cos_osc3)
 );
@@ -693,6 +703,9 @@ usb_commend u_usb_commend (
     .osc1_src(osc1_src_w),
     .osc2_src(osc2_src_w),
     .osc3_src(osc3_src_w),
+    .osc1_oh (osc1_oh_w),
+    .osc2_oh (osc2_oh_w),
+    .osc3_oh (osc3_oh_w),
     // ★ 通道3 4 路 IIR 阶数 (ORD21/ORD12/ORD11/ORDDC 命令各自独立: 1..4)
     .order21 (order21_w),
     .order12 (order12_w),
