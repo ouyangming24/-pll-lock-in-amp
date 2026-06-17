@@ -84,10 +84,10 @@ module usb_commend(
     output reg [2:0] order11,    // ch3 @ F1+F2   PSD 阶数
     output reg [2:0] order_dc,   // ch3 DC 通路   IIR 阶数
     // ★ 信号发生器 (DAC904) 控制
-    //   dac_src_mode: 0=内部DDS(指定频率/相位下发), 1=跟随CH1锁定频率, 2=跟随CH2锁定频率
-    output reg [1:0]  dac_src_mode,    // DMOD 命令
-    output reg [47:0] dac_freq_word,   // DFRQ 命令: 内部DDS频率字 (48bit)
-    output reg [47:0] dac_phase_word,  // DPHS 命令: 内部DDS相位字 (48bit)
+    //   dac_src_mode: 0=振荡器1, 1=振荡器2, 2=振荡器3 (本振与解调同源)
+    output reg [1:0]         dac_src_mode,    // DMOD 命令
+    output reg [15:0]        dac_amp,         // DAMP: 幅度 16bit, 65535=满幅
+    output reg signed [13:0] dac_ofs,         // DOFS: 偏置 (DAC 有符号码)
     output reg send_en,
     output reg [7:0] send_data
 );
@@ -139,6 +139,8 @@ module usb_commend(
     parameter CMD_OHN1    = 6'd38;   // 振荡器1 谐波阶数 N (f_ref = f_base × N)
     parameter CMD_OHN2    = 6'd39;
     parameter CMD_OHN3    = 6'd40;
+    parameter CMD_DAMP    = 6'd41;   // DAC 幅度 (16bit, 65535=满幅)
+    parameter CMD_DOFS    = 6'd42;   // DAC 偏置 (14bit signed 码)
 
     reg [2:0] curr_state;
     reg [5:0] cmd_type;
@@ -246,10 +248,10 @@ module usb_commend(
             order12       <= 3'd1;
             order11       <= 3'd1;
             order_dc      <= 3'd1;
-            // ★ 信号发生器默认: 内部DDS, ~50 kHz @ 65MHz (50000*2^48/65e6), 0 相位
-            dac_src_mode   <= 2'd0;
-            dac_freq_word  <= 48'd216519212854;
-            dac_phase_word <= 48'd0;
+            // ★ 信号发生器默认: 振荡器1 本振, 满幅, 零偏置
+            dac_src_mode <= 2'd0;
+            dac_amp      <= 16'd65535;
+            dac_ofs      <= 14'sd0;
             // ???PLL ?????????????????(????, ???????????????????
             sweep_thres  <= 28'd100_000;   // |dc_y| > 100K ?????LOCK
             lock_x_thres <= 28'd300_000;   // LOCK ?????? |dc_x| ??> 300K ????
@@ -350,6 +352,16 @@ module usb_commend(
                             end
                             else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "P" && cmd_buffer[2] == "H" && cmd_buffer[3] == "S" && rec_data == ":") begin
                                 cmd_type <= CMD_DPHS;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "A" && cmd_buffer[2] == "M" && cmd_buffer[3] == "P" && rec_data == ":") begin
+                                cmd_type <= CMD_DAMP;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "O" && cmd_buffer[2] == "F" && cmd_buffer[3] == "S" && rec_data == ":") begin
+                                cmd_type <= CMD_DOFS;
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
@@ -634,10 +646,16 @@ module usb_commend(
                                 dac_src_mode <= value_buffer[1:0];
                             end
                             else if (cmd_type == CMD_DFRQ) begin
-                                dac_freq_word <= value_buffer;
+                                ; // 已废弃: 频率由所选振荡器决定
                             end
                             else if (cmd_type == CMD_DPHS) begin
-                                dac_phase_word <= value_buffer;
+                                ; // 已废弃: 相位由所选振荡器本振决定
+                            end
+                            else if (cmd_type == CMD_DAMP) begin
+                                dac_amp <= value_buffer[15:0];
+                            end
+                            else if (cmd_type == CMD_DOFS) begin
+                                dac_ofs <= $signed(value_buffer[13:0]);
                             end
                             // ★ 振荡器谐波系数 (n,m 各 0..255)
                             else if (cmd_type == CMD_OSC1) begin

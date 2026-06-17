@@ -106,10 +106,10 @@ wire [7:0]  osc1_oh_w, osc2_oh_w, osc3_oh_w;
 wire [2:0]  order21_w, order12_w, order11_w, order_dc_w;
 // ★ PLL 锁定阈值 (由 USB 命令 LOCKSWY/LOCKTHX 动态下发)
 wire signed [27:0] sweep_thres_w, lock_x_thres_w;
-// ★ 信号发生器 (DAC904) 控制 (DMOD/DFRQ/DPHS, 已有独立 CDC 同步, 见下方 DAC 块)
-wire [1:0]  dac_src_mode_w;     // 0=内部DDS / 1=跟随CH1 / 2=跟随CH2
-wire [47:0] dac_freq_word_w;    // 内部DDS频率字
-wire [47:0] dac_phase_word_w;   // 内部DDS相位字
+// ★ 信号发生器 (DAC904) 控制 (DMOD/DAMP/DOFS)
+wire [1:0]         dac_src_mode_w;     // 0=振荡器1 / 1=振荡器2 / 2=振荡器3
+wire [15:0]        dac_amp_w;         // 幅度 16bit, 65535=满幅
+wire signed [13:0] dac_ofs_w;         // 偏置 (DAC 有符号码)
 
 // =========================================================================
 // ★ AD 数据接收
@@ -259,89 +259,6 @@ pll_loop #(
 
 
 // =========================================================================
-// ★ 信号发生器 (DAC904)  —— 内部 DDS / 跟随 CH1·CH2 锁定频率
-//
-//   频率字来源 (DMOD 命令选择):
-//     0 = 内部 DDS : 频率/相位由上位机 DFRQ/DPHS 指定 (独立信号源)
-//     1 = 跟随 CH1 : 频率字 = pll_freq_ch1 (与 CH1 外参考锁定结果同频输出)
-//     2 = 跟随 CH2 : 频率字 = pll_freq_ch2
-//   相位: 始终叠加 dac_phase_word_w (DPHS), 跟随模式下用于微调相位对齐.
-//
-//   注: 跟随模式输出与输入"同频", 相位为本 DDS 自由相位 + DPHS 偏移; 若要与
-//       输入信号严格同相, 需现场用 DPHS 标定 (或后续从 PLL NCO 直接引相位).
-//
-//   DFRQ/DMOD/DPHS 与 DDS 同在 clk_65M; 打一拍后仅在配置变化时脉冲 tvalid.
-// =========================================================================
-reg [1:0]  dac_src_mode_r;
-reg [47:0] dac_freq_word_r;
-reg [47:0] dac_phase_word_r;
-
-always @(posedge clk_65M or negedge sys_rst_n) begin
-    if (!sys_rst_n) begin
-        dac_src_mode_r   <= 2'd0;
-        dac_freq_word_r  <= 48'd216519212854;
-        dac_phase_word_r <= 48'd0;
-    end else begin
-        dac_src_mode_r   <= dac_src_mode_w;
-        dac_freq_word_r  <= dac_freq_word_w;
-        dac_phase_word_r <= dac_phase_word_w;
-    end
-end
-
-wire [47:0] dac_freq_sel = (dac_src_mode_r == 2'd1) ? pll_freq_ch1 :
-                           (dac_src_mode_r == 2'd2) ? pll_freq_ch2 :
-                                                         dac_freq_word_r;
-
-// DDS 配置: {phase_offset[47:0], phase_increment[47:0]}
-wire [95:0] dac_dds_cfg_next = {dac_phase_word_r, dac_freq_sel};
-
-reg [95:0] dac_dds_cfg_reg;
-reg [95:0] dac_dds_cfg_prev;
-reg        dac_cfg_valid;
-
-always @(posedge clk_65M or negedge sys_rst_n) begin
-    if (!sys_rst_n) begin
-        dac_dds_cfg_reg  <= {48'd0, 48'd216519212854};
-        dac_dds_cfg_prev <= 96'd0;
-        dac_cfg_valid    <= 1'b1;
-    end else begin
-        dac_cfg_valid <= 1'b0;
-        if (dac_dds_cfg_next != dac_dds_cfg_prev) begin
-            dac_dds_cfg_reg  <= dac_dds_cfg_next;
-            dac_dds_cfg_prev <= dac_dds_cfg_next;
-            dac_cfg_valid    <= 1'b1;
-        end
-    end
-end
-
-wire signed [31:0] dac_sine_cos;
-wire signed [13:0] dac_sine = dac_sine_cos[29:16];   // 取正弦 (cos 在 [13:0])
-
-dds_compiler_1 u_dds_dac (
-    .aclk                  (clk_65M),
-    .s_axis_config_tvalid  (dac_cfg_valid),
-    .s_axis_config_tdata   (dac_dds_cfg_reg),
-    .m_axis_data_tvalid    (),
-    .m_axis_data_tdata     (dac_sine_cos),
-    .m_axis_phase_tvalid   (),
-    .m_axis_phase_tdata    ()
-);
-
-// signed [13:0] (-8192..8191) → offset binary (0..16383), 喂给 DAC904.
-// 翻转 MSB 等价于 +8192, 且不会有 14'sd8192 溢出问题.
-wire [13:0] dac_wave = {~dac_sine[13], dac_sine[12:0]};
-
-da_wave_send u_da_wave_send (
-    .CLK_DAC904 (clk_65M),
-    .SYS_RST    (sys_rst),
-    .DATA_BUF   (dac_wave),
-    .PD         (dac_pd),
-    .DAC_CLK    (dac_clk),
-    .DAC_DATA   (da_data)
-);
-
-
-// =========================================================================
 // ★ 通道3 锁相放大器 (PSD × 3 振荡器 + DC 通路)
 // =========================================================================
 // ★ 通道3 ref_freq 来源 mux
@@ -461,6 +378,7 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
 end
 
 // ---- 振荡器 1 (默认 2F1+F2) ---------------------------------------------
+wire signed [13:0] osc_ref_sin_21;
 wire signed [27:0] dc_x_ch3_21, dc_y_ch3_21;
 wire               dc_valid_x_ch3_21, dc_valid_y_ch3_21;
 
@@ -480,10 +398,12 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_21 (
     .cic_valid_x (),
     .cic_valid_y (),
     .dc_valid_x  (dc_valid_x_ch3_21),
-    .dc_valid_y  (dc_valid_y_ch3_21)
+    .dc_valid_y  (dc_valid_y_ch3_21),
+    .ref_sine_o  (osc_ref_sin_21)
 );
 
 // ---- 振荡器 2 (默认 F1+2F2) ---------------------------------------------
+wire signed [13:0] osc_ref_sin_12;
 wire signed [27:0] dc_x_ch3_12, dc_y_ch3_12;
 wire               dc_valid_x_ch3_12, dc_valid_y_ch3_12;
 
@@ -503,10 +423,12 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_12 (
     .cic_valid_x (),
     .cic_valid_y (),
     .dc_valid_x  (dc_valid_x_ch3_12),
-    .dc_valid_y  (dc_valid_y_ch3_12)
+    .dc_valid_y  (dc_valid_y_ch3_12),
+    .ref_sine_o  (osc_ref_sin_12)
 );
 
 // ---- 振荡器 3 (默认 F1+F2) ----------------------------------------------
+wire signed [13:0] osc_ref_sin_11;
 wire signed [27:0] dc_x_ch3_11, dc_y_ch3_11;
 wire               dc_valid_x_ch3_11, dc_valid_y_ch3_11;
 
@@ -526,7 +448,58 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
     .cic_valid_x (),
     .cic_valid_y (),
     .dc_valid_x  (dc_valid_x_ch3_11),
-    .dc_valid_y  (dc_valid_y_ch3_11)
+    .dc_valid_y  (dc_valid_y_ch3_11),
+    .ref_sine_o  (osc_ref_sin_11)
+);
+
+// =========================================================================
+// ★ 信号发生器 (DAC904) — 振荡器本振 + 幅值/偏置
+//
+//   DMOD: 0=振荡器1, 1=振荡器2, 2=振荡器3 (与解调参考同源、同频同相)
+//   DAMP: 16bit 幅度系数, 65535=本振满幅;  DOFS: 14bit 有符号码偏置
+// =========================================================================
+reg [1:0]         dac_src_mode_r;
+reg [15:0]        dac_amp_r;
+reg signed [13:0] dac_ofs_r;
+
+always @(posedge clk_65M or negedge sys_rst_n) begin
+    if (!sys_rst_n) begin
+        dac_src_mode_r <= 2'd0;
+        dac_amp_r      <= 16'd65535;
+        dac_ofs_r      <= 14'sd0;
+    end else begin
+        dac_src_mode_r <= dac_src_mode_w;
+        dac_amp_r      <= dac_amp_w;
+        dac_ofs_r      <= dac_ofs_w;
+    end
+end
+
+wire signed [13:0] dac_ref_sin = (dac_src_mode_r == 2'd1) ? osc_ref_sin_12 :
+                                 (dac_src_mode_r == 2'd2) ? osc_ref_sin_11 :
+                                                            osc_ref_sin_21;
+
+wire signed [29:0] dac_prod   = $signed(dac_ref_sin) * $signed({1'b0, dac_amp_r});
+wire signed [27:0] dac_sum28  = (dac_prod >>> 16) + $signed({{14{dac_ofs_r[13]}}, dac_ofs_r});
+
+reg signed [13:0] dac_clip;
+always @(*) begin
+    if (dac_sum28 > $signed(28'sd8191))
+        dac_clip = 14'sd8191;
+    else if (dac_sum28 < $signed(-28'sd8192))
+        dac_clip = -14'sd8192;
+    else
+        dac_clip = dac_sum28[13:0];
+end
+
+wire [13:0] dac_wave = {~dac_clip[13], dac_clip[12:0]};
+
+da_wave_send u_da_wave_send (
+    .CLK_DAC904 (clk_65M),
+    .SYS_RST    (sys_rst),
+    .DATA_BUF   (dac_wave),
+    .PD         (dac_pd),
+    .DAC_CLK    (dac_clk),
+    .DAC_DATA   (da_data)
 );
 
 // ---- 通道3 DC 通路: 直接 CIC + IIR (无混频) ------------------------------
@@ -711,10 +684,10 @@ usb_commend u_usb_commend (
     .order12 (order12_w),
     .order11 (order11_w),
     .order_dc(order_dc_w),
-    // ★ 信号发生器 (DAC904) 控制 (DMOD/DFRQ/DPHS)
+    // ★ 信号发生器 (DAC904): DMOD/DAMP/DOFS
     .dac_src_mode  (dac_src_mode_w),
-    .dac_freq_word (dac_freq_word_w),
-    .dac_phase_word(dac_phase_word_w),
+    .dac_amp       (dac_amp_w),
+    .dac_ofs       (dac_ofs_w),
     .send_en(send_en),
     .send_data(send_data)
 );

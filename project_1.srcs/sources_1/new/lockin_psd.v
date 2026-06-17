@@ -55,7 +55,9 @@ module lockin_psd #(
     output                               cic_valid_x,
     output                               cic_valid_y,
     output                               dc_valid_x,
-    output                               dc_valid_y
+    output                               dc_valid_y,
+    // ★ 本振正弦输出 (供 DAC 信号发生器与解调同源)
+    output wire signed [13:0]            ref_sine_o
 );
 
     // ========================================================================
@@ -69,6 +71,8 @@ module lockin_psd #(
 
     wire signed [13:0] mix_ref_sine = use_coh_ref ? coh_ref_sine : ref_sine;
     wire signed [13:0] mix_ref_cos  = use_coh_ref ? coh_ref_cos  : ref_cos;
+
+    assign ref_sine_o = mix_ref_sine;
 
     dds_compiler_1 u_dds_ref (
         .aclk                  (clk),
