@@ -43,6 +43,275 @@ PCB / IO 物理层、上位机 GUI、网络通信、协议、综合工具链等�
 
 ---
 
+## 2026-06-11 · 光弹应力 GUI / 验算脚本
+
+- **发现日期**: 2026-06-11
+- **关联模块/层**: GUI (`stress_calc.py`, `main_window.py`, `stress_manual_gui.py`)
+- **现象**:
+  1. 按 `1119修正计算公式.md` 接入四路电压 → ρ/δ 后，δ 公式选用存在歧义（文档 acos 形式 vs 工程 atan 形式）。
+  2. `stress_manual_gui.py` 启动报 `NameError: name 'root' is not defined`。
+  3. Windows 控制台打印含 ρ、² 等字符时可能 `UnicodeEncodeError`。
+- **根因**:
+  - 式 9.2 在文档中以 `acos(R3/R_fix)` 出现，但完整推导等价于 `δ = atan(sqrt((R1/R3)²+(R2/R3)²))`；实现选 atan 形式。
+  - GUI 类中使用了 `root` 但未 `root = QWidget()`。
+  - 控制台默认 GBK 编码不支持部分 Unicode 符号。
+- **修复**:
+  1. `stress_calc.py`: R_fix 按式 8.1–8.3；ρ 用 `0.5·atan2(R2,R1)`；δ 用 `atan(hypot(R1/R3,R2/R3))×316.4/π` nm。
+  2. `main_window.py`: 应力面板（Offset 捕获、四路 K、实时 ρ/δ）；幅值显示 ≥1V→V、≥1mV→mV、否则 µV。
+  3. `stress_manual.py` / `stress_manual_gui.py`: 独立验算工具；补 `root = QWidget()`；CLI 输出改用 ASCII。
+- **状态**: ✅ 已解决 (应力为纯上位机计算, 不改 FPGA)
+- **关联文件**:
+  - `lockin_gui/stress_calc.py`, `lockin_gui/main_window.py`
+  - `lockin_gui/stress_manual.py`, `lockin_gui/stress_manual_gui.py`
+  - `1119修正计算公式.md`
+- **备注**: 若需 GUI 切换 acos/atan 两种 δ 公式, 需再改 `stress_calc.py`。
+
+---
+
+## 2026-06-11 · DAC 信号源改为振荡器本振 + 幅值/偏置 (DMOD/DAMP/DOFS)
+
+- **发现日期**: 2026-06-11
+- **关联模块/层**: RTL + GUI + 协议
+- **现象 / 动机**:
+  原 DAC 用独立 `dds_compiler_1` + `DFRQ/DPHS`, 与三路振荡器解调参考不同源, 跟随模式下易出现相位差/杂波;
+  用户要求 DAC 可选振荡器1/2/3 本振, 且幅值/偏置可调 (满量程约 ±3V)。
+- **修改**:
+  1. `lockin_psd.v`: 新增 `ref_sine_o` 输出本振正弦 (与混频同源)。
+  2. `lock_in_amp.v`: 删除独立 DAC DDS; `dac_ref_sin` mux 三路 `osc_ref_sin_*`; `DAMP` 16bit 缩放 + `DOFS` 14bit 偏置 + 饱和。
+  3. `usb_commend.v`: `DMOD` 改为 0/1/2=振荡器1/2/3; 新增 `DAMP`/`DOFS`; `DFRQ`/`DPHS` 保留解析但硬件废弃。
+  4. GUI: 信号发生器面板同步。
+- **状态**: ✅ 已实现 (待上板确认 DAC 波形与解调同相)
+- **关联文件**:
+  - `project_1.srcs/sources_1/new/lock_in_amp.v`, `lockin_psd.v`, `usb_commend.v`
+  - `lockin_gui/main_window.py`, `docs/UART_Protocol.md`
+- **备注**:
+  - **勿每拍重配 DDS** — 跟随模式应直接复用 PSD 本振, 不要另开 DDS 扫频。
+  - 早期独立 DAC DDS 曾导致 WNS 恶化与 GUI 发帧异常 (见 2026-06-08 条目)。
+
+---
+
+## 2026-06-11 · 振荡器谐波阶数 N (OHN1/2/3) + Verilog 语法
+
+- **发现日期**: 2026-06-11
+- **关联模块/层**: RTL + GUI + 协议
+- **现象**:
+  综合报错: 对 `(f_base * oh)[47:0]` 做位选 — Vivado 不支持对复杂表达式直接位选。
+- **根因**: Verilog-2001 要求位选操作数必须是明确 wire/reg, 不能是 `(a*b)[47:0]`。
+- **修复**:
+  - `lock_in_amp.v`: `wire [63:0] f_harm_xx = f_base_xx * ohN_eff`, 再 `ref_freq <= f_harm_xx[47:0]`。
+  - `coherent_harm_lo.v`: `wire [55:0] comb_prod = comb_sum * order_eff`, 再赋 `comb_phase`。
+  - 命令 `OHN1/2/3`, 默认 N=1, 最终 `f_ref = f_base × N` (类 Zurich)。
+- **状态**: ✅ 已解决
+- **关联文件**: `coherent_harm_lo.v`, `lock_in_amp.v`, `usb_commend.v`, `main_window.py`
+
+---
+
+## 2026-06-11 · CH4/OSRC 后时序违例 + 多模块功能异常
+
+- **发现日期**: 2026-06-10 ~ 2026-06-11
+- **关联模块/层**: RTL / 时序 / XDC
+- **现象**:
+  1. 新增 CH4、`OSRC1/2/3` (CH3/CH4/差分) 后 Implementation **WNS 为负** (约 -3.6 ns 量级)。
+  2. 时序“修一点”后 oscill2/3 或 DAC 仍异常: 锁定值不对、某路恒 0、DAC 输出杂波而非正弦。
+  3. 有时 PLL 正常但振荡器/信号发生器仍坏。
+- **排查过程**:
+  1. 先怀疑 GUI 命令未下发 — 加帧内 `ref_word_*` 回读 (104B 帧) 核对。
+  2. 发现 failing path 在 ADC→差分→mux→PSD 长组合链, 以及 435 bit 配置 CDC。
+  3. 注释 ILA 释放布线; 对 `coherent_harm_lo`、PLL 相位、OSRC mux 加流水。
+- **根因**:
+  - CH4 差分 + 三路 OSRC mux 拉长 65M 域组合路径。
+  - `usb_commend` 在 50M、`x_y_fir_packed`/配置在 65M, **640 bit 数据 + 宽配置总线 CDC** 不可靠。
+  - DAC 独立 DDS 每拍 `tvalid=1` 加重 65M 拥塞。
+- **修复** (当前源码):
+  1. **FT245 + `usb_commend` 迁到 `clk_65M`**, 配置与 `x_y_fir_packed` **同域直连, 删除 435 bit CDC**。
+  2. OSRC: `adc_diff_sat_r` + `adc_in_osc*` **两级寄存** (lock_in_amp.v ~339–378)。
+  3. `coherent_harm_lo`: 乘加 ×N **三级流水**; `f_base×N` 用 wire 承接。
+  4. DAC: 改接 `ref_sine_o`, 去掉独立 DDS 重配。
+  5. ILA 暂时注释减布线压力。
+- **状态**: ⚠ 部分解决 — 2026-06-10 用户确认三路+DC 正常; CH4/OHN/DAC 改版后需 **重新综合上板** 再验
+- **关联文件**:
+  - `lock_in_amp.v`, `ft245_rx.v`/`ft245_tx.v` (时钟改为 65M)
+  - `coherent_harm_lo.v`, `pin.xdc` / 时序约束
+- **备注**:
+  - 加并行 ADC 路径时 **先加 pipeline 再扩功能**, 不要堆组合逻辑后靠 phys_opt 硬挤。
+  - 帧格式现为 **104 字节** (含 3×ref 频率字回读), GUI `device.py` 须同步。
+
+---
+
+## 2026-06-10 · 振荡器2/DC 恒为 0、三路锁定值不一致
+
+- **发现日期**: 2026-06-09 ~ 2026-06-10
+- **关联模块/层**: RTL (CDC / 时序) + GUI
+- **现象**:
+  100 kHz 同相信号输入, 手动模式三路设相同频率: osc1/3 跳变但幅值不同, **osc2 与 DC 恒为 0**;
+  改 osc2 频率无任何响应。后确认 **完整重烧** 后三路+DC 恢复正常。
+- **排查过程**:
+  1. 排除 GUI 换算 — 命令格式对称。
+  2. 帧内追加 `ref_word_21/12/11` 回读, 区分“命令未到”vs“PSD 坏了”。
+  3. 定位到 **65M↔50M 配置/数据 CDC**: 宽总线单级同步导致部分字段采到旧值/0。
+- **根因**:
+  跨时钟域 **多 bit 配置** (OSC/FRQ/REFMODE 等) 未稳定同步 → 某路 `ref_freq` 实际为 0 → sin(0) 混频输出恒 0。
+  DC 恒 0 在纯交流输入下正常; 若加直流仍 0, 可能是 **模拟前端交流耦合** (待硬件确认)。
+- **修复**:
+  - XDC: `sys_clk` 与 `clk_65M` **异步分组** + 配置总线 **两级同步** (后演进为整域迁 65M)。
+  - `f_osc*_auto`、`coherent_harm_lo` 加流水打断长路径。
+  - 数据帧 80→**104 字节**, 带回读字段。
+- **状态**: ✅ 已解决 (2026-06-10 用户确认)
+- **关联文件**: `lock_in_amp.v`, `lockin_gui/device.py`, `usb_commend.v`
+- **备注**: “改了 RTL 但现象不变” 多次是因为 **未烧录最新 bitstream**。
+
+---
+
+## 2026-06-10 · 自动模式相干本振 — 上电/切模式后 Θ 随机
+
+- **发现日期**: 2026-06-09 ~ 2026-06-10
+- **关联模块/层**: RTL (lockin_psd / lock_in_amp)
+- **现象**:
+  CH1 DAC 跟随与外参考 **同频同相**; 但振荡器自动模式 (如 1F1+0F2) 锁同源信号时 **Θ 每次上电/切模式变化**,
+  三路设相同系数时 **Θ/幅值仍不一致**。
+- **根因**:
+  自动模式原先用 **独立 DDS + 仅借频率字**, 相位与 PLL 本振 **不相干**; 各 PSD 实例 DDS 自由积分, 初相随机。
+- **修复**:
+  - 新增 `coherent_harm_lo.v`: `θ_harm = N·(n·θ1 + m·θ2)`, 用 PLL 相位字驱动, `increment=0`。
+  - `lockin_psd`: `use_coh_ref` 时混频用相干 sin/cos, 不再仅 sync 频率字。
+  - 自动模式 GUI **停止** 每帧重算下发 FRQ (硬件实时运算)。
+- **状态**: ✅ 已解决 (相干本振 + 流水后上板验证通过)
+- **关联文件**: `coherent_harm_lo.v`, `lockin_psd.v`, `lock_in_amp.v`, `main_window.py`
+
+---
+
+## 2026-06-08 · 添加 DAC 后 GUI 串口无数据 + 严重时序违例
+
+- **发现日期**: 2026-06-08
+- **关联模块/层**: RTL / 时序
+- **现象**:
+  新增 DAC904 (`u_dds_dac` + `da_wave_send`) 后, `--serial` 模式 **XYOUT 有应答但 FPS=0**;
+  timing 报告 **WNS ≈ -10 ns**, 1831 failing endpoints。
+- **根因**:
+  第 3 个 `dds_compiler_1` + DAC mux 加重 **65M 域**; USB 触发 `dc_valid_x_ch1` 在 65M 仅 1 拍,
+  经 50M `usb_commend` 采样易漏 (次要); 主因是 **整体时序崩溃** 导致发帧/state 机异常。
+- **修复**:
+  - 短期: 回退无关改动, 确认 DAC 提交引入违例; DAC DDS **`tvalid` 脉冲化** + 配置寄存。
+  - 长期: 见 2026-06-11 条目 (USB 迁 65M、DAC 改振荡器本振)。
+- **状态**: ✅ 已解决 (后续架构调整)
+- **关联文件**: `lock_in_amp.v`, `project_1.runs/impl_1/*timing*`
+- **备注**: `usb_commend.v` 新增 DMOD/DFRQ/DPHS **不改动发帧 FSM**, 不是 FPS=0 根因。
+
+---
+
+## 2026-06-08 · DAC 输出频率固定 ~88 kHz 不随设置变化
+
+- **发现日期**: 2026-06-08
+- **关联模块/层**: RTL + GUI
+- **现象**: GUI/命令改 DFRQ 或跟随 CH1, 示波器测 DAC **始终 ~88 kHz**。
+- **排查过程**:
+  查 `dac_src_mode` mux、`pll_freq_ch1` 接线、GUI `hz_to_freq_word` 与 `_clk_cal`。
+- **根因** (当时独立 DAC 方案):
+  - 跟随模式仍走内部 DDS 默认频率字; 或 `s_axis_config_tvalid` 恒 1 时 DDS IP 行为异常;
+  - 时序违例导致 mux/配置字采样错乱。
+- **修复**: 后改为 **直接 mux 振荡器 `ref_sine_o`**, 从根本去掉独立 DAC 频率链。
+- **状态**: ✅ 已解决 (架构替换)
+- **关联文件**: `lock_in_amp.v`, `main_window.py`
+
+---
+
+## 2026-05-12 · 数据帧扩展 80 → 104 字节 (参考频率回读)
+
+- **发现日期**: 2026-06-10 (诊断引入)
+- **关联模块/层**: RTL + 协议 + GUI
+- **现象**: 需确认硬件实际使用的 `ref_freq_*`, 旧 80B 帧无此字段。
+- **修改**:
+  - 帧尾追加 `ref_word_21/12/11` 各 64bit (48bit 频率字); `FRAME_BYTES=104`。
+  - `device.py`: `FRAME_FMT = ">11i3iQQi3Q"`, `FRAME_LEN=104`。
+  - GUI 振荡器旁显示 `硬件=xxx Hz`。
+- **状态**: ✅ 已实现 (USB/UDP 路径均用同一打包)
+- **关联文件**: `lock_in_amp.v`, `usb_commend.v`, `lockin_gui/device.py`, `docs/Interface_Spec_for_SW.md`
+- **备注**: 改帧格式后 **必须同时更新 FPGA + GUI**, 否则解析全错。
+
+---
+
+## 2026-05-12 · 串口 vs UDP 数据不一致 (USB 路径无数据 CDC)
+
+- **发现日期**: 2026-05-12
+- **关联模块/层**: RTL (CDC) / 协议
+- **现象**: 同一板卡 **UDP 模式数据正常**, **串口模式** 频率/锁定值乱跳或不可信。
+- **根因**:
+  - UDP: `x_y_fir_packed` 经 **XPM_FIFO_ASYNC** 65M→125M ✓
+  - USB: `usb_commend` 在 **50M** 直接采样 **65M** 域的 640bit `x_y_fir` 与 `dc_valid` **无 FIFO** ✗
+- **修复**: 2026-06-11 将 FT245 + `usb_commend` **整体迁到 clk_65M**, 与锁相核心同域。
+- **状态**: ✅ 已解决
+- **关联文件**: `lock_in_amp.v`, `eth_lockin_top.v`
+- **备注**: 若保留双上行, 应对 USB 数据也使用 async FIFO, 而非裸 CDC。
+
+---
+
+## 2026-05-12 · PLL 锁定阈值过高导致扫频/锁定反复横跳
+
+- **发现日期**: 2026-05-12
+- **关联模块/层**: RTL + GUI + 协议
+- **现象**: 频率显示抖动、难锁定; 或 weak 信号下 **SWEEP↔LOCK 来回跳**。
+- **根因**: `SWEEP_THRES`/`LOCK_X_THRES` 原为综合时常量 (曾用 800K/3M), 对中等信号过严。
+- **修复**:
+  - `pll_controller.v`: 阈值改为 **input wire**。
+  - 命令 **`LOCKSWY`** (Y 进 LOCK)、**`LOCKTHX`** (X 维持 LOCK); 默认 **100K / 300K**。
+  - GUI 新增阈值面板; 文档 `UART_Protocol.md` 6.3.9/6.3.10。
+- **状态**: ✅ 已解决
+- **关联文件**: `pll_controller.v`, `pll_loop.v`, `usb_commend.v`, `lock_in_amp.v`, `main_window.py`
+- **备注**:
+  - SWEEP 只看 **|dc_y|**, LOCK 只看 **|dc_x|** — 顺序不可颠倒。
+  - 商用产品常用 **R=√(X²+Y²)** 判据, 后续可改进。
+
+---
+
+## 2026-05-12 · 电压标定: 实测 vs 苏黎世 + 峰值/RMS 显示
+
+- **发现日期**: 2026-05-12
+- **关联模块/层**: GUI
+- **现象**:
+  1. 输入 Vpp=40mV (Vp=20mV) GUI 显示 ~10mV; Vpp=400mV 显示 ~104mV (~0.52×)。
+  2. 与苏黎世对比, 需 ×**0.9966** 才一致。
+  3. 用户要求 **峰值 / RMS** 显示可切换。
+- **根因**:
+  - 显示量为 **峰值 (R/|X|)**, 非 RMS; 旧 `MV_PER_LSB` 公式仍有 ~2× 量级偏差 (见 2026-05-11 条目)。
+  - 前端增益/ADC 有效位数与理想 ±5V 满量程有偏差。
+- **修复**:
+  - 推导链修正 + GUI **`CALIB_K`** (谐波) 与 **`CALIB_K_DC`** (直流) **分开**。
+  - 新增峰值/RMS 切换; 苏黎世对标值作默认 `CALIB_K` 初值。
+- **状态**: ⚠ 部分解决 — 公式已修正, 仍需实测微调 K
+- **关联文件**: `lockin_gui/main_window.py`
+
+---
+
+## 2026-05-12 · 直流 (DC) 通路显示偏小
+
+- **发现日期**: 2026-05-12
+- **关联模块/层**: GUI
+- **现象**: DC 读数比预期小约 **4096 倍** (2^12)。
+- **根因**: DC 通路 `adc→CIC→IIR` 输出 LSB 与谐波通路混频后增益链 **未乘同一 front-end 系数**。
+- **修复**: GUI 侧 DC 换算使用 **`G_TOTAL_DC`** (或独立 `CALIB_K_DC`), 与谐波分开标定。
+- **状态**: ✅ 已解决 (GUI 标定)
+- **关联文件**: `lockin_gui/main_window.py`
+
+---
+
+## 2026-05-06 ~ 2026-05-08 · 千兆以太网 UDP 上行迁移
+
+- **发现日期**: 2026-05-06 ~ 2026-05-08
+- **关联模块/层**: RTL / 网络 / 工具链 / 上位机
+- **现象** (摘要): 综合报错 (错误文件路径、`udp_complete` 端口、`BUFIO`)、RGMII RX 需 IDELAY、
+  TX 物理层不通、子网与 **192.168.1.x 冲突**、代理软件劫持 UDP、`ping` 超时 (无 ICMP)、上电 ~50s IDELAY 扫描无数据等。
+- **结果**: ✅ 调通 — GUI `--udp` 模式; 命令仍走 FT245, 数据走 UDP。
+- **详细复盘**: 见 [`docs/ethernet_migration_retrospective.md`](ethernet_migration_retrospective.md)
+  (坑 #1–#18: Tcl `[pwd]` 非工程目录、子网改 **192.168.99.0/24**、`USE_CLK90`、IDELAY 扫描等)。
+- **关联文件**:
+  - `eth_lockin_top.v`, `udp_lockin_tx.v`, `eth_phy_init.v`, `eth_pins.xdc`
+  - `lockin_gui/device.py` (`UdpLockinDevice`), `tools/host_udp.py`
+- **备注**:
+  - 应用层帧率 ~**3.6 kbps** (受 `dc_valid` 节流), 非千兆瓶颈。
+  - **不要用 ping** 测 FPGA; 用 `arp -a` + UDP 收帧。
+
+---
+
 ## 2026-05-11 · 通道3 IIR 阶数从"全局统一"细分为"每路独立" (ORDER → ORD21/ORD12/ORD11/ORDDC)
 
 - **发现日期**: 2026-05-11
@@ -201,18 +470,18 @@ PCB / IO 物理层、上位机 GUI、网络通信、协议、综合工具链等�
      因此 mux **现阶段强制走手动支路** (3 行 `assign ref_freq_xx_to_psd = freq_word_xx_uart;`),
      mux 的真正自动支路被注释保留, PLL 恢复后取消注释即可生效.
   4. 协议文档 `UART_Protocol.md` 6.3.8c 节同步更新.
-- **状态**: ⚠ 部分完成 — 命令路径就绪, mux 路径就绪, 但当前强制手动 (PLL 恢复后激活).
+- **状态**: ✅ 已完成 — PLL 已恢复 (2026-05-12 起); 硬件自动支路 `coherent_harm_lo` + `REFMODE:1` 已启用; GUI 自动模式不再每帧下发 FRQ
 - **关联文件**:
   - `project_1.srcs/sources_1/new/usb_commend.v` (新增 REFMODE 命令)
-  - `project_1.srcs/sources_1/new/lock_in_amp.v` (新增 ref_freq mux, 强制手动)
+  - `project_1.srcs/sources_1/new/lock_in_amp.v` (ref_freq mux + coherent_harm_lo)
+  - `project_1.srcs/sources_1/new/coherent_harm_lo.v` (★ 2026-06 新增)
   - `docs/UART_Protocol.md` (新增 6.3.8c)
-- **PLL 恢复后激活清单**:
-  - [ ] 取消 `pll_loop u_pll_ch1` / `u_pll_ch2` 实例化注释 (lock_in_amp.v 行 ~138/~187)
-  - [ ] 删除/注释 lock_in_amp.v 中"PLL 注释期间"3 行强制手动 assign
-  - [ ] 取消下方"PLL 恢复后启用"3 行 mux assign 注释
-  - [ ] 把 USB 数据触发信号从 `dc_valid_x_ch3_21` 改回 `dc_valid_x_ch1`
-  - [ ] 重新综合 + 烧写
-  - [ ] 上位机发 `REFMODE:1` 验证硬件自动跟随
+- **PLL 恢复后激活清单** (归档, 均已完成):
+  - [x] 取消 `pll_loop u_pll_ch1` / `u_pll_ch2` 实例化注释
+  - [x] 启用硬件自动 ref_freq / 相干本振 (非 GUI 重算下发)
+  - [x] USB 数据触发改回 `dc_valid_x_ch1` (同域 65M, 无 CDC 漏采)
+  - [x] 重新综合 + 烧写
+  - [ ] 上位机发 `REFMODE:1` 验证 — 常规测试项
 
 ---
 
@@ -244,6 +513,8 @@ PCB / IO 物理层、上位机 GUI、网络通信、协议、综合工具链等�
   `lockin_psd u_psd_ch3_21`), 这条路径不依赖 PLL.
   同时新增 3 条上位机命令 `FRQ21/FRQ12/FRQ11`, 让上位机能手动下发
   通道 3 三路开环锁相的参考频率 (原本是固定常数, 不可调).
+  **后续 (2026-05-12)**: PLL 恢复后触发改回 `dc_valid_x_ch1`;
+  **2026-06-11**: FT245/`usb_commend` 迁 `clk_65M`, 同域直连, 消除 CDC 漏采。
 - **状态**: ✅ 已解决
 - **关联文件**:
   - `project_1.srcs/sources_1/new/lock_in_amp.v` 行 ~451 (m_axis_data_tvalid_fir_x 重新接线)

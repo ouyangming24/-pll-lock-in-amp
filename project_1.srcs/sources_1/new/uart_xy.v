@@ -1,20 +1,20 @@
 module uart_xy (
-    input wire clk,              // Ê±ÖÓĞÅºÅ
-    input wire rst_n,            // ¸´Î»ĞÅºÅ
-    input wire [127:0] data_in,   // ÊäÈëµÄÊı¾İ£¬´Ó160Î»¸ÄÎª128Î»
-    input wire start_send,       // ¿ªÊ¼·¢ËÍĞÅºÅ
-    output wire uart_txd,        // UART·¢ËÍ¶Ë¿Ú
-    output reg tx_flag           // ·¢ËÍ±êÖ¾£¬±íÊ¾·¢ËÍÃ¦
+    input wire clk,              // æ—¶é’Ÿä¿¡å·
+    input wire rst_n,            // å¤ä½ä¿¡å·
+    input wire [127:0] data_in,   // è¾“å…¥çš„æ•°æ®ï¼Œä»160ä½æ”¹ä¸º128ä½
+    input wire start_send,       // å¼€å§‹å‘é€ä¿¡å·
+    output wire uart_txd,        // UARTå‘é€ç«¯å£
+    output reg tx_flag           // å‘é€æ ‡å¿—ï¼Œè¡¨ç¤ºå‘é€å¿™
 );
 
 
-    reg [7:0] data_chunk;        // Ã¿´Î·¢ËÍµÄ8Î»Êı¾İ¿é
-    reg [3:0] chunk_count;       // Êı¾İ¿é¼ÆÊıÆ÷£¬µ÷ÕûÎª4Î»ÒÔÊÊÓ¦16¸ö8Î»Êı¾İ¿é
-    reg [2:0] state;             // ×´Ì¬»ú×´Ì¬
-    reg send_enable;             // ·¢ËÍÊ¹ÄÜĞÅºÅ
-    reg [26:0] delay_counter;    // ÑÓ³Ù¼ÆÊıÆ÷
-    reg delay_enable;            // ÑÓ³ÙÊ¹ÄÜĞÅºÅ
-    wire tx_done;                // ´Óuart_sendÄ£¿é»ñÈ¡µÄ·¢ËÍÍê³ÉĞÅºÅ
+    reg [7:0] data_chunk;        // æ¯æ¬¡å‘é€çš„8ä½æ•°æ®å—
+    reg [3:0] chunk_count;       // æ•°æ®å—è®¡æ•°å™¨ï¼Œè°ƒæ•´ä¸º4ä½ä»¥é€‚åº”16ä¸ª8ä½æ•°æ®å—
+    reg [2:0] state;             // çŠ¶æ€æœºçŠ¶æ€
+    reg send_enable;             // å‘é€ä½¿èƒ½ä¿¡å·
+    reg [26:0] delay_counter;    // å»¶è¿Ÿè®¡æ•°å™¨
+    reg delay_enable;            // å»¶è¿Ÿä½¿èƒ½ä¿¡å·
+    wire tx_done;                // ä»uart_sendæ¨¡å—è·å–çš„å‘é€å®Œæˆä¿¡å·
 
     localparam IDLE = 3'b000;
     localparam DATA = 3'b001;
@@ -22,7 +22,7 @@ module uart_xy (
     localparam NEWLINE = 3'b011;
     localparam DELAY = 3'b100;
 
-    // ´®¿Ú·¢ËÍÄ£¿éÊµÀı£¬ĞŞ¸Ä²ÎÊıÃû³ÆÒÔÆ¥Åäuart_sendÄ£¿é¶¨Òå
+    // ä¸²å£å‘é€æ¨¡å—å®ä¾‹ï¼Œä¿®æ”¹å‚æ•°åç§°ä»¥åŒ¹é…uart_sendæ¨¡å—å®šä¹‰
     uart_send u_uart_send(
         .clk(clk),
         .rst_n(rst_n),
@@ -32,20 +32,20 @@ module uart_xy (
         .tx_done(tx_done)
     );
 
-    // tx_flagĞÅºÅ´¦ÀíÂß¼­£¨·¢ËÍÃ¦ĞÅºÅ£©
+    // tx_flagä¿¡å·å¤„ç†é€»è¾‘ï¼ˆå‘é€å¿™ä¿¡å·ï¼‰
     always @(posedge clk or negedge rst_n) begin
         if (~rst_n)
             tx_flag <= 1'b0;
         else if (send_enable)
-            tx_flag <= 1'b1;       // ¿ªÊ¼·¢ËÍÊ±ÉèÖÃÃ¦±êÖ¾
+            tx_flag <= 1'b1;       // å¼€å§‹å‘é€æ—¶è®¾ç½®å¿™æ ‡å¿—
         else if (tx_done)
-            tx_flag <= 1'b0;       // ÊÕµ½·¢ËÍÍê³ÉĞÅºÅÊ±Çå³ıÃ¦±êÖ¾
+            tx_flag <= 1'b0;       // æ”¶åˆ°å‘é€å®Œæˆä¿¡å·æ—¶æ¸…é™¤å¿™æ ‡å¿—
     end
 
-    // Êı¾İ·¢ËÍ¿ØÖÆÂß¼­
+    // æ•°æ®å‘é€æ§åˆ¶é€»è¾‘
     always @(posedge clk or negedge rst_n) begin
         if (~rst_n) begin
-            chunk_count <= 16;   // µ÷ÕûÎª16£¬¶ÔÓ¦128Î»Êı¾İ£¨16¸ö8Î»Êı¾İ¿é£©
+            chunk_count <= 16;   // è°ƒæ•´ä¸º16ï¼Œå¯¹åº”128ä½æ•°æ®ï¼ˆ16ä¸ª8ä½æ•°æ®å—ï¼‰
             send_enable <= 0;
             state <= IDLE;
             data_chunk <= 8'b0;
@@ -55,37 +55,37 @@ module uart_xy (
             case (state)
                 IDLE: begin
                     if (start_send) begin
-                        chunk_count <= 16;     // ³õÊ¼»¯Îª16¸öÊı¾İ¿é
-                        send_enable <= 0;      // ¿ªÊ¼·¢ËÍµÚÒ»¸öÊı¾İ¿é
+                        chunk_count <= 16;     // åˆå§‹åŒ–ä¸º16ä¸ªæ•°æ®å—
+                        send_enable <= 0;      // å¼€å§‹å‘é€ç¬¬ä¸€ä¸ªæ•°æ®å—
                         state <= DATA;
                     end
                 end
 
                 DATA: begin
-                    if (chunk_count > 0) begin        // µÈ´ıÉÏÒ»¸öÊı¾İ¿é·¢ËÍÍê³É
+                    if (chunk_count > 0) begin        // ç­‰å¾…ä¸Šä¸€ä¸ªæ•°æ®å—å‘é€å®Œæˆ
                         if (!tx_flag) begin
-                            // Ê¹ÓÃÒÆÎ»²Ù×÷Ñ¡ÔñÒª·¢ËÍµÄ8Î»Êı¾İ¿é
+                            // ä½¿ç”¨ç§»ä½æ“ä½œé€‰æ‹©è¦å‘é€çš„8ä½æ•°æ®å—
                             data_chunk  <= (data_in >> ((chunk_count-1) * 8)) & 8'hFF;
                             send_enable <= 1;
-                            state <= DELAY_SEND;  // Ìí¼ÓÒ»¸öĞÂµÄ×´Ì¬ÓÃÓÚÑÓ³ÙÇå³ı
+                            state <= DELAY_SEND;  // æ·»åŠ ä¸€ä¸ªæ–°çš„çŠ¶æ€ç”¨äºå»¶è¿Ÿæ¸…é™¤
                         end
                     end else begin
                         send_enable <= 0;
-                        state <= DELAY;  // ½øÈëÑÓ³Ù×´Ì¬
+                        state <= DELAY;  // è¿›å…¥å»¶è¿ŸçŠ¶æ€
                     end
                 end
                 
                 DELAY_SEND: begin
-                    send_enable <= 0;  // ÔÚÏÂÒ»ÖÜÆÚÇå³ı send_enable
+                    send_enable <= 0;  // åœ¨ä¸‹ä¸€å‘¨æœŸæ¸…é™¤ send_enable
                     chunk_count <= chunk_count - 1;
-                    state <= DATA;  // »Øµ½Êı¾İ·¢ËÍ×´Ì¬£¬×¼±¸·¢ËÍÏÂÒ»¸ö¿é
+                    state <= DATA;  // å›åˆ°æ•°æ®å‘é€çŠ¶æ€ï¼Œå‡†å¤‡å‘é€ä¸‹ä¸€ä¸ªå—
                 end
                 
 //                NEWLINE: begin
-//                    if (!tx_flag) begin        // µÈ´ı·¢ËÍÍê³É
-//                        data_chunk <= 8'h0A;   // ·¢ËÍ»»ĞĞ·û
+//                    if (!tx_flag) begin        // ç­‰å¾…å‘é€å®Œæˆ
+//                        data_chunk <= 8'h0A;   // å‘é€æ¢è¡Œç¬¦
 //                        send_enable <= 1;
-//                        state <= DELAY;        // ½øÈëÑÓ³Ù×´Ì¬
+//                        state <= DELAY;        // è¿›å…¥å»¶è¿ŸçŠ¶æ€
 //                    end
 //                end
 
@@ -96,7 +96,7 @@ module uart_xy (
                     end else begin
                         delay_counter <= 0;
                         delay_enable <= 0;
-                        state <= IDLE;         // ÑÓ³Ù½áÊøºó»Øµ½IDLE×´Ì¬
+                        state <= IDLE;         // å»¶è¿Ÿç»“æŸåå›åˆ°IDLEçŠ¶æ€
                     end
                 end
             endcase

@@ -14,7 +14,7 @@ PyQt5 主窗口 ── 商用锁相放大器风格 GUI
 └────────────────────────────────┴────────────────────────────────┘
 
 参数面板三色分组:
-  橙 = 锁相环设置  |  绿 = 振荡器设置  |  蓝 = 信号发生器
+  橙 = 锁相环设置  |  绿 = 振荡器设置  |  蓝 = 信号发生器  |  紫 = 应力计算
 """
 
 import csv
@@ -37,6 +37,7 @@ from device import (
     LockinDevice, UdpLockinDevice, MockDevice, list_serial_ports,
     hz_to_freq_word, FIELD_NAMES, F_CLK,
 )
+from stress_calc import StressInputs, ChannelVoltages, StressCalib, compute_stress
 
 # ============================================================================
 # 配置
@@ -385,6 +386,11 @@ class MainWindow(QMainWindow):
         self._latest_locked_ch2 = False
         self._last_frame: dict | None = None    # 最近一帧解析结果, 供诊断按钮使用
 
+        # 空气 Offset 平均采集 (点击开始 → 再点击结束并保存)
+        self._stress_off_avg_active = False
+        self._stress_off_avg_n = 0
+        self._stress_off_avg_acc: dict[str, float] = {}
+
         # 运行时电压标定 (用户可在 GUI 上随时改). K 拆成两组独立:
         #   _calib_k_har → 只影响 X/Y/R (有混频) 通路 → _v_per_lsb / _mv_per_lsb
         #   _calib_k_dc  → 只影响 DC    (无混频) 通路 → _v_per_lsb_dc / _mv_per_lsb_dc
@@ -699,6 +705,9 @@ class MainWindow(QMainWindow):
 
         # ── 蓝色: 信号发生器 ─────────────────────────────────────
         v.addWidget(self._build_dac_group())
+
+        # ── 紫色: 光弹应力计算 ───────────────────────────────────
+        v.addWidget(self._build_stress_group())
 
         self.rb_ref_auto.toggled.connect(self._on_ref_mode_toggled)
         self.ed_f1.textChanged.connect(self._on_f1f2_text_changed)
@@ -1492,6 +1501,269 @@ class MainWindow(QMainWindow):
         self.dev.send_command(f"DOFS:{send_code}")
         self.on_log(f"  DAC 偏置 {v_ofs:+.4f} V → DOFS:{send_code} (码={code})")
 
+    # ------------------------------------------- 应力计算 (光弹法)
+    def _build_stress_group(self) -> QGroupBox:
+        gb = QGroupBox("应力计算 (光弹)")
+        gb.setObjectName("gbStress")
+        gb.setToolTip(
+            "由振荡器1/2/3 与直流四路 V_peak 读数, 按 1119修正计算公式 求 ρ(°) 与 δ(nm).\n"
+            "Offset = 空气基准; R1_fix/R2_fix/R3_fix 均除以 R3_offset.\n"
+            "X<0 时 R1/R2/R3 取负.\n"
+            "校正 K: 四路各自乘以系数后再代入公式 (测量与 Offset 同乘).\n"
+            "计算一律使用 V_peak (不受 V_rms 显示切换影响)."
+        )
+        outer = QVBoxLayout(gb)
+        outer.setContentsMargins(10, 12, 10, 8)
+        outer.setSpacing(6)
+
+        cap_h = QHBoxLayout()
+        self.btn_stress_capture = QPushButton("开始平均 Offset")
+        self.btn_stress_capture.setStyleSheet(
+            "font-size: 10pt; padding: 4px 8px; background:#536; color:#fff;")
+        self.btn_stress_capture.setToolTip(
+            "第一次点击: 开始对当前测量值做时间平均 (需数据流运行中).\n"
+            "第二次点击: 结束采集, 将平均后的 X/Y/DC 写入下方 Offset 表.")
+        self.btn_stress_capture.clicked.connect(self._toggle_stress_offset_avg)
+        self.lbl_stress_avg_status = QLabel("")
+        self.lbl_stress_avg_status.setStyleSheet("font-size: 9pt; color: #fa8;")
+        self.chk_stress_live = QCheckBox("实时更新")
+        self.chk_stress_live.setChecked(True)
+        self.chk_stress_live.setToolTip("勾选后每帧自动刷新 ρ / δ")
+        cap_h.addWidget(self.btn_stress_capture)
+        cap_h.addWidget(self.lbl_stress_avg_status)
+        cap_h.addWidget(self.chk_stress_live)
+        cap_h.addStretch()
+        outer.addLayout(cap_h)
+        self._stress_offset_avg_reset()
+
+        calib_lbl = QLabel("校正系数 K (测量与 Offset 同乘后代入公式):")
+        calib_lbl.setStyleSheet("font-size: 9pt; color: #aaa;")
+        outer.addWidget(calib_lbl)
+        calib_h = QHBoxLayout()
+        calib_h.setSpacing(6)
+        self._stress_calib_ed: dict[str, QLineEdit] = {}
+        for key, name in (
+            ("osc1", OSC1_LBL), ("osc2", OSC2_LBL), ("osc3", OSC3_LBL), ("dc", DC_LBL),
+        ):
+            calib_h.addWidget(QLabel(name))
+            ed = QLineEdit("1")
+            ed.setFixedWidth(56)
+            ed.setFixedHeight(26)
+            ed.setAlignment(Qt.AlignCenter)
+            ed.setStyleSheet("font-size: 10pt; padding: 2px 4px;")
+            ed.setToolTip(f"{name} 通路校正系数, 默认 1")
+            ed.textChanged.connect(self._update_stress_display)
+            self._stress_calib_ed[key] = ed
+            calib_h.addWidget(ed)
+        calib_h.addStretch()
+        outer.addLayout(calib_h)
+
+        off_lbl = QLabel("空气基准 Offset (V_peak, X/Y 用于带符号 R):")
+        off_lbl.setStyleSheet("font-size: 9pt; color: #aaa;")
+        outer.addWidget(off_lbl)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(4)
+        hdr = ("", "X (V)", "Y (V)")
+        for c, t in enumerate(hdr):
+            lb = QLabel(t)
+            lb.setStyleSheet("font-size: 9pt; color: #8ad;")
+            grid.addWidget(lb, 0, c)
+
+        self._stress_off_ed: dict[str, QLineEdit] = {}
+        off_rows = (
+            ("osc1", OSC1_LBL, "0", "0"),
+            ("osc2", OSC2_LBL, "0", "0"),
+            ("osc3", OSC3_LBL, "0", "0"),
+        )
+        for row, (key, name, dx, dy) in enumerate(off_rows, start=1):
+            grid.addWidget(QLabel(name), row, 0)
+            ex = QLineEdit(dx)
+            ey = QLineEdit(dy)
+            for ed in (ex, ey):
+                ed.setFixedHeight(26)
+                ed.setStyleSheet("font-size: 10pt; padding: 2px 4px;")
+                ed.setAlignment(Qt.AlignCenter)
+            grid.addWidget(ex, row, 1)
+            grid.addWidget(ey, row, 2)
+            self._stress_off_ed[f"{key}_x"] = ex
+            self._stress_off_ed[f"{key}_y"] = ey
+
+        grid.addWidget(QLabel(DC_LBL), 4, 0)
+        self.ed_stress_off_dc = QLineEdit("0")
+        self.ed_stress_off_dc.setFixedHeight(26)
+        self.ed_stress_off_dc.setStyleSheet("font-size: 10pt; padding: 2px 4px;")
+        self.ed_stress_off_dc.setAlignment(Qt.AlignCenter)
+        grid.addWidget(self.ed_stress_off_dc, 4, 1, 1, 2)
+        outer.addLayout(grid)
+
+        res_style = (
+            "color:#eee; background:#1a1a1a; padding:4px 8px;"
+            " font-family:Consolas, monospace; font-size:10pt;")
+        self.lbl_stress_rho = QLabel("ρ (主应力方向)  =  --- °")
+        self.lbl_stress_delta = QLabel("δ (延迟量)      =  --- nm")
+        self.lbl_stress_rfix = QLabel("R_fix:  R1=---  R2=---  R3=---")
+        self.lbl_stress_rfix.setStyleSheet("font-size: 9pt; color: #8a8;")
+        for lbl in (self.lbl_stress_rho, self.lbl_stress_delta):
+            lbl.setStyleSheet(res_style)
+        outer.addWidget(self.lbl_stress_rho)
+        outer.addWidget(self.lbl_stress_delta)
+        outer.addWidget(self.lbl_stress_rfix)
+        return gb
+
+    def _frame_v_peak(self, d: dict, kx: str, ky: str | None = None) -> tuple[float, float] | float:
+        """帧数据 → V_peak (不含 RMS 显示系数)."""
+        if ky is None:
+            return d.get(kx, 0) * self._v_per_lsb_dc
+        return (
+            d.get(kx, 0) * self._v_per_lsb,
+            d.get(ky, 0) * self._v_per_lsb,
+        )
+
+    def _parse_stress_ed(self, ed: QLineEdit, name: str) -> float | None:
+        try:
+            return float(ed.text().strip())
+        except ValueError:
+            return None
+
+    def _read_stress_offsets(self) -> tuple[ChannelVoltages, ChannelVoltages, ChannelVoltages, float] | None:
+        vals = {}
+        for key, ed in self._stress_off_ed.items():
+            v = self._parse_stress_ed(ed, key)
+            if v is None:
+                return None
+            vals[key] = v
+        vdc = self._parse_stress_ed(self.ed_stress_off_dc, "dc_off")
+        if vdc is None:
+            return None
+        o1 = ChannelVoltages(vals["osc1_x"], vals["osc1_y"])
+        o2 = ChannelVoltages(vals["osc2_x"], vals["osc2_y"])
+        o3 = ChannelVoltages(vals["osc3_x"], vals["osc3_y"])
+        return o1, o2, o3, vdc
+
+    def _read_stress_calib(self) -> StressCalib | None:
+        vals = {}
+        names = {
+            "osc1": "K 振荡器1", "osc2": "K 振荡器2",
+            "osc3": "K 振荡器3", "dc": "K 直流",
+        }
+        for key, ed in self._stress_calib_ed.items():
+            v = self._parse_stress_ed(ed, names[key])
+            if v is None:
+                return None
+            vals[key] = v
+        return StressCalib(vals["osc1"], vals["osc2"], vals["osc3"], vals["dc"])
+
+    def _stress_offset_avg_reset(self) -> None:
+        self._stress_off_avg_active = False
+        self._stress_off_avg_n = 0
+        self._stress_off_avg_acc = {
+            "osc1_x": 0.0, "osc1_y": 0.0,
+            "osc2_x": 0.0, "osc2_y": 0.0,
+            "osc3_x": 0.0, "osc3_y": 0.0,
+            "dc": 0.0,
+        }
+        if getattr(self, "lbl_stress_avg_status", None):
+            self.lbl_stress_avg_status.setText("")
+        if getattr(self, "btn_stress_capture", None):
+            self.btn_stress_capture.setText("开始平均 Offset")
+            self.btn_stress_capture.setStyleSheet(
+                "font-size: 10pt; padding: 4px 8px; background:#536; color:#fff;")
+
+    def _stress_offset_avg_feed(self, d: dict) -> None:
+        """数据流每一帧累加一次 (V_peak)."""
+        x1, y1 = self._frame_v_peak(d, "ch3_x_21", "ch3_y_21")
+        x2, y2 = self._frame_v_peak(d, "ch3_x_12", "ch3_y_12")
+        x3, y3 = self._frame_v_peak(d, "ch3_x_11", "ch3_y_11")
+        dc = self._frame_v_peak(d, "ch3_dc")
+        acc = self._stress_off_avg_acc
+        acc["osc1_x"] += x1
+        acc["osc1_y"] += y1
+        acc["osc2_x"] += x2
+        acc["osc2_y"] += y2
+        acc["osc3_x"] += x3
+        acc["osc3_y"] += y3
+        acc["dc"] += dc
+        self._stress_off_avg_n += 1
+        if getattr(self, "lbl_stress_avg_status", None):
+            self.lbl_stress_avg_status.setText(f"采集中… {self._stress_off_avg_n} 帧")
+
+    def _toggle_stress_offset_avg(self) -> None:
+        if not self._stress_off_avg_active:
+            if self._last_frame is None:
+                self.on_log("[!] 尚无测量数据, 请先开始数据流")
+                return
+            self._stress_offset_avg_reset()
+            self._stress_off_avg_active = True
+            self.btn_stress_capture.setText("结束并保存 Offset")
+            self.btn_stress_capture.setStyleSheet(
+                "font-size: 10pt; padding: 4px 8px; background:#a53; color:#fff;")
+            self._stress_offset_avg_feed(self._last_frame)
+            self.on_log("[i] 开始采集空气 Offset 平均值 (再次点击结束并保存)")
+            return
+
+        n = self._stress_off_avg_n
+        if n <= 0:
+            self.on_log("[!] 采集期间未收到数据帧")
+            self._stress_offset_avg_reset()
+            return
+
+        acc = self._stress_off_avg_acc
+        inv = 1.0 / n
+        pairs = (
+            ("osc1", "osc1_x", "osc1_y"),
+            ("osc2", "osc2_x", "osc2_y"),
+            ("osc3", "osc3_x", "osc3_y"),
+        )
+        for key, kx, ky in pairs:
+            self._stress_off_ed[f"{key}_x"].setText(f"{acc[kx] * inv:.6f}")
+            self._stress_off_ed[f"{key}_y"].setText(f"{acc[ky] * inv:.6f}")
+        self.ed_stress_off_dc.setText(f"{acc['dc'] * inv:.6f}")
+        self.on_log(f"[i] 已保存 {n} 帧平均值为空气 Offset")
+        self._stress_offset_avg_reset()
+        self._update_stress_display()
+
+    def _update_stress_display(self):
+        if not getattr(self, "lbl_stress_rho", None):
+            return
+        d = self._last_frame
+        if d is None:
+            return
+        off = self._read_stress_offsets()
+        if off is None:
+            self.lbl_stress_rho.setText("ρ (主应力方向)  =  --- °  (Offset 非法)")
+            self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
+            return
+        calib = self._read_stress_calib()
+        if calib is None:
+            self.lbl_stress_rho.setText("ρ (主应力方向)  =  --- °  (校正 K 非法)")
+            self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
+            return
+        o1, o2, o3, vdc_off = off
+        x1, y1 = self._frame_v_peak(d, "ch3_x_21", "ch3_y_21")
+        x2, y2 = self._frame_v_peak(d, "ch3_x_12", "ch3_y_12")
+        x3, y3 = self._frame_v_peak(d, "ch3_x_11", "ch3_y_11")
+        vdc = self._frame_v_peak(d, "ch3_dc")
+
+        res = compute_stress(StressInputs(
+            osc1=ChannelVoltages(x1, y1),
+            osc2=ChannelVoltages(x2, y2),
+            osc3=ChannelVoltages(x3, y3),
+            v_dc=vdc,
+            offset1=o1, offset2=o2, offset3=o3,
+            v_dc_offset=vdc_off,
+            calib=calib,
+        ))
+        if not res.ok:
+            self.lbl_stress_rho.setText(f"ρ (主应力方向)  =  --- °  ({res.message})")
+            self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
+        else:
+            self.lbl_stress_rho.setText(f"ρ (主应力方向)  = {res.rho_deg:+.4f} °")
+            self.lbl_stress_delta.setText(f"δ (延迟量)      = {res.delta_nm:.4f} nm")
+        self.lbl_stress_rfix.setText(
+            f"R_fix:  R1={res.r1_fix:+.6f}  R2={res.r2_fix:+.6f}  R3={res.r3_fix:+.6f}")
+
     def _smooth_freq(self, ch: int, raw: float, locked: bool) -> float:
         """对单通道锁定频率做滑动平均; 未锁/未启用/大跳变时旁路或重置窗口."""
         buf = self._freq_sm_buf[ch]
@@ -1955,6 +2227,18 @@ class MainWindow(QMainWindow):
             QGroupBox#gbDac::title {
                 subcontrol-origin: margin; left: 10px; padding: 0 8px;
                 color: #4af; font-weight: bold; font-size: 11pt;
+            }
+            QGroupBox#gbStress {
+                border: 2px solid #a6f;
+                border-radius: 6px;
+                margin-top: 14px;
+                padding-top: 10px;
+                background: #2a262f;
+                font-size: 11pt;
+            }
+            QGroupBox#gbStress::title {
+                subcontrol-origin: margin; left: 10px; padding: 0 8px;
+                color: #c8f; font-weight: bold; font-size: 11pt;
             }
             /* 兼容旧高亮样式 (子面板若仍引用) */
             QGroupBox#gbHighlight {
@@ -2578,10 +2862,15 @@ class MainWindow(QMainWindow):
 
         # 保存最近一帧 (供 "打印当前帧诊断" 按钮使用)
         self._last_frame = data
+
+        if getattr(self, "_stress_off_avg_active", False):
+            self._stress_offset_avg_feed(data)
         
         # 更新 4 路谐波/DC 实时文本 (与下拉框选择无关, 全部同时刷新)
         if hasattr(self, 'lbl_har_dc'):
             self._update_har_text()
+        if getattr(self, "chk_stress_live", None) and self.chk_stress_live.isChecked():
+            self._update_stress_display()
 
         # 派生频率轨迹也存进缓冲, 用于上行两个频率曲线
         self.buf["pll_freq_ch1_hz"].append(self._latest_freq_ch1)
