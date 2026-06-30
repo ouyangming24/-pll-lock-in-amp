@@ -26,7 +26,9 @@ from stress_calc import (
     StressResult,
     apply_stress_calib,
     compute_stress,
+    format_stress_report,
     signed_r,
+    stress_constants_text,
 )
 
 # 通道标签 (GUI / CLI 共用)
@@ -36,32 +38,39 @@ ROW_LABELS = (
     ("osc3", "振荡器3 (F1+F2)"),
 )
 
+_PEAK_TO_RMS = 1.0 / math.sqrt(2.0)
+
+
+def _harm_v_rms(v_peak: float) -> float:
+    """谐波电压: 峰值 → V_rms (应力公式用)."""
+    return v_peak * _PEAK_TO_RMS
+
 
 def load_example() -> StressInputs:
-    """1119修正计算公式.md 中的 Origin + Offset 表格."""
+    """1119修正计算公式.md 中的 Origin + Offset 表格 (谐波 X 转为 V_rms)."""
     return StressInputs(
-        osc1=ChannelVoltages(-0.03807, 0.0),
-        osc2=ChannelVoltages(-0.186, 0.0),
-        osc3=ChannelVoltages(-0.03467, 0.0),
+        osc1=ChannelVoltages(_harm_v_rms(-0.03807), 0.0),
+        osc2=ChannelVoltages(_harm_v_rms(-0.186), 0.0),
+        osc3=ChannelVoltages(_harm_v_rms(-0.03467), 0.0),
         v_dc=0.572891,
-        offset1=ChannelVoltages(-0.00322, 0.0),
-        offset2=ChannelVoltages(0.006021, 0.0),
-        offset3=ChannelVoltages(0.277444, 0.0),
+        offset1=ChannelVoltages(_harm_v_rms(-0.00322), 0.0),
+        offset2=ChannelVoltages(_harm_v_rms(0.006021), 0.0),
+        offset3=ChannelVoltages(_harm_v_rms(0.277444), 0.0),
         v_dc_offset=0.693512,
     )
 
 
 def load_default_init() -> StressInputs:
-    """上板实测初值 (R 模式: X = 带符号 R, GUI 默认载入)."""
+    """上板实测初值 (R 模式: X = 带符号 R, Y=0, 与 GUI 读数一致)."""
     return StressInputs(
-        osc1=ChannelVoltages(-55700.936, 0.0),
-        osc2=ChannelVoltages(-28977.0043, 0.0),
-        osc3=ChannelVoltages(-108385.0650, 0.0),
-        v_dc=591575.3070,
-        offset1=ChannelVoltages(1137.4862, 0.0),
-        offset2=ChannelVoltages(-3123.8179, 0.0),
-        offset3=ChannelVoltages(131117.5430, 0.0),
-        v_dc_offset=597528.7470,
+        osc1=ChannelVoltages(-6270.0, 0.0),
+        osc2=ChannelVoltages(-91280.0, 0.0),
+        osc3=ChannelVoltages(45910.0, 0.0),
+        v_dc=476460.0,
+        offset1=ChannelVoltages(1260.0, 0.0),
+        offset2=ChannelVoltages(-3210.0, 0.0),
+        offset3=ChannelVoltages(128000.0, 0.0),
+        v_dc_offset=584000.0,
     )
 
 
@@ -187,62 +196,8 @@ def inputs_from_fields(fields: dict[str, str], r_mode: bool = False) -> tuple[St
     ), None
 
 
-def constants_text() -> str:
-    return (
-        f"J1(2.405) = {J1_DELTA0}    J2(2.405) = {J2_DELTA0}\n"
-        f"分母 R1/R2: 4*J2*J1 = {4 * J2_DELTA0 * J1_DELTA0:.6f}\n"
-        f"分母 R3:    4*J1*J1 = {4 * J1_DELTA0 * J1_DELTA0:.6f}\n"
-        f"delta(nm) = delta(rad) * {316.4 / math.pi:.6f}"
-    )
-
-
-def format_stress_report(inp: StressInputs, res: StressResult) -> str:
-    """完整验算报告 (CLI / GUI 结果区)."""
-    c = inp.calib
-    scaled = apply_stress_calib(inp)
-    v1 = signed_r(scaled.osc1.x, scaled.osc1.y)
-    v2 = signed_r(scaled.osc2.x, scaled.osc2.y)
-    v3 = signed_r(scaled.osc3.x, scaled.osc3.y)
-    o1 = signed_r(scaled.offset1.x, scaled.offset1.y)
-    o2 = signed_r(scaled.offset2.x, scaled.offset2.y)
-    o3 = signed_r(scaled.offset3.x, scaled.offset3.y)
-
-    lines = [
-        "=== 常数 ===",
-        constants_text(),
-        "",
-        "=== 校正系数 K (测量与 Offset 同乘) ===",
-        f"  K_osc1={c.k_osc1:g}  K_osc2={c.k_osc2:g}  "
-        f"K_osc3={c.k_osc3:g}  K_dc={c.k_dc:g}",
-        "",
-        "=== 带符号谐波幅值 (校正后 V) ===",
-        f"  测量  Osc1: {v1:+.6f}   Osc2: {v2:+.6f}   "
-        f"Osc3: {v3:+.6f}   V_DC: {scaled.v_dc:.6f}",
-        f"  Offset Osc1: {o1:+.6f}   Osc2: {o2:+.6f}   "
-        f"Osc3: {o3:+.6f}   V_DC: {scaled.v_dc_offset:.6f}",
-        "",
-        "=== 式 8.1-8.3  R_origin / R_offset ===",
-        f"  R1_origin = {res.r1_origin:+.8f}    R1_offset = {res.r1_offset:+.8f}",
-        f"  R2_origin = {res.r2_origin:+.8f}    R2_offset = {res.r2_offset:+.8f}",
-        f"  R3_origin = {res.r3_origin:+.8f}    R3_offset = {res.r3_offset:+.8f}",
-        "",
-        "=== Offset 修正 (R1/R2/R3_fix = R_origin / R3_offset) ===",
-        f"  R1_fix = R1_origin / R3_offset = {res.r1_fix:+.8f}",
-        f"  R2_fix = R2_origin / R3_offset = {res.r2_fix:+.8f}",
-        f"  R3_fix = R3_origin / R3_offset = {res.r3_fix:+.8f}",
-        "",
-        "=== 式 9.1-9.2  结果 ===",
-    ]
-    if res.ok:
-        lines.append(f"  rho   = {res.rho_deg:+.6f} deg  (0.5*atan2(R2,R1))")
-        lines.append(f"  delta = {res.delta_nm:.6f} nm  ({res.delta_rad:.8f} rad)")
-        if abs(res.r3_fix) <= 1.0:
-            lines.append(
-                f"  (对照 acos R3) delta = {math.degrees(math.acos(max(-1.0, min(1.0, res.r3_fix)))):.4f} deg"
-            )
-    else:
-        lines.append(f"  [!] {res.message}")
-    return "\n".join(lines)
+# constants_text / format_stress_report 见 stress_calc.py
+constants_text = stress_constants_text
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
@@ -262,10 +217,10 @@ def _prompt_float(label: str, default: float | None = None) -> float:
 def _prompt_xy_or_r(r_mode: bool, prefix: str) -> ChannelVoltages:
     print(f"\n--- {prefix} ---")
     if r_mode:
-        r = _prompt_float("带符号 R (V), X<0 时为负")
+        r = _prompt_float("带符号 R (V_rms), X<0 时为负")
         return ChannelVoltages(r, 0.0)
-    x = _prompt_float("X (V)")
-    y = _prompt_float("Y (V)")
+    x = _prompt_float("X (V_rms)")
+    y = _prompt_float("Y (V_rms)")
     r = signed_r(x, y)
     print(f"    -> signed R = {r:+.6f} V")
     return ChannelVoltages(x, y)

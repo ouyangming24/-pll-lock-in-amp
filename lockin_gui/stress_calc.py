@@ -8,9 +8,12 @@
   振荡器3 (F1+F2)  → V_{e1+e2}  → R3
   直流             → V_DC
 
+电压单位: 谐波 X/Y 为 **V_rms** (FPGA 峰值读数 ÷ √2); 直流 V_DC 为 DC 均值 (不除 √2).
+
 符号: 式 8.x 先用 |X+jY| 代入, 若 X < 0 则 R1/R2/R3 取负 (与文档 LIA 表格一致).
-Offset 修正: R1_fix = R1_origin / R3_offset, R2_fix = R2_origin / R3_offset,
-             R3_fix = R3_origin / R3_offset.
+Offset 修正: R3_fix = R3_origin / R3_offset;
+             R1_fix = (R1_origin - R1_offset) / R3_offset,
+             R2_fix = (R2_origin - R2_offset) / R3_offset.
 校正: 代入公式前 V' = K × V; 振荡器1/2/3 各一路 K, 直流单独 K_dc (测量与 Offset 同乘).
 """
 
@@ -54,7 +57,7 @@ def compute_delta_rad(r1_fix: float, r2_fix: float, r3_fix: float) -> float:
 
 @dataclass(frozen=True)
 class ChannelVoltages:
-    """单路锁相读数 (V_peak)."""
+    """单路锁相读数 (谐波 X/Y 为 V_rms)."""
     x: float
     y: float
     dc: float | None = None   # 谐波路可选独立 DC; 缺省用公共 v_dc
@@ -71,7 +74,7 @@ class StressCalib:
 
 @dataclass(frozen=True)
 class StressInputs:
-    """测量值与空气基准 (均为 V_peak)."""
+    """测量值与空气基准 (谐波为 V_rms, 直流为 V)."""
     osc1: ChannelVoltages
     osc2: ChannelVoltages
     osc3: ChannelVoltages
@@ -178,11 +181,12 @@ def compute_stress(inp: StressInputs) -> StressResult:
             r1_o, r2_o, r3_o, r1_f, r2_f, r3_f,
             float("nan"), float("nan"), float("nan"),
             float("nan"), float("nan"), float("nan"),
-            ok=False, message="R3_offset 过小, 无法做除法修正",
+            ok=False, message="R3_offset 过小, 无法修正 R1/R2",
         )
-    r1_fix = r1_o / r3_f
-    r2_fix = r2_o / r3_f
+
     r3_fix = r3_o / r3_f
+    r1_fix = (r1_o - r1_f) / r3_f
+    r2_fix = (r2_o - r2_f) / r3_f
 
     rho_rad = compute_rho_rad(r1_fix, r2_fix)
     rho_deg = math.degrees(rho_rad)
@@ -204,3 +208,153 @@ def compute_stress(inp: StressInputs) -> StressResult:
         rho_deg, delta_nm, delta_rad,
         ok=ok, message=msg,
     )
+
+
+def stress_constants_text() -> str:
+    return (
+        f"J1(2.405) = {J1_DELTA0}    J2(2.405) = {J2_DELTA0}\n"
+        f"分母 R1/R2 (式8.1/8.2): 4*J2*J1 = {_DEN_R1:.6f}\n"
+        f"分母 R3   (式8.3):     4*J1*J1 = {_DEN_R3:.6f}\n"
+        f"delta(nm) = delta(rad) * {NM_PER_RAD:.6f}"
+    )
+
+
+def _fmt_ch_line(label: str, ch: ChannelVoltages, v_dc: float | None = None) -> str:
+    sr = signed_r(ch.x, ch.y)
+    mag = abs(sr)
+    line = (
+        f"  {label}: X={ch.x:+.6f} V_rms  Y={ch.y:+.6f} V_rms  "
+        f"|R|={mag:.6f}  signed_R={sr:+.6f}"
+    )
+    if v_dc is not None:
+        line += f"  V_DC={v_dc:.6f} V"
+    return line
+
+
+def _fmt_r_step(
+    name: str, x: float, y: float, v_dc: float, denom: float, r_val: float,
+) -> str:
+    mag = math.hypot(x, y)
+    ratio = mag / v_dc if abs(v_dc) > 1e-15 else float("nan")
+    sign = " (X<0 取负)" if x < 0.0 and mag > 0 else ""
+    return (
+        f"  {name} = (|X+jY|/V_DC) / denom = ({mag:.6f}/{v_dc:.6f}) / {denom:.6f}"
+        f" = {ratio:.8f} / {denom:.6f}{sign} = {r_val:+.8f}"
+    )
+
+
+def format_stress_report(inp: StressInputs, res: StressResult) -> str:
+    """完整验算报告: 谐波读数 → R → R_fix → rho / delta."""
+    c = inp.calib
+    scaled = apply_stress_calib(inp)
+
+    lines = [
+        "=== 1. 样品测量 (校正前, V_rms / V) ===",
+        _fmt_ch_line("振荡器1 (2F1+F2)", inp.osc1, inp.v_dc),
+        _fmt_ch_line("振荡器2 (F1+2F2)", inp.osc2),
+        _fmt_ch_line("振荡器3 (F1+F2)", inp.osc3),
+        "",
+        "=== 2. 空气 Offset (校正前) ===",
+        _fmt_ch_line("振荡器1", inp.offset1, inp.v_dc_offset),
+        _fmt_ch_line("振荡器2", inp.offset2),
+        _fmt_ch_line("振荡器3", inp.offset3),
+        "",
+        "=== 3. 校正系数 K (测量与 Offset 同乘) ===",
+        f"  K_osc1={c.k_osc1:g}  K_osc2={c.k_osc2:g}  "
+        f"K_osc3={c.k_osc3:g}  K_dc={c.k_dc:g}",
+        "",
+        "=== 4. 校正后电压 ===",
+        _fmt_ch_line("样品 Osc1", scaled.osc1, scaled.v_dc),
+        _fmt_ch_line("样品 Osc2", scaled.osc2),
+        _fmt_ch_line("样品 Osc3", scaled.osc3),
+        _fmt_ch_line("Offset Osc1", scaled.offset1, scaled.v_dc_offset),
+        _fmt_ch_line("Offset Osc2", scaled.offset2),
+        _fmt_ch_line("Offset Osc3", scaled.offset3),
+        "",
+        "=== 5. 常数 ===",
+        stress_constants_text(),
+        "",
+        "=== 6. 式 8.1-8.3  R_origin / R_offset ===",
+        _fmt_r_step(
+            "R1_origin", scaled.osc1.x, scaled.osc1.y, scaled.v_dc, _DEN_R1,
+            res.r1_origin,
+        ),
+        _fmt_r_step(
+            "R1_offset", scaled.offset1.x, scaled.offset1.y, scaled.v_dc_offset,
+            _DEN_R1, res.r1_offset,
+        ),
+        _fmt_r_step(
+            "R2_origin", scaled.osc2.x, scaled.osc2.y, scaled.v_dc, _DEN_R2,
+            res.r2_origin,
+        ),
+        _fmt_r_step(
+            "R2_offset", scaled.offset2.x, scaled.offset2.y, scaled.v_dc_offset,
+            _DEN_R2, res.r2_offset,
+        ),
+        _fmt_r_step(
+            "R3_origin", scaled.osc3.x, scaled.osc3.y, scaled.v_dc, _DEN_R3,
+            res.r3_origin,
+        ),
+        _fmt_r_step(
+            "R3_offset", scaled.offset3.x, scaled.offset3.y, scaled.v_dc_offset,
+            _DEN_R3, res.r3_offset,
+        ),
+        "",
+        "=== 7. Offset 修正 ===",
+    ]
+
+    if math.isfinite(res.r3_offset) and abs(res.r3_offset) > 1e-15:
+        lines.append(
+            f"  R3_fix = R3_origin / R3_offset"
+            f" = {res.r3_origin:+.8f} / {res.r3_offset:+.8f}"
+            f" = {res.r3_fix:+.8f}"
+        )
+        d1 = res.r1_origin - res.r1_offset
+        d2 = res.r2_origin - res.r2_offset
+        lines.append(
+            f"  R1_fix = (R1_origin - R1_offset) / R3_offset"
+            f" = ({res.r1_origin:+.8f} - {res.r1_offset:+.8f}) / {res.r3_offset:+.8f}"
+            f" = {d1:+.8f} / {res.r3_offset:+.8f} = {res.r1_fix:+.8f}"
+        )
+        lines.append(
+            f"  R2_fix = (R2_origin - R2_offset) / R3_offset"
+            f" = ({res.r2_origin:+.8f} - {res.r2_offset:+.8f}) / {res.r3_offset:+.8f}"
+            f" = {d2:+.8f} / {res.r3_offset:+.8f} = {res.r2_fix:+.8f}"
+        )
+    else:
+        lines.append(f"  R3_fix = {res.r3_fix:+.8f}")
+        lines.append(f"  R1_fix = {res.r1_fix:+.8f}")
+        lines.append(f"  R2_fix = {res.r2_fix:+.8f}")
+
+    sin_d = math.hypot(res.r1_fix, res.r2_fix) if math.isfinite(res.r1_fix) else float("nan")
+    lines.extend([
+        "",
+        "=== 8. 式 9.1  rho ===",
+        f"  rho = 0.5 * atan2(R2_fix, R1_fix)"
+        f" = 0.5 * atan2({res.r2_fix:+.8f}, {res.r1_fix:+.8f})",
+    ])
+    if res.ok and math.isfinite(res.rho_deg):
+        lines.append(f"  rho = {res.rho_deg:+.6f} deg  ({res.rho_deg / 180.0 * math.pi:.8f} rad)")
+    else:
+        lines.append(f"  rho = ---  ({res.message})")
+
+    lines.extend([
+        "",
+        "=== 9. 式 9.2  delta ===",
+        f"  sin_delta = sqrt(R1_fix^2 + R2_fix^2) = {sin_d:.8f}",
+        f"  delta = atan2(sin_delta, R3_fix)"
+        f" = atan2({sin_d:.8f}, {res.r3_fix:+.8f})",
+    ])
+    if res.ok and math.isfinite(res.delta_nm):
+        lines.append(
+            f"  delta = {res.delta_rad:.8f} rad = {res.delta_nm:.6f} nm"
+        )
+        if abs(res.r3_fix) <= 1.0:
+            acos_d = math.degrees(
+                math.acos(max(-1.0, min(1.0, res.r3_fix)))
+            )
+            lines.append(f"  (对照 acos(R3_fix)) delta = {acos_d:.4f} deg")
+    else:
+        lines.append(f"  delta = ---  ({res.message})")
+
+    return "\n".join(lines)

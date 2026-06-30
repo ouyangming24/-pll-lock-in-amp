@@ -200,14 +200,18 @@ def auto_voltage_display_unit_for(*volts: float) -> tuple[float, str]:
 
 def tau_to_fc_hz(k: int, fs: float = IIR_FS_HZ) -> float:
     """tau (shift_k) → 一阶 IIR EMA 的 -3dB 截止频率 (Hz).
-    精确公式: cos(ω) = 1 − α²/(2(1−α)),  α = 2^-k,  fc = ω·fs/(2π).
+    精确关系: cos(ω) = 1 − α²/(2(1−α)),  α = 2^-k,  fc = ω·fs/(2π).
+    大 k 时 cos(ω)→1, 直接 acos 会丢失精度 → 用 sin(ω/2) 的 atan2 形式.
     """
     if k <= 0:
         return float("inf")
-    alpha = 2.0 ** (-k)
-    cos_w = 1.0 - alpha * alpha / (2.0 * (1.0 - alpha))
-    cos_w = max(-1.0, min(1.0, cos_w))
-    return math.acos(cos_w) * fs / (2.0 * math.pi)
+    alpha = math.ldexp(1.0, -k)          # 2^-k, 比 2.0**(-k) 更稳
+    one_m_a = 1.0 - alpha
+    # sin(ω/2) = α / (2√(1−α))  (由 cos(ω) 恒等式推导, 全 k 范围精确)
+    sin_half = alpha / (2.0 * math.sqrt(one_m_a))
+    cos_half = math.sqrt(max(0.0, 1.0 - sin_half * sin_half))
+    omega = 2.0 * math.atan2(sin_half, cos_half)
+    return omega * fs / (2.0 * math.pi)
 
 
 def tau_to_fc_label(text: str) -> tuple[str, bool]:
@@ -229,7 +233,39 @@ def tau_to_fc_label(text: str) -> tuple[str, bool]:
         return (f"fc ≈ {fc:7.2f} Hz", True)
     if fc >= 0.001:
         return (f"fc ≈ {fc*1000:7.2f} mHz", True)
-    return (f"fc ≈ {fc*1e6:7.2f} µHz", True)
+    if fc >= 1e-6:
+        return (f"fc ≈ {fc*1e6:7.2f} µHz", True)
+    return (f"fc ≈ {fc*1e9:7.2f} nHz", True)
+
+
+def tau_to_tc_sec(k: int, fs: float = IIR_FS_HZ) -> float:
+    """tau (shift_k) → 一阶 IIR EMA 等效时间常数 τ (s), 与 fc 自洽: τ = 1/(2π·fc)."""
+    if k <= 0:
+        return float("inf")
+    fc = tau_to_fc_hz(k, fs)
+    return 1.0 / (2.0 * math.pi * fc)
+
+
+def tau_to_tc_label(text: str) -> tuple[str, bool]:
+    """根据用户输入的 tau 字符串返回 (时间常数显示文本, 是否合法)."""
+    try:
+        k = int(text.strip())
+    except (ValueError, AttributeError):
+        return ("非法", False)
+    if k < TAU_MIN or k > TAU_MAX:
+        return (f"超范围 ({TAU_MIN}~{TAU_MAX})", False)
+    if k == 0:
+        return ("≈ 全通 (无滤波)", True)
+    tau = tau_to_tc_sec(k)
+    if tau >= 3600:
+        return (f"τ ≈ {tau/3600:7.2f} h", True)
+    if tau >= 60:
+        return (f"τ ≈ {tau/60:7.2f} min", True)
+    if tau >= 1:
+        return (f"τ ≈ {tau:7.3f} s", True)
+    if tau >= 1e-3:
+        return (f"τ ≈ {tau*1000:7.2f} ms", True)
+    return (f"τ ≈ {tau*1e6:7.2f} µs", True)
 
 # pyqtgraph 全局 - 关闭抗锯齿 + (可选)启用 OpenGL 硬件加速
 pg.setConfigOption("background", "#1e1e1e")
@@ -385,11 +421,6 @@ class MainWindow(QMainWindow):
         self._latest_locked_ch1 = False
         self._latest_locked_ch2 = False
         self._last_frame: dict | None = None    # 最近一帧解析结果, 供诊断按钮使用
-
-        # 空气 Offset 平均采集 (点击开始 → 再点击结束并保存)
-        self._stress_off_avg_active = False
-        self._stress_off_avg_n = 0
-        self._stress_off_avg_acc: dict[str, float] = {}
 
         # 运行时电压标定 (用户可在 GUI 上随时改). K 拆成两组独立:
         #   _calib_k_har → 只影响 X/Y/R (有混频) 通路 → _v_per_lsb / _mv_per_lsb
@@ -645,18 +676,33 @@ class MainWindow(QMainWindow):
             f"采样率 fs = {IIR_FS_HZ/1e6:.0f} MHz (CIC 降采样后).\n"
             "k 越大 → 截止频率 fc 越低, 滤波越慢, 噪声越小."
         )
-        g_tau = QGridLayout(gb_tau)
+        gb_tau_layout = QVBoxLayout(gb_tau)
+        gb_tau_layout.setSpacing(6)
+        gb_tau_layout.setContentsMargins(10, 14, 10, 10)
+        hint_h = QHBoxLayout()
+        self.chk_osc_tau_show_tc = QCheckBox("显示时间常数 τ")
+        self.chk_osc_tau_show_tc.setStyleSheet("font-size: 9pt; color: #8c8;")
+        self.chk_osc_tau_show_tc.setToolTip(
+            "切换右侧提示: 截止频率 fc (默认) / 等效时间常数 τ.\n"
+            "τ = 1/(2π·fc), 与一阶 EMA 的 -3dB 截止频率自洽."
+        )
+        self.chk_osc_tau_show_tc.stateChanged.connect(self._on_osc_tau_hint_mode_changed)
+        hint_h.addWidget(self.chk_osc_tau_show_tc)
+        hint_h.addStretch()
+        gb_tau_layout.addLayout(hint_h)
+        g_tau = QGridLayout()
         g_tau.setVerticalSpacing(6)
         g_tau.setHorizontalSpacing(8)
-        g_tau.setContentsMargins(10, 14, 10, 10)
         g_tau.setColumnStretch(0, 0)
         g_tau.setColumnStretch(1, 0)
         g_tau.setColumnStretch(2, 1)
         g_tau.setColumnStretch(3, 0)
-        self.ed_t21 = self._mk_tau_row(g_tau, 0, OSC1_LBL, "20", "TAU21")
-        self.ed_t12 = self._mk_tau_row(g_tau, 1, OSC2_LBL, "20", "TAU12")
-        self.ed_t11 = self._mk_tau_row(g_tau, 2, OSC3_LBL, "20", "TAU11")
-        self.ed_tdc = self._mk_tau_row(g_tau, 3, DC_LBL,   "20", "TAUDC")
+        self._osc_tau_hint_refresh: list = []
+        self.ed_t21 = self._mk_tau_row(g_tau, 0, OSC1_LBL, "20", "TAU21", osc_hint=True)
+        self.ed_t12 = self._mk_tau_row(g_tau, 1, OSC2_LBL, "20", "TAU12", osc_hint=True)
+        self.ed_t11 = self._mk_tau_row(g_tau, 2, OSC3_LBL, "20", "TAU11", osc_hint=True)
+        self.ed_tdc = self._mk_tau_row(g_tau, 3, DC_LBL,   "20", "TAUDC", osc_hint=True)
+        gb_tau_layout.addLayout(g_tau)
         v_osc.addWidget(gb_tau)
 
         gb_ord = QGroupBox("解调滤波阶数 (1..4 阶 = 6/12/18/24 dB/oct)")
@@ -756,12 +802,10 @@ class MainWindow(QMainWindow):
         grid.addWidget(btn, row, 2)
         return ed
 
-    def _mk_tau_row(self, grid, row, label, default, cmd):
-        """专用于 TAU 参数: 比 _mk_param_row 多一个实时 -3dB 截止频率提示标签.
-        布局:  [Label]  [LineEdit]  [fc ≈ XXX Hz]  [▶]
-        ★ 直接给每个控件 setFixedWidth, 不依赖 grid 的 columnMinimumWidth
-          (后者在窗口 resize 时可能被 Qt 偷空间).
-        ★ 点击 ▶ 按钮后, 整行 (Label/LineEdit/fc/Btn) 短暂高亮, 给视觉反馈.
+    def _mk_tau_row(self, grid, row, label, default, cmd, osc_hint=False):
+        """专用于 TAU 参数: 比 _mk_param_row 多一个实时 fc/τ 提示标签.
+        布局:  [Label]  [LineEdit]  [fc ≈ XXX Hz / τ ≈ XXX s]  [▶]
+        osc_hint=True 时受「解调滤波 TC」区勾选框控制 fc/τ 切换.
         """
         lbl = QLabel(label)
         lbl.setStyleSheet("font-size: 10pt;")
@@ -797,8 +841,16 @@ class MainWindow(QMainWindow):
         ))
         grid.addWidget(btn, row, 3)
 
-        def _refresh_fc():
-            text, ok = tau_to_fc_label(ed.text())
+        def _refresh_hint():
+            show_tc = (
+                osc_hint
+                and getattr(self, "chk_osc_tau_show_tc", None)
+                and self.chk_osc_tau_show_tc.isChecked()
+            )
+            if show_tc:
+                text, ok = tau_to_tc_label(ed.text())
+            else:
+                text, ok = tau_to_fc_label(ed.text())
             fc_lbl.setText(text)
             if ok:
                 fc_lbl.setStyleSheet(
@@ -809,9 +861,15 @@ class MainWindow(QMainWindow):
                     "color: #c33; font-family: Consolas, monospace;"
                     " font-size: 10pt; font-weight: bold;")
 
-        ed.textChanged.connect(_refresh_fc)
-        _refresh_fc()
+        ed.textChanged.connect(_refresh_hint)
+        if osc_hint:
+            self._osc_tau_hint_refresh.append(_refresh_hint)
+        _refresh_hint()
         return ed
+
+    def _on_osc_tau_hint_mode_changed(self, _state: int):
+        for fn in getattr(self, "_osc_tau_hint_refresh", []):
+            fn()
 
     def _mk_freq_row(self, grid, row, label, default, cmd):
         """频率参数行: [Label] [LineEdit] [▶].
@@ -1506,35 +1564,28 @@ class MainWindow(QMainWindow):
         gb = QGroupBox("应力计算 (光弹)")
         gb.setObjectName("gbStress")
         gb.setToolTip(
-            "由振荡器1/2/3 与直流四路 V_peak 读数, 按 1119修正计算公式 求 ρ(°) 与 δ(nm).\n"
+            "由振荡器1/2/3 与直流四路读数, 按 1119修正计算公式 求 ρ(°) 与 δ(nm).\n"
             "Offset = 空气基准; R1_fix/R2_fix/R3_fix 均除以 R3_offset.\n"
             "X<0 时 R1/R2/R3 取负.\n"
-            "校正 K: 四路各自乘以系数后再代入公式 (测量与 Offset 同乘).\n"
-            "计算一律使用 V_peak (不受 V_rms 显示切换影响)."
+            "谐波 X/Y 使用 V_rms (峰值 ÷ √2); 直流 V_DC 不除 √2.\n"
+            "校正 K: 四路各自乘以系数后再代入公式 (测量与 Offset 同乘)."
         )
         outer = QVBoxLayout(gb)
         outer.setContentsMargins(10, 12, 10, 8)
         outer.setSpacing(6)
 
         cap_h = QHBoxLayout()
-        self.btn_stress_capture = QPushButton("开始平均 Offset")
+        self.btn_stress_capture = QPushButton("捕获当前值为 Offset")
         self.btn_stress_capture.setStyleSheet(
             "font-size: 10pt; padding: 4px 8px; background:#536; color:#fff;")
-        self.btn_stress_capture.setToolTip(
-            "第一次点击: 开始对当前测量值做时间平均 (需数据流运行中).\n"
-            "第二次点击: 结束采集, 将平均后的 X/Y/DC 写入下方 Offset 表.")
-        self.btn_stress_capture.clicked.connect(self._toggle_stress_offset_avg)
-        self.lbl_stress_avg_status = QLabel("")
-        self.lbl_stress_avg_status.setStyleSheet("font-size: 9pt; color: #fa8;")
+        self.btn_stress_capture.clicked.connect(self._capture_stress_offset)
         self.chk_stress_live = QCheckBox("实时更新")
         self.chk_stress_live.setChecked(True)
         self.chk_stress_live.setToolTip("勾选后每帧自动刷新 ρ / δ")
         cap_h.addWidget(self.btn_stress_capture)
-        cap_h.addWidget(self.lbl_stress_avg_status)
         cap_h.addWidget(self.chk_stress_live)
         cap_h.addStretch()
         outer.addLayout(cap_h)
-        self._stress_offset_avg_reset()
 
         calib_lbl = QLabel("校正系数 K (测量与 Offset 同乘后代入公式):")
         calib_lbl.setStyleSheet("font-size: 9pt; color: #aaa;")
@@ -1558,7 +1609,7 @@ class MainWindow(QMainWindow):
         calib_h.addStretch()
         outer.addLayout(calib_h)
 
-        off_lbl = QLabel("空气基准 Offset (V_peak, X/Y 用于带符号 R):")
+        off_lbl = QLabel("空气基准 Offset (谐波 V_rms, 直流 V; X/Y 用于带符号 R):")
         off_lbl.setStyleSheet("font-size: 9pt; color: #aaa;")
         outer.addWidget(off_lbl)
 
@@ -1601,24 +1652,49 @@ class MainWindow(QMainWindow):
         res_style = (
             "color:#eee; background:#1a1a1a; padding:4px 8px;"
             " font-family:Consolas, monospace; font-size:10pt;")
+        r_style = "font-size: 9pt; color: #8a8; font-family: Consolas, monospace;"
+        self.lbl_stress_r_origin = QLabel("样品 R:  R1=---  R2=---  R3=---")
+        self.lbl_stress_r_offset = QLabel("空气 R:  R1=---  R2=---  R3=---")
+        self.lbl_stress_rfix = QLabel("R_fix:  R1=---  R2=---  R3=---")
+        for lbl in (self.lbl_stress_r_origin, self.lbl_stress_r_offset, self.lbl_stress_rfix):
+            lbl.setStyleSheet(r_style)
         self.lbl_stress_rho = QLabel("ρ (主应力方向)  =  --- °")
         self.lbl_stress_delta = QLabel("δ (延迟量)      =  --- nm")
-        self.lbl_stress_rfix = QLabel("R_fix:  R1=---  R2=---  R3=---")
-        self.lbl_stress_rfix.setStyleSheet("font-size: 9pt; color: #8a8;")
         for lbl in (self.lbl_stress_rho, self.lbl_stress_delta):
             lbl.setStyleSheet(res_style)
+        outer.addWidget(self.lbl_stress_r_origin)
+        outer.addWidget(self.lbl_stress_r_offset)
+        outer.addWidget(self.lbl_stress_rfix)
         outer.addWidget(self.lbl_stress_rho)
         outer.addWidget(self.lbl_stress_delta)
-        outer.addWidget(self.lbl_stress_rfix)
         return gb
 
-    def _frame_v_peak(self, d: dict, kx: str, ky: str | None = None) -> tuple[float, float] | float:
-        """帧数据 → V_peak (不含 RMS 显示系数)."""
+    def _fmt_stress_r_triple(self, r1: float, r2: float, r3: float) -> str:
+        def one(v: float) -> str:
+            return f"{v:+.6f}" if math.isfinite(v) else "---"
+        return f"R1={one(r1)}  R2={one(r2)}  R3={one(r3)}"
+
+    def _set_stress_r_labels(
+        self,
+        r1_o: float, r2_o: float, r3_o: float,
+        r1_f: float, r2_f: float, r3_f: float,
+        r1_x: float, r2_x: float, r3_x: float,
+    ) -> None:
+        self.lbl_stress_r_origin.setText(
+            f"样品 R:  {self._fmt_stress_r_triple(r1_o, r2_o, r3_o)}")
+        self.lbl_stress_r_offset.setText(
+            f"空气 R:  {self._fmt_stress_r_triple(r1_f, r2_f, r3_f)}")
+        self.lbl_stress_rfix.setText(
+            f"R_fix:  {self._fmt_stress_r_triple(r1_x, r2_x, r3_x)}")
+
+    def _frame_v_stress(self, d: dict, kx: str, ky: str | None = None) -> tuple[float, float] | float:
+        """帧数据 → 应力用电压: 谐波 X/Y 为 V_rms, 直流为 V (不除 √2)."""
         if ky is None:
             return d.get(kx, 0) * self._v_per_lsb_dc
+        rms = 1.0 / self._SQRT2
         return (
-            d.get(kx, 0) * self._v_per_lsb,
-            d.get(ky, 0) * self._v_per_lsb,
+            d.get(kx, 0) * self._v_per_lsb * rms,
+            d.get(ky, 0) * self._v_per_lsb * rms,
         )
 
     def _parse_stress_ed(self, ed: QLineEdit, name: str) -> float | None:
@@ -1655,73 +1731,23 @@ class MainWindow(QMainWindow):
             vals[key] = v
         return StressCalib(vals["osc1"], vals["osc2"], vals["osc3"], vals["dc"])
 
-    def _stress_offset_avg_reset(self) -> None:
-        self._stress_off_avg_active = False
-        self._stress_off_avg_n = 0
-        self._stress_off_avg_acc = {
-            "osc1_x": 0.0, "osc1_y": 0.0,
-            "osc2_x": 0.0, "osc2_y": 0.0,
-            "osc3_x": 0.0, "osc3_y": 0.0,
-            "dc": 0.0,
-        }
-        if getattr(self, "lbl_stress_avg_status", None):
-            self.lbl_stress_avg_status.setText("")
-        if getattr(self, "btn_stress_capture", None):
-            self.btn_stress_capture.setText("开始平均 Offset")
-            self.btn_stress_capture.setStyleSheet(
-                "font-size: 10pt; padding: 4px 8px; background:#536; color:#fff;")
-
-    def _stress_offset_avg_feed(self, d: dict) -> None:
-        """数据流每一帧累加一次 (V_peak)."""
-        x1, y1 = self._frame_v_peak(d, "ch3_x_21", "ch3_y_21")
-        x2, y2 = self._frame_v_peak(d, "ch3_x_12", "ch3_y_12")
-        x3, y3 = self._frame_v_peak(d, "ch3_x_11", "ch3_y_11")
-        dc = self._frame_v_peak(d, "ch3_dc")
-        acc = self._stress_off_avg_acc
-        acc["osc1_x"] += x1
-        acc["osc1_y"] += y1
-        acc["osc2_x"] += x2
-        acc["osc2_y"] += y2
-        acc["osc3_x"] += x3
-        acc["osc3_y"] += y3
-        acc["dc"] += dc
-        self._stress_off_avg_n += 1
-        if getattr(self, "lbl_stress_avg_status", None):
-            self.lbl_stress_avg_status.setText(f"采集中… {self._stress_off_avg_n} 帧")
-
-    def _toggle_stress_offset_avg(self) -> None:
-        if not self._stress_off_avg_active:
-            if self._last_frame is None:
-                self.on_log("[!] 尚无测量数据, 请先开始数据流")
-                return
-            self._stress_offset_avg_reset()
-            self._stress_off_avg_active = True
-            self.btn_stress_capture.setText("结束并保存 Offset")
-            self.btn_stress_capture.setStyleSheet(
-                "font-size: 10pt; padding: 4px 8px; background:#a53; color:#fff;")
-            self._stress_offset_avg_feed(self._last_frame)
-            self.on_log("[i] 开始采集空气 Offset 平均值 (再次点击结束并保存)")
+    def _capture_stress_offset(self):
+        d = self._last_frame
+        if d is None:
+            self.on_log("[!] 尚无测量数据, 请先开始数据流")
             return
-
-        n = self._stress_off_avg_n
-        if n <= 0:
-            self.on_log("[!] 采集期间未收到数据帧")
-            self._stress_offset_avg_reset()
-            return
-
-        acc = self._stress_off_avg_acc
-        inv = 1.0 / n
         pairs = (
-            ("osc1", "osc1_x", "osc1_y"),
-            ("osc2", "osc2_x", "osc2_y"),
-            ("osc3", "osc3_x", "osc3_y"),
+            ("osc1", "ch3_x_21", "ch3_y_21"),
+            ("osc2", "ch3_x_12", "ch3_y_12"),
+            ("osc3", "ch3_x_11", "ch3_y_11"),
         )
         for key, kx, ky in pairs:
-            self._stress_off_ed[f"{key}_x"].setText(f"{acc[kx] * inv:.6f}")
-            self._stress_off_ed[f"{key}_y"].setText(f"{acc[ky] * inv:.6f}")
-        self.ed_stress_off_dc.setText(f"{acc['dc'] * inv:.6f}")
-        self.on_log(f"[i] 已保存 {n} 帧平均值为空气 Offset")
-        self._stress_offset_avg_reset()
+            x, y = self._frame_v_stress(d, kx, ky)
+            self._stress_off_ed[f"{key}_x"].setText(f"{x:.6f}")
+            self._stress_off_ed[f"{key}_y"].setText(f"{y:.6f}")
+        dc = self._frame_v_stress(d, "ch3_dc")
+        self.ed_stress_off_dc.setText(f"{dc:.6f}")
+        self.on_log("[i] 已捕获当前四路读数为空气 Offset")
         self._update_stress_display()
 
     def _update_stress_display(self):
@@ -1734,17 +1760,27 @@ class MainWindow(QMainWindow):
         if off is None:
             self.lbl_stress_rho.setText("ρ (主应力方向)  =  --- °  (Offset 非法)")
             self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
+            self._set_stress_r_labels(
+                float("nan"), float("nan"), float("nan"),
+                float("nan"), float("nan"), float("nan"),
+                float("nan"), float("nan"), float("nan"),
+            )
             return
         calib = self._read_stress_calib()
         if calib is None:
             self.lbl_stress_rho.setText("ρ (主应力方向)  =  --- °  (校正 K 非法)")
             self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
+            self._set_stress_r_labels(
+                float("nan"), float("nan"), float("nan"),
+                float("nan"), float("nan"), float("nan"),
+                float("nan"), float("nan"), float("nan"),
+            )
             return
         o1, o2, o3, vdc_off = off
-        x1, y1 = self._frame_v_peak(d, "ch3_x_21", "ch3_y_21")
-        x2, y2 = self._frame_v_peak(d, "ch3_x_12", "ch3_y_12")
-        x3, y3 = self._frame_v_peak(d, "ch3_x_11", "ch3_y_11")
-        vdc = self._frame_v_peak(d, "ch3_dc")
+        x1, y1 = self._frame_v_stress(d, "ch3_x_21", "ch3_y_21")
+        x2, y2 = self._frame_v_stress(d, "ch3_x_12", "ch3_y_12")
+        x3, y3 = self._frame_v_stress(d, "ch3_x_11", "ch3_y_11")
+        vdc = self._frame_v_stress(d, "ch3_dc")
 
         res = compute_stress(StressInputs(
             osc1=ChannelVoltages(x1, y1),
@@ -1761,8 +1797,11 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_stress_rho.setText(f"ρ (主应力方向)  = {res.rho_deg:+.4f} °")
             self.lbl_stress_delta.setText(f"δ (延迟量)      = {res.delta_nm:.4f} nm")
-        self.lbl_stress_rfix.setText(
-            f"R_fix:  R1={res.r1_fix:+.6f}  R2={res.r2_fix:+.6f}  R3={res.r3_fix:+.6f}")
+        self._set_stress_r_labels(
+            res.r1_origin, res.r2_origin, res.r3_origin,
+            res.r1_offset, res.r2_offset, res.r3_offset,
+            res.r1_fix, res.r2_fix, res.r3_fix,
+        )
 
     def _smooth_freq(self, ch: int, raw: float, locked: bool) -> float:
         """对单通道锁定频率做滑动平均; 未锁/未启用/大跳变时旁路或重置窗口."""
@@ -2862,9 +2901,6 @@ class MainWindow(QMainWindow):
 
         # 保存最近一帧 (供 "打印当前帧诊断" 按钮使用)
         self._last_frame = data
-
-        if getattr(self, "_stress_off_avg_active", False):
-            self._stress_offset_avg_feed(data)
         
         # 更新 4 路谐波/DC 实时文本 (与下拉框选择无关, 全部同时刷新)
         if hasattr(self, 'lbl_har_dc'):

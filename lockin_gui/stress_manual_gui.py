@@ -57,8 +57,8 @@ class StressManualWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
 
         hint = QLabel(
-            "输入四路 V_peak: 振荡器1(2F1+F2) / 2(F1+2F2) / 3(F1+F2) + 直流.\n"
-            "X<0 时 R1/R2/R3 取负. R_fix = R_origin / R3_offset.\n"
+            "输入四路电压: 振荡器1(2F1+F2) / 2(F1+2F2) / 3(F1+F2) 谐波为 V_rms, 直流为 V.\n"
+            "X<0 时 R1/R2/R3 取负. R3_fix=R3_o/R3_off; R1/2_fix=(R_o-R_off)/R3_off.\n"
             "公式同 1119修正计算公式.md / stress_calc.py."
         )
         hint.setWordWrap(True)
