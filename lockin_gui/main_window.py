@@ -37,7 +37,10 @@ from device import (
     LockinDevice, UdpLockinDevice, MockDevice, list_serial_ports,
     hz_to_freq_word, FIELD_NAMES, F_CLK,
 )
-from stress_calc import StressInputs, ChannelVoltages, StressCalib, compute_stress
+from stress_calc import (
+    StressInputs, ChannelVoltages, StressCalib, StressResult,
+    compute_stress, format_stress_report,
+)
 
 # ============================================================================
 # 配置
@@ -422,6 +425,12 @@ class MainWindow(QMainWindow):
         self._latest_locked_ch2 = False
         self._last_frame: dict | None = None    # 最近一帧解析结果, 供诊断按钮使用
 
+        # 空气 Offset 平均采集 (开始 → 结束并保存)
+        self._stress_off_avg_active = False
+        self._stress_off_avg_n = 0
+        self._stress_off_avg_last_ts = None
+        self._stress_off_avg_acc: dict[str, float] = {}
+
         # 运行时电压标定 (用户可在 GUI 上随时改). K 拆成两组独立:
         #   _calib_k_har → 只影响 X/Y/R (有混频) 通路 → _v_per_lsb / _mv_per_lsb
         #   _calib_k_dc  → 只影响 DC    (无混频) 通路 → _v_per_lsb_dc / _mv_per_lsb_dc
@@ -457,6 +466,7 @@ class MainWindow(QMainWindow):
 
         self.csv_writer = None
         self.csv_file = None
+        self._csv_stress_cfg: tuple | None = None  # 录制开始时 Offset/K 快照
 
         self._build_ui()
 
@@ -1565,7 +1575,8 @@ class MainWindow(QMainWindow):
         gb.setObjectName("gbStress")
         gb.setToolTip(
             "由振荡器1/2/3 与直流四路读数, 按 1119修正计算公式 求 ρ(°) 与 δ(nm).\n"
-            "Offset = 空气基准; R1_fix/R2_fix/R3_fix 均除以 R3_offset.\n"
+            "Offset = 空气基准; R3_fix = R3_origin / R3_offset;\n"
+            "R1_fix/R2_fix = (R_origin - R_offset) / R3_offset.\n"
             "X<0 时 R1/R2/R3 取负.\n"
             "谐波 X/Y 使用 V_rms (峰值 ÷ √2); 直流 V_DC 不除 √2.\n"
             "校正 K: 四路各自乘以系数后再代入公式 (测量与 Offset 同乘)."
@@ -1575,17 +1586,24 @@ class MainWindow(QMainWindow):
         outer.setSpacing(6)
 
         cap_h = QHBoxLayout()
-        self.btn_stress_capture = QPushButton("捕获当前值为 Offset")
+        self.btn_stress_capture = QPushButton("开始平均 Offset")
         self.btn_stress_capture.setStyleSheet(
             "font-size: 10pt; padding: 4px 8px; background:#536; color:#fff;")
-        self.btn_stress_capture.clicked.connect(self._capture_stress_offset)
+        self.btn_stress_capture.setToolTip(
+            "第一次点击: 开始对当前测量值做时间平均 (需数据流运行中).\n"
+            "第二次点击: 结束采集, 将平均后的 X/Y/DC 写入下方 Offset 表.")
+        self.btn_stress_capture.clicked.connect(self._toggle_stress_offset_avg)
+        self.lbl_stress_avg_status = QLabel("")
+        self.lbl_stress_avg_status.setStyleSheet("font-size: 9pt; color: #fa8;")
         self.chk_stress_live = QCheckBox("实时更新")
         self.chk_stress_live.setChecked(True)
         self.chk_stress_live.setToolTip("勾选后每帧自动刷新 ρ / δ")
         cap_h.addWidget(self.btn_stress_capture)
+        cap_h.addWidget(self.lbl_stress_avg_status)
         cap_h.addWidget(self.chk_stress_live)
         cap_h.addStretch()
         outer.addLayout(cap_h)
+        self._stress_offset_avg_reset()
 
         calib_lbl = QLabel("校正系数 K (测量与 Offset 同乘后代入公式):")
         calib_lbl.setStyleSheet("font-size: 9pt; color: #aaa;")
@@ -1652,40 +1670,26 @@ class MainWindow(QMainWindow):
         res_style = (
             "color:#eee; background:#1a1a1a; padding:4px 8px;"
             " font-family:Consolas, monospace; font-size:10pt;")
-        r_style = "font-size: 9pt; color: #8a8; font-family: Consolas, monospace;"
-        self.lbl_stress_r_origin = QLabel("样品 R:  R1=---  R2=---  R3=---")
-        self.lbl_stress_r_offset = QLabel("空气 R:  R1=---  R2=---  R3=---")
-        self.lbl_stress_rfix = QLabel("R_fix:  R1=---  R2=---  R3=---")
-        for lbl in (self.lbl_stress_r_origin, self.lbl_stress_r_offset, self.lbl_stress_rfix):
-            lbl.setStyleSheet(r_style)
         self.lbl_stress_rho = QLabel("ρ (主应力方向)  =  --- °")
         self.lbl_stress_delta = QLabel("δ (延迟量)      =  --- nm")
         for lbl in (self.lbl_stress_rho, self.lbl_stress_delta):
             lbl.setStyleSheet(res_style)
-        outer.addWidget(self.lbl_stress_r_origin)
-        outer.addWidget(self.lbl_stress_r_offset)
-        outer.addWidget(self.lbl_stress_rfix)
         outer.addWidget(self.lbl_stress_rho)
         outer.addWidget(self.lbl_stress_delta)
+
+        detail_lbl = QLabel("计算过程 (谐波 → R → R_fix → ρ / δ):")
+        detail_lbl.setStyleSheet("font-size: 9pt; color: #aaa;")
+        outer.addWidget(detail_lbl)
+        self.txt_stress_detail = QPlainTextEdit()
+        self.txt_stress_detail.setReadOnly(True)
+        self.txt_stress_detail.setFont(QFont("Consolas", 9))
+        self.txt_stress_detail.setPlaceholderText("开始数据流并勾选「实时更新」后显示完整验算…")
+        self.txt_stress_detail.setMinimumHeight(200)
+        self.txt_stress_detail.setMaximumHeight(320)
+        self.txt_stress_detail.setStyleSheet(
+            "background:#111; color:#aea; border:1px solid #444; padding:4px;")
+        outer.addWidget(self.txt_stress_detail)
         return gb
-
-    def _fmt_stress_r_triple(self, r1: float, r2: float, r3: float) -> str:
-        def one(v: float) -> str:
-            return f"{v:+.6f}" if math.isfinite(v) else "---"
-        return f"R1={one(r1)}  R2={one(r2)}  R3={one(r3)}"
-
-    def _set_stress_r_labels(
-        self,
-        r1_o: float, r2_o: float, r3_o: float,
-        r1_f: float, r2_f: float, r3_f: float,
-        r1_x: float, r2_x: float, r3_x: float,
-    ) -> None:
-        self.lbl_stress_r_origin.setText(
-            f"样品 R:  {self._fmt_stress_r_triple(r1_o, r2_o, r3_o)}")
-        self.lbl_stress_r_offset.setText(
-            f"空气 R:  {self._fmt_stress_r_triple(r1_f, r2_f, r3_f)}")
-        self.lbl_stress_rfix.setText(
-            f"R_fix:  {self._fmt_stress_r_triple(r1_x, r2_x, r3_x)}")
 
     def _frame_v_stress(self, d: dict, kx: str, ky: str | None = None) -> tuple[float, float] | float:
         """帧数据 → 应力用电压: 谐波 X/Y 为 V_rms, 直流为 V (不除 √2)."""
@@ -1696,6 +1700,81 @@ class MainWindow(QMainWindow):
             d.get(kx, 0) * self._v_per_lsb * rms,
             d.get(ky, 0) * self._v_per_lsb * rms,
         )
+
+    def _stress_offset_avg_reset(self) -> None:
+        self._stress_off_avg_active = False
+        self._stress_off_avg_n = 0
+        self._stress_off_avg_last_ts = None
+        self._stress_off_avg_acc = {
+            "osc1_x": 0.0, "osc1_y": 0.0,
+            "osc2_x": 0.0, "osc2_y": 0.0,
+            "osc3_x": 0.0, "osc3_y": 0.0,
+            "dc": 0.0,
+        }
+        if getattr(self, "lbl_stress_avg_status", None):
+            self.lbl_stress_avg_status.setText("")
+        if getattr(self, "btn_stress_capture", None):
+            self.btn_stress_capture.setText("开始平均 Offset")
+            self.btn_stress_capture.setStyleSheet(
+                "font-size: 10pt; padding: 4px 8px; background:#536; color:#fff;")
+
+    def _stress_offset_avg_feed(self, d: dict) -> None:
+        """数据流每一帧累加一次 (V_rms / V)."""
+        ts = d.get("timestamp")
+        if ts is not None and ts == self._stress_off_avg_last_ts:
+            return
+        self._stress_off_avg_last_ts = ts
+
+        x1, y1 = self._frame_v_stress(d, "ch3_x_21", "ch3_y_21")
+        x2, y2 = self._frame_v_stress(d, "ch3_x_12", "ch3_y_12")
+        x3, y3 = self._frame_v_stress(d, "ch3_x_11", "ch3_y_11")
+        dc = self._frame_v_stress(d, "ch3_dc")
+        acc = self._stress_off_avg_acc
+        acc["osc1_x"] += x1
+        acc["osc1_y"] += y1
+        acc["osc2_x"] += x2
+        acc["osc2_y"] += y2
+        acc["osc3_x"] += x3
+        acc["osc3_y"] += y3
+        acc["dc"] += dc
+        self._stress_off_avg_n += 1
+        if getattr(self, "lbl_stress_avg_status", None):
+            self.lbl_stress_avg_status.setText(f"采集中… {self._stress_off_avg_n} 帧")
+
+    def _toggle_stress_offset_avg(self) -> None:
+        if not self._stress_off_avg_active:
+            if self._last_frame is None:
+                self.on_log("[!] 尚无测量数据, 请先开始数据流")
+                return
+            self._stress_offset_avg_reset()
+            self._stress_off_avg_active = True
+            self.btn_stress_capture.setText("结束并保存 Offset")
+            self.btn_stress_capture.setStyleSheet(
+                "font-size: 10pt; padding: 4px 8px; background:#a53; color:#fff;")
+            self._stress_offset_avg_feed(self._last_frame)
+            self.on_log("[i] 开始采集空气 Offset 平均值 (再次点击结束并保存)")
+            return
+
+        n = self._stress_off_avg_n
+        if n <= 0:
+            self.on_log("[!] 采集期间未收到数据帧")
+            self._stress_offset_avg_reset()
+            return
+
+        acc = self._stress_off_avg_acc
+        inv = 1.0 / n
+        pairs = (
+            ("osc1", "osc1_x", "osc1_y"),
+            ("osc2", "osc2_x", "osc2_y"),
+            ("osc3", "osc3_x", "osc3_y"),
+        )
+        for key, kx, ky in pairs:
+            self._stress_off_ed[f"{key}_x"].setText(f"{acc[kx] * inv:.6f}")
+            self._stress_off_ed[f"{key}_y"].setText(f"{acc[ky] * inv:.6f}")
+        self.ed_stress_off_dc.setText(f"{acc['dc'] * inv:.6f}")
+        self.on_log(f"[i] 已保存 {n} 帧平均值为空气 Offset")
+        self._stress_offset_avg_reset()
+        self._update_stress_display()
 
     def _parse_stress_ed(self, ed: QLineEdit, name: str) -> float | None:
         try:
@@ -1731,58 +1810,28 @@ class MainWindow(QMainWindow):
             vals[key] = v
         return StressCalib(vals["osc1"], vals["osc2"], vals["osc3"], vals["dc"])
 
-    def _capture_stress_offset(self):
-        d = self._last_frame
-        if d is None:
-            self.on_log("[!] 尚无测量数据, 请先开始数据流")
-            return
-        pairs = (
-            ("osc1", "ch3_x_21", "ch3_y_21"),
-            ("osc2", "ch3_x_12", "ch3_y_12"),
-            ("osc3", "ch3_x_11", "ch3_y_11"),
-        )
-        for key, kx, ky in pairs:
-            x, y = self._frame_v_stress(d, kx, ky)
-            self._stress_off_ed[f"{key}_x"].setText(f"{x:.6f}")
-            self._stress_off_ed[f"{key}_y"].setText(f"{y:.6f}")
-        dc = self._frame_v_stress(d, "ch3_dc")
-        self.ed_stress_off_dc.setText(f"{dc:.6f}")
-        self.on_log("[i] 已捕获当前四路读数为空气 Offset")
-        self._update_stress_display()
-
-    def _update_stress_display(self):
-        if not getattr(self, "lbl_stress_rho", None):
-            return
-        d = self._last_frame
-        if d is None:
-            return
-        off = self._read_stress_offsets()
-        if off is None:
-            self.lbl_stress_rho.setText("ρ (主应力方向)  =  --- °  (Offset 非法)")
-            self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
-            self._set_stress_r_labels(
-                float("nan"), float("nan"), float("nan"),
-                float("nan"), float("nan"), float("nan"),
-                float("nan"), float("nan"), float("nan"),
-            )
-            return
-        calib = self._read_stress_calib()
-        if calib is None:
-            self.lbl_stress_rho.setText("ρ (主应力方向)  =  --- °  (校正 K 非法)")
-            self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
-            self._set_stress_r_labels(
-                float("nan"), float("nan"), float("nan"),
-                float("nan"), float("nan"), float("nan"),
-                float("nan"), float("nan"), float("nan"),
-            )
-            return
+    def _compute_stress_from_frame(
+        self, d: dict,
+        cfg: tuple | None = None,
+    ) -> tuple[StressInputs | None, StressResult | None]:
+        """由帧数据 + Offset/K 计算应力; cfg 为 (off, calib) 快照, 缺省读 GUI."""
+        if not getattr(self, "_stress_off_ed", None):
+            return None, None
+        if cfg is not None:
+            off, calib = cfg
+        else:
+            off = self._read_stress_offsets()
+            if off is None:
+                return None, None
+            calib = self._read_stress_calib()
+            if calib is None:
+                return None, None
         o1, o2, o3, vdc_off = off
         x1, y1 = self._frame_v_stress(d, "ch3_x_21", "ch3_y_21")
         x2, y2 = self._frame_v_stress(d, "ch3_x_12", "ch3_y_12")
         x3, y3 = self._frame_v_stress(d, "ch3_x_11", "ch3_y_11")
         vdc = self._frame_v_stress(d, "ch3_dc")
-
-        res = compute_stress(StressInputs(
+        inp = StressInputs(
             osc1=ChannelVoltages(x1, y1),
             osc2=ChannelVoltages(x2, y2),
             osc3=ChannelVoltages(x3, y3),
@@ -1790,18 +1839,64 @@ class MainWindow(QMainWindow):
             offset1=o1, offset2=o2, offset3=o3,
             v_dc_offset=vdc_off,
             calib=calib,
-        ))
+        )
+        return inp, compute_stress(inp)
+
+    @staticmethod
+    def _csv_fmt_stress(v: float) -> str:
+        return f"{v:.6f}" if math.isfinite(v) else ""
+
+    def _stress_csv_metadata_lines(self, cfg: tuple | None = None) -> list[str]:
+        """录制开始时写入的应力 Offset / K 快照 (注释行)."""
+        lines = [
+            "# --- 应力计算参数 (录制开始时快照, 用于 stress_* 列) ---",
+            "# stress_voltage_unit = V_rms (谐波), V (直流)",
+        ]
+        if cfg is None:
+            cfg = getattr(self, "_csv_stress_cfg", None)
+        if cfg is None:
+            lines.append("# stress_config_invalid = 1  (Offset 或 K 非法, stress_* 列为空)")
+            return lines
+        off, calib = cfg
+        o1, o2, o3, vdc_off = off
+        lines += [
+            f"# STRESS_K_OSC1      = {calib.k_osc1:.6f}",
+            f"# STRESS_K_OSC2      = {calib.k_osc2:.6f}",
+            f"# STRESS_K_OSC3      = {calib.k_osc3:.6f}",
+            f"# STRESS_K_DC        = {calib.k_dc:.6f}",
+            f"# STRESS_OFF_OSC1_X  = {o1.x:.6f}",
+            f"# STRESS_OFF_OSC1_Y  = {o1.y:.6f}",
+            f"# STRESS_OFF_OSC2_X  = {o2.x:.6f}",
+            f"# STRESS_OFF_OSC2_Y  = {o2.y:.6f}",
+            f"# STRESS_OFF_OSC3_X  = {o3.x:.6f}",
+            f"# STRESS_OFF_OSC3_Y  = {o3.y:.6f}",
+            f"# STRESS_OFF_DC      = {vdc_off:.6f}",
+        ]
+        return lines
+
+    def _update_stress_display(self):
+        if not getattr(self, "lbl_stress_rho", None):
+            return
+        d = self._last_frame
+        if d is None:
+            self.lbl_stress_rho.setText("ρ (主应力方向)  =  --- °")
+            self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
+            if getattr(self, "txt_stress_detail", None):
+                self.txt_stress_detail.setPlainText("等待测量数据… (请先开始数据流)")
+            return
+        inp, res = self._compute_stress_from_frame(d)
+        if inp is None or res is None:
+            self.lbl_stress_rho.setText("ρ (主应力方向)  =  --- °  (Offset/K 非法)")
+            self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
+            self.txt_stress_detail.setPlainText("[!] Offset 或校正系数 K 非法")
+            return
         if not res.ok:
             self.lbl_stress_rho.setText(f"ρ (主应力方向)  =  --- °  ({res.message})")
             self.lbl_stress_delta.setText("δ (延迟量)      =  --- nm")
         else:
             self.lbl_stress_rho.setText(f"ρ (主应力方向)  = {res.rho_deg:+.4f} °")
             self.lbl_stress_delta.setText(f"δ (延迟量)      = {res.delta_nm:.4f} nm")
-        self._set_stress_r_labels(
-            res.r1_origin, res.r2_origin, res.r3_origin,
-            res.r1_offset, res.r2_offset, res.r3_offset,
-            res.r1_fix, res.r2_fix, res.r3_fix,
-        )
+        self.txt_stress_detail.setPlainText(format_stress_report(inp, res))
 
     def _smooth_freq(self, ch: int, raw: float, locked: bool) -> float:
         """对单通道锁定频率做滑动平均; 未锁/未启用/大跳变时旁路或重置窗口."""
@@ -2901,6 +2996,9 @@ class MainWindow(QMainWindow):
 
         # 保存最近一帧 (供 "打印当前帧诊断" 按钮使用)
         self._last_frame = data
+
+        if getattr(self, "_stress_off_avg_active", False):
+            self._stress_offset_avg_feed(data)
         
         # 更新 4 路谐波/DC 实时文本 (与下拉框选择无关, 全部同时刷新)
         if hasattr(self, 'lbl_har_dc'):
@@ -2967,6 +3065,10 @@ class MainWindow(QMainWindow):
     #   ch1_X_mV/Y/R/theta       通道1 PLL 内部 X/Y (锁相过程的 in-phase / quadrature)
     #   ch2_X_mV/Y/R/theta       通道2 PLL 内部 X/Y
     #   adc_ch1/2/3_LSB          原始 ADC 14bit 码值 (-8192 ~ 8191), 追溯用
+    #   stress_ok                应力计算成功 (0/1; 依赖录制开始时 Offset/K, 见 # STRESS_* 注释)
+    #   stress_rho_deg           主应力方向 ρ (°)
+    #   stress_delta_nm          延迟量 δ (nm)
+    #   stress_r1/2/3_fix        Offset 修正后的 R1/R2/R3
     #
     # ★ 电压单位固定为 "mV peak", 不随 GUI 显示 (Peak / RMS) 切换变化
     #   想要 RMS, 事后乘 1/√2 即可
@@ -2984,6 +3086,10 @@ class MainWindow(QMainWindow):
         "ch2_X_mV", "ch2_Y_mV", "ch2_R_mV", "ch2_theta_deg",
         # --- 原始 ADC (LSB) ---
         "adc_ch1_LSB", "adc_ch2_LSB", "adc_ch3_LSB",
+        # --- 应力 (V_rms/V + 录制开始时 Offset/K) ---
+        "stress_ok",
+        "stress_rho_deg", "stress_delta_nm",
+        "stress_r1_fix", "stress_r2_fix", "stress_r3_fix",
     ]
 
     def _build_csv_row(self, d: dict) -> list:
@@ -3018,6 +3124,28 @@ class MainWindow(QMainWindow):
             x, y, r, th = _xy_block(kx, ky)
             row += [f"{x:.6f}", f"{y:.6f}", f"{r:.6f}", f"{th:.4f}"]
         row += [d.get("adc_ch1", 0), d.get("adc_ch2", 0), d.get("adc_ch3", 0)]
+
+        _, res = self._compute_stress_from_frame(d, cfg=self._csv_stress_cfg)
+        if res is None:
+            row += [0, "", "", "", "", ""]
+        elif res.ok:
+            row += [
+                1,
+                self._csv_fmt_stress(res.rho_deg),
+                self._csv_fmt_stress(res.delta_nm),
+                self._csv_fmt_stress(res.r1_fix),
+                self._csv_fmt_stress(res.r2_fix),
+                self._csv_fmt_stress(res.r3_fix),
+            ]
+        else:
+            row += [
+                0,
+                self._csv_fmt_stress(res.rho_deg),
+                self._csv_fmt_stress(res.delta_nm),
+                self._csv_fmt_stress(res.r1_fix),
+                self._csv_fmt_stress(res.r2_fix),
+                self._csv_fmt_stress(res.r3_fix),
+            ]
         return row
 
     def _write_csv_metadata_header(self, f):
@@ -3039,6 +3167,8 @@ class MainWindow(QMainWindow):
             f"# CLK_CAL_ppm      = {(self._clk_cal - 1.0) * 1e6:+.3f}",
             f"#",
         ]
+        meta_lines.extend(self._stress_csv_metadata_lines(self._csv_stress_cfg))
+        meta_lines.append("#")
         f.write("\n".join(meta_lines) + "\n")
 
     def on_record_clicked(self):
@@ -3051,6 +3181,10 @@ class MainWindow(QMainWindow):
             if not path:
                 return
             try:
+                off = self._read_stress_offsets()
+                calib = self._read_stress_calib()
+                self._csv_stress_cfg = (off, calib) if off and calib else None
+
                 self.csv_file = open(path, "w", newline="", encoding="utf-8")
                 self._write_csv_metadata_header(self.csv_file)
                 self.csv_writer = csv.writer(self.csv_file)
@@ -3062,7 +3196,12 @@ class MainWindow(QMainWindow):
                 self.on_log(f"[+] 开始录制: {path}")
                 self.on_log(f"    电压单位 = mV peak (CALIB_K_HAR={self._calib_k_har:.4f}, "
                             f"K_DC={self._calib_k_dc:.4f})")
+                if self._csv_stress_cfg:
+                    self.on_log("[i] 应力列已启用 (Offset/K 已快照至文件头)")
+                else:
+                    self.on_log("[!] Offset 或 K 非法, stress_* 列将为空")
             except Exception as e:
+                self._csv_stress_cfg = None
                 self.on_log(f"[!] 打开 CSV 失败: {e}")
 
     def _stop_recording(self):
@@ -3070,6 +3209,7 @@ class MainWindow(QMainWindow):
             self.csv_file.close()
         self.csv_writer = None
         self.csv_file = None
+        self._csv_stress_cfg = None
         self.btn_record.setText("录制 CSV")
         self.btn_record.setStyleSheet("")
         self.lbl_status_rec.setText("")
