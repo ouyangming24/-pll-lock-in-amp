@@ -711,6 +711,12 @@ usb_commend u_usb_commend (
 //     .probe3  (da_data)                // 14bit
 // );
 
+ila_0 u_ila_0 (
+    .clk     (sys_clk),
+    .probe0  (adc_ch3),                 // 14bit
+    .probe1  (adc_ch4)                // 14bit
+);
+
 
 // =========================================================================
 // ★ 以太网 UDP 上行 (PL 端千兆, 替代 / 并行于 FT245)
