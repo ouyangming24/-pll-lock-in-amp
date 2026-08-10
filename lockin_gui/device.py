@@ -30,28 +30,31 @@ from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 # 协议常量 (与 docs/Interface_Spec_for_SW.md 保持一致)
 # ============================================================================
 SYNC_HEADER = b"\xA5\x5A\xA5\x5A"
-FRAME_LEN = 104                   # 4 sync + 11i + 3i + 2Q + 1i + 3Q(诊断: 三路参考频率字)
+FRAME_LEN = 152                   # 4 sync + 17i + 3i + 2Q + 1i + 6Q (六路参考频率字)
 F_CLK = 65_000_000                # DDS 时钟 (Hz)
 PHASE_BITS = 48                   # DDS 相位累加器位宽
 
 # 数据字段名 (顺序必须与 lock_in_amp.v 的打包顺序一致)
-# 11 个锁相输出 + 3 个原始 ADC + 2 个锁定频率字 + 1 个锁定标志
 FIELD_NAMES = [
     "ch1_x", "ch1_y",
     "ch2_x", "ch2_y",
     "ch3_x_21", "ch3_y_21",
     "ch3_x_12", "ch3_y_12",
     "ch3_x_11", "ch3_y_11",
+    "ch3_x_osc4", "ch3_y_osc4",
+    "ch3_x_osc5", "ch3_y_osc5",
+    "ch3_x_osc6", "ch3_y_osc6",
     "ch3_dc",
     "adc_ch1", "adc_ch2", "adc_ch3",
     "pll_freq_ch1_word", "pll_freq_ch2_word",
     "lock_flags",
-    # ★ 诊断回读: 三路 PSD 实际生效的参考频率字 (硬件实际收到的值)
+    # ★ 诊断回读: 六路 PSD 实际生效的参考频率字
     "ref_word_21", "ref_word_12", "ref_word_11",
+    "ref_word_osc4", "ref_word_osc5", "ref_word_osc6",
 ]
 
-# struct 格式: 11 int32 + 3 int32 + 2 uint64 + 1 int32 + 3 uint64 (大端)
-FRAME_FMT = ">11i3iQQi3Q"
+# struct 格式: 17 int32 + 3 int32 + 2 uint64 + 1 int32 + 6 uint64 (大端)
+FRAME_FMT = ">17i3iQQi6Q"
 
 
 # ============================================================================
@@ -73,7 +76,7 @@ def list_serial_ports() -> list:
 
 
 def parse_frame(buf: bytes) -> dict:
-    """大端解析 80 字节帧 → 数据字典 (额外提供解析后的 Hz/lock 值)"""
+    """大端解析 FRAME_LEN 字节帧 → 数据字典 (额外提供解析后的 Hz/lock 值)"""
     if len(buf) != FRAME_LEN:
         raise ValueError("帧长度错误")
     if buf[:4] != SYNC_HEADER:
@@ -87,6 +90,9 @@ def parse_frame(buf: bytes) -> dict:
     data["ref_hz_21"] = freq_word_to_hz(data["ref_word_21"])
     data["ref_hz_12"] = freq_word_to_hz(data["ref_word_12"])
     data["ref_hz_11"] = freq_word_to_hz(data["ref_word_11"])
+    data["ref_hz_osc4"] = freq_word_to_hz(data["ref_word_osc4"])
+    data["ref_hz_osc5"] = freq_word_to_hz(data["ref_word_osc5"])
+    data["ref_hz_osc6"] = freq_word_to_hz(data["ref_word_osc6"])
     data["locked_ch1"] = bool(data["lock_flags"] & 0x1)
     data["locked_ch2"] = bool(data["lock_flags"] & 0x2)
     data["timestamp"] = time.time()
@@ -418,36 +424,37 @@ class MockDevice(QObject):
             "KP": 500, "KI": 50,
             "TAU1X": 20, "TAU1Y": 8,
             "TAU2X": 20, "TAU2Y": 8,
-            # 通道3 三路谐波 X/Y 共用 TC (与商用做法一致)
+            # 通道3 六路谐波 X/Y 共用 TC
             "TAU21": 2, "TAU12": 2, "TAU11": 2,
+            "TAU4": 2, "TAU5": 2, "TAU6": 2,
             "TAUDC": 2,
             "PHAS": 0,
             "FRQ2": hz_to_freq_word(50000),
             "FRQ3": hz_to_freq_word(40000),
-            # 通道3 三路 ref_freq (PLL 注释期间手动下发)
-            "FRQ21": hz_to_freq_word(160_000),   # 2F1+F2
-            "FRQ12": hz_to_freq_word(170_000),   # F1+2F2
-            "FRQ11": hz_to_freq_word(110_000),   # F1+F2
+            "FRQ21": hz_to_freq_word(160_000),
+            "FRQ12": hz_to_freq_word(170_000),
+            "FRQ11": hz_to_freq_word(110_000),
+            "FRQ4": hz_to_freq_word(150_000),
+            "FRQ5": hz_to_freq_word(180_000),
+            "FRQ6": hz_to_freq_word(220_000),
             "LOCKSWY": 100_000,
             "LOCKTHX": 300_000,
-            "REFMODE": 1,   # 0=手动 (FRQ21/12/11), 1=硬件 n·F1+m·F2
-            "OSC1": (2 << 8) | 1,   # 振荡器1: 2·F1+1·F2
-            "OSC2": (1 << 8) | 2,   # 振荡器2: 1·F1+2·F2
-            "OSC3": (1 << 8) | 1,   # 振荡器3: 1·F1+1·F2
-            "OSRC1": 0,             # 0=CH3, 1=CH4, 2=CH3-CH4
-            "OSRC2": 0,
-            "OSRC3": 0,
-            "OHN1": 1,
-            "OHN2": 1,
-            "OHN3": 1,
-            # 通道3 4 路 IIR 阶数
-            "ORD21":   1,
-            "ORD12":   1,
-            "ORD11":   1,
-            "ORDDC":   1,
-            # 信号发生器 (DAC904): 振荡器源 / 幅值 / 偏置
-            "DMOD":  0,       # 0=振荡器1, 1=振荡器2, 2=振荡器3
-            "DAMP":  65535,   # 满幅
+            "REFMODE": 1,
+            "OSC1": (2 << 8) | 1,
+            "OSC2": (1 << 8) | 2,
+            "OSC3": (1 << 8) | 1,
+            "OSC4": (3 << 8) | 0,
+            "OSC5": (0 << 8) | 3,
+            "OSC6": (2 << 8) | 2,
+            "OSRC1": 0, "OSRC2": 0, "OSRC3": 0,
+            "OSRC4": 0, "OSRC5": 0, "OSRC6": 0,
+            "OHN1": 1, "OHN2": 1, "OHN3": 1,
+            "OHN4": 1, "OHN5": 1, "OHN6": 1,
+            "ORD21": 1, "ORD12": 1, "ORD11": 1,
+            "ORD4": 1, "ORD5": 1, "ORD6": 1,
+            "ORDDC": 1,
+            "DMOD":  0,
+            "DAMP":  65535,
             "DOFS":  0,
         }
         # 模拟数据生成定时器 (~50 fps; 真实硬件帧率 ≤ 10 fps, 这里足够看动效)
@@ -539,6 +546,12 @@ class MockDevice(QObject):
             "ch3_y_12":  int(1.5e6 * math.sin(t * 1.1)) + noise(25_000),
             "ch3_x_11":  int(3e6   * math.cos(t * 0.5)) + noise(40_000),
             "ch3_y_11":  int(3e6   * math.sin(t * 0.5)) + noise(40_000),
+            "ch3_x_osc4": int(1.2e6 * math.cos(t * 0.7)) + noise(25_000),
+            "ch3_y_osc4": int(1.2e6 * math.sin(t * 0.7)) + noise(25_000),
+            "ch3_x_osc5": int(1.1e6 * math.cos(t * 0.9)) + noise(25_000),
+            "ch3_y_osc5": int(1.1e6 * math.sin(t * 0.9)) + noise(25_000),
+            "ch3_x_osc6": int(1.0e6 * math.cos(t * 1.3)) + noise(25_000),
+            "ch3_y_osc6": int(1.0e6 * math.sin(t * 1.3)) + noise(25_000),
             "ch3_dc":    int(5e5 + 1e5 * math.sin(t * 0.2)) + noise(20_000),
             "adc_ch1":   clip14(adc1_raw),
             "adc_ch2":   clip14(adc2_raw),
@@ -549,11 +562,17 @@ class MockDevice(QObject):
             "ref_word_21": hz_to_freq_word(2 * f1_hz + f2_hz),
             "ref_word_12": hz_to_freq_word(f1_hz + 2 * f2_hz),
             "ref_word_11": hz_to_freq_word(f1_hz + f2_hz),
+            "ref_word_osc4": hz_to_freq_word(3 * f1_hz),
+            "ref_word_osc5": hz_to_freq_word(3 * f2_hz),
+            "ref_word_osc6": hz_to_freq_word(2 * f1_hz + 2 * f2_hz),
             "pll_freq_ch1_hz": f1_hz,
             "pll_freq_ch2_hz": f2_hz,
             "ref_hz_21": 2 * f1_hz + f2_hz,
             "ref_hz_12": f1_hz + 2 * f2_hz,
             "ref_hz_11": f1_hz + f2_hz,
+            "ref_hz_osc4": 3 * f1_hz,
+            "ref_hz_osc5": 3 * f2_hz,
+            "ref_hz_osc6": 2 * f1_hz + 2 * f2_hz,
             "locked_ch1": locked_ch1,
             "locked_ch2": locked_ch2,
             "timestamp": time.time(),

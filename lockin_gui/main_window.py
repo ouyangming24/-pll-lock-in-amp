@@ -19,6 +19,8 @@ PyQt5 主窗口 ── 商用锁相放大器风格 GUI
 
 import csv
 import math
+import queue
+import threading
 import time
 from collections import deque
 
@@ -48,11 +50,18 @@ from stress_calc import (
 PLOT_BUF = 1000           # 每条曲线显示点数 (2000 → 1000, 减半绘图压力)
 REFRESH_HZ = 15           # 绘图刷新率 (20 → 15, GUI 不再卡)
 PEN_W = 1.2               # 线宽稍降, 配合关闭抗锯齿后视觉差别极小
+# 高帧率: 文字标签节流; CSV 进内存队列由后台线程写盘
+UI_LABEL_HZ = 30
+CSV_QUEUE_MAX = 100_000
+CSV_FLUSH_EVERY = 256
 
 # 振荡器 / 直流 — 用户界面显示名 (内部 buf 键 ch3_x_21 等不变)
 OSC1_LBL = "振荡器1"
 OSC2_LBL = "振荡器2"
 OSC3_LBL = "振荡器3"
+OSC4_LBL = "振荡器4"
+OSC5_LBL = "振荡器5"
+OSC6_LBL = "振荡器6"
 DC_LBL   = "直流"
 
 # 振荡器 ADC 输入源 (与硬件 OSRC1/2/3 一致)
@@ -409,7 +418,7 @@ class MainWindow(QMainWindow):
         self.dev.connection_changed.connect(self.on_conn_changed)
 
         # 数据缓冲区
-        # FIELD_NAMES 是 80 字节帧的原始字段; 这里再额外存两个派生的 Hz 频率轨迹
+        # FIELD_NAMES 是回传帧的原始字段; 这里再额外存两个派生的 Hz 频率轨迹
         self.buf = {k: deque(maxlen=PLOT_BUF) for k in FIELD_NAMES}
         self.buf["pll_freq_ch1_hz"] = deque(maxlen=PLOT_BUF)
         self.buf["pll_freq_ch2_hz"] = deque(maxlen=PLOT_BUF)
@@ -467,6 +476,13 @@ class MainWindow(QMainWindow):
         self.csv_writer = None
         self.csv_file = None
         self._csv_stress_cfg: tuple | None = None  # 录制开始时 Offset/K 快照
+        self._csv_queue: queue.Queue | None = None
+        self._csv_thread: threading.Thread | None = None
+        self._csv_stop = threading.Event()
+        self._csv_written = 0
+        self._csv_dropped = 0
+        self._ui_label_t0 = 0.0
+        self._csv_path = ""
 
         self._build_ui()
 
@@ -711,13 +727,16 @@ class MainWindow(QMainWindow):
         self.ed_t21 = self._mk_tau_row(g_tau, 0, OSC1_LBL, "20", "TAU21", osc_hint=True)
         self.ed_t12 = self._mk_tau_row(g_tau, 1, OSC2_LBL, "20", "TAU12", osc_hint=True)
         self.ed_t11 = self._mk_tau_row(g_tau, 2, OSC3_LBL, "20", "TAU11", osc_hint=True)
-        self.ed_tdc = self._mk_tau_row(g_tau, 3, DC_LBL,   "20", "TAUDC", osc_hint=True)
+        self.ed_t4  = self._mk_tau_row(g_tau, 3, OSC4_LBL, "20", "TAU4",  osc_hint=True)
+        self.ed_t5  = self._mk_tau_row(g_tau, 4, OSC5_LBL, "20", "TAU5",  osc_hint=True)
+        self.ed_t6  = self._mk_tau_row(g_tau, 5, OSC6_LBL, "20", "TAU6",  osc_hint=True)
+        self.ed_tdc = self._mk_tau_row(g_tau, 6, DC_LBL,   "20", "TAUDC", osc_hint=True)
         gb_tau_layout.addLayout(g_tau)
         v_osc.addWidget(gb_tau)
 
         gb_ord = QGroupBox("解调滤波阶数 (1..4 阶 = 6/12/18/24 dB/oct)")
         gb_ord.setToolTip(
-            "每路 IIR 滤波器单独设置阶数 (3 路振荡器 + 直流共 4 个独立设置).\n"
+            "每路 IIR 滤波器单独设置阶数 (6 路振荡器 + 直流共 7 个独立设置).\n"
             "实现: N 个相同 tau 的一阶 EMA 级联 (无过冲, 时域单调收敛)."
         )
         g_ord = QGridLayout(gb_ord)
@@ -731,11 +750,14 @@ class MainWindow(QMainWindow):
         self.cb_order21 = self._mk_order_row(g_ord, 0, OSC1_LBL, "ORD21")
         self.cb_order12 = self._mk_order_row(g_ord, 1, OSC2_LBL, "ORD12")
         self.cb_order11 = self._mk_order_row(g_ord, 2, OSC3_LBL, "ORD11")
-        self.cb_orderdc = self._mk_order_row(g_ord, 3, DC_LBL,   "ORDDC")
+        self.cb_order4  = self._mk_order_row(g_ord, 3, OSC4_LBL, "ORD4")
+        self.cb_order5  = self._mk_order_row(g_ord, 4, OSC5_LBL, "ORD5")
+        self.cb_order6  = self._mk_order_row(g_ord, 5, OSC6_LBL, "ORD6")
+        self.cb_orderdc = self._mk_order_row(g_ord, 6, DC_LBL,   "ORDDC")
         lbl_quick = QLabel("快捷统一")
         lbl_quick.setStyleSheet("font-size: 10pt; color: #8c8;")
         lbl_quick.setFixedWidth(95)
-        g_ord.addWidget(lbl_quick, 4, 0)
+        g_ord.addWidget(lbl_quick, 7, 0)
         self.cb_order_all = QComboBox()
         self.cb_order_all.addItem("— 选择 —",        0)
         self.cb_order_all.addItem("1 阶  (6 dB/oct)",  1)
@@ -745,15 +767,15 @@ class MainWindow(QMainWindow):
         self.cb_order_all.setFixedHeight(30)
         self.cb_order_all.setFixedWidth(268)
         self.cb_order_all.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
-        self.cb_order_all.setToolTip("选一档后点 ▶ → 4 路全部设为相同阶数并立即下发")
-        g_ord.addWidget(self.cb_order_all, 4, 1, 1, 2)
+        self.cb_order_all.setToolTip("选一档后点 ▶ → 全部设为相同阶数并立即下发")
+        g_ord.addWidget(self.cb_order_all, 7, 1, 1, 2)
         btn_apply_all = QPushButton("▶")
         btn_apply_all.setFixedSize(42, 30)
         btn_apply_all.setStyleSheet(
             "font-size: 11pt; font-weight: bold;"
             " background:#4a6; color:#fff;")
         btn_apply_all.clicked.connect(self._on_apply_order_all)
-        g_ord.addWidget(btn_apply_all, 4, 3)
+        g_ord.addWidget(btn_apply_all, 7, 3)
         v_osc.addWidget(gb_ord)
 
         v_osc.addWidget(self._build_ch3_osc_section())
@@ -1002,6 +1024,9 @@ class MainWindow(QMainWindow):
             (f"{OSC1_LBL}:", "OSC1", "OSRC1", "OHN1", "FRQ21", "160000", 2, 1),
             (f"{OSC2_LBL}:", "OSC2", "OSRC2", "OHN2", "FRQ12", "170000", 1, 2),
             (f"{OSC3_LBL}:", "OSC3", "OSRC3", "OHN3", "FRQ11", "110000", 1, 1),
+            (f"{OSC4_LBL}:", "OSC4", "OSRC4", "OHN4", "FRQ4",  "150000", 3, 0),
+            (f"{OSC5_LBL}:", "OSC5", "OSRC5", "OHN5", "FRQ5",  "180000", 0, 3),
+            (f"{OSC6_LBL}:", "OSC6", "OSRC6", "OHN6", "FRQ6",  "220000", 2, 2),
         ]
         for row, (label, osc_cmd, osrc_cmd, ohn_cmd, frq_cmd, frq_def, n_def, m_def) in enumerate(osc_defs):
             lbl = QLabel(label)
@@ -1242,7 +1267,8 @@ class MainWindow(QMainWindow):
         这是硬件真正在用的频率, 可直接核对 OSC/FRQ 命令是否真的下发生效."""
         if not getattr(self, "ch3_oscs", None):
             return
-        keys = ("ref_hz_21", "ref_hz_12", "ref_hz_11")
+        keys = ("ref_hz_21", "ref_hz_12", "ref_hz_11",
+                "ref_hz_osc4", "ref_hz_osc5", "ref_hz_osc6")
         for osc, k in zip(self.ch3_oscs, keys):
             hz = d.get(k)
             if hz is None:
@@ -1476,6 +1502,9 @@ class MainWindow(QMainWindow):
         self.cb_dac_mode.addItem(OSC1_LBL, 0)
         self.cb_dac_mode.addItem(OSC2_LBL, 1)
         self.cb_dac_mode.addItem(OSC3_LBL, 2)
+        self.cb_dac_mode.addItem(OSC4_LBL, 3)
+        self.cb_dac_mode.addItem(OSC5_LBL, 4)
+        self.cb_dac_mode.addItem(OSC6_LBL, 5)
         self.cb_dac_mode.setFixedHeight(30)
         self.cb_dac_mode.setFixedWidth(268)
         self.cb_dac_mode.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
@@ -2120,7 +2149,8 @@ class MainWindow(QMainWindow):
         har_ctrl_layout.setSpacing(6)
 
         self.cb_har_select = QComboBox()
-        self.cb_har_select.addItems([OSC1_LBL, OSC2_LBL, OSC3_LBL, DC_LBL])
+        self.cb_har_select.addItems([
+            OSC1_LBL, OSC2_LBL, OSC3_LBL, OSC4_LBL, OSC5_LBL, OSC6_LBL, DC_LBL])
         self.cb_har_select.setMinimumWidth(90)
         self.cb_har_select.currentIndexChanged.connect(self._on_har_select_changed)
 
@@ -2250,12 +2280,15 @@ class MainWindow(QMainWindow):
         self.lbl_har_21 = QLabel(f"{OSC1_LBL} │ {VAL_DEFAULT}")
         self.lbl_har_12 = QLabel(f"{OSC2_LBL} │ {VAL_DEFAULT}")
         self.lbl_har_11 = QLabel(f"{OSC3_LBL} │ {VAL_DEFAULT}")
+        self.lbl_har_4  = QLabel(f"{OSC4_LBL} │ {VAL_DEFAULT}")
+        self.lbl_har_5  = QLabel(f"{OSC5_LBL} │ {VAL_DEFAULT}")
+        self.lbl_har_6  = QLabel(f"{OSC6_LBL} │ {VAL_DEFAULT}")
         self.lbl_har_dc = QLabel(f"{DC_LBL}   │ ---")
-        for lbl in (self.lbl_har_21, self.lbl_har_12,
-                    self.lbl_har_11, self.lbl_har_dc):
+        for lbl in (self.lbl_har_21, self.lbl_har_12, self.lbl_har_11,
+                    self.lbl_har_4, self.lbl_har_5, self.lbl_har_6,
+                    self.lbl_har_dc):
             lbl.setStyleSheet(VAL_STYLE)
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            # ★ 横向 Ignored: 长文本标签不再把整列最小宽度撑大 (否则左下面板挤占右列)
             lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         har_val_grid = QGridLayout()
@@ -2265,7 +2298,10 @@ class MainWindow(QMainWindow):
         har_val_grid.addWidget(self.lbl_har_21, 0, 0)
         har_val_grid.addWidget(self.lbl_har_12, 0, 1)
         har_val_grid.addWidget(self.lbl_har_11, 1, 0)
-        har_val_grid.addWidget(self.lbl_har_dc, 1, 1)
+        har_val_grid.addWidget(self.lbl_har_4,  1, 1)
+        har_val_grid.addWidget(self.lbl_har_5,  2, 0)
+        har_val_grid.addWidget(self.lbl_har_6,  2, 1)
+        har_val_grid.addWidget(self.lbl_har_dc, 3, 0, 1, 2)
         self.panel_ch3_har.layout().insertLayout(3, har_val_grid)
 
         # ── 多曲线状态 ──
@@ -2545,7 +2581,7 @@ class MainWindow(QMainWindow):
         self.on_log(f"  ({cmd} = {order} 阶, {order*6} dB/oct)")
 
     def _on_apply_order_all(self):
-        """快捷统一: 把所有 4 路 IIR 阶数设为相同值并下发."""
+        """快捷统一: 把所有 IIR 阶数设为相同值并下发."""
         order = self.cb_order_all.currentData()
         try:
             order = int(order)
@@ -2554,16 +2590,16 @@ class MainWindow(QMainWindow):
         if order < 1 or order > 4:
             self.on_log("[!] 请先在快捷统一下拉框选择 1~4 阶")
             return
-        # 同步 4 个独立下拉框的显示 (索引 = order - 1, 因为 addItem 顺序就是 1..4)
-        for cb in (self.cb_order21, self.cb_order12, self.cb_order11, self.cb_orderdc):
+        cbs = (
+            self.cb_order21, self.cb_order12, self.cb_order11,
+            self.cb_order4, self.cb_order5, self.cb_order6, self.cb_orderdc,
+        )
+        cmds = ("ORD21", "ORD12", "ORD11", "ORD4", "ORD5", "ORD6", "ORDDC")
+        for cb in cbs:
             cb.setCurrentIndex(order - 1)
-        # 立即逐个下发
-        self._send_order_one("ORD21", self.cb_order21)
-        self._send_order_one("ORD12", self.cb_order12)
-        self._send_order_one("ORD11", self.cb_order11)
-        self._send_order_one("ORDDC", self.cb_orderdc)
-        # 视觉反馈: 4 行同时高亮一下
-        for cb in (self.cb_order21, self.cb_order12, self.cb_order11, self.cb_orderdc):
+        for cmd, cb in zip(cmds, cbs):
+            self._send_order_one(cmd, cb)
+        for cb in cbs:
             self._flash_row(cb._row_lbl, cb, cb._row_btn)
 
     def on_send_all_clicked(self):
@@ -2576,11 +2612,13 @@ class MainWindow(QMainWindow):
         self._send_int_cmd("TAU21", self.ed_t21.text())
         self._send_int_cmd("TAU12", self.ed_t12.text())
         self._send_int_cmd("TAU11", self.ed_t11.text())
+        self._send_int_cmd("TAU4",  self.ed_t4.text())
+        self._send_int_cmd("TAU5",  self.ed_t5.text())
+        self._send_int_cmd("TAU6",  self.ed_t6.text())
         self._send_int_cmd("TAUDC", self.ed_tdc.text())
         self._send_int_cmd("PHAS", self.ed_phs.text())
         self._send_freq_cmd("FRQ2", self.ed_f1.text())
         self._send_freq_cmd("FRQ3", self.ed_f2.text())
-        # ★ 通道3 振荡器: 自动=REFMODE:1+OSC; 手动=REFMODE:0+FRQ21/12/11
         if self.rb_ref_auto.isChecked():
             self._send_all_osc_coefs(quiet=True)
         else:
@@ -2591,12 +2629,13 @@ class MainWindow(QMainWindow):
                 self._send_freq_cmd(osc["frq_cmd"], osc["ed_frq"].text())
         self._send_int_cmd("LOCKSWY", self.ed_swy.text())
         self._send_int_cmd("LOCKTHX", self.ed_thx.text())
-        # ★ 通道3 4 路 IIR 阶数 (各路独立, 1..4 = 6/12/18/24 dB/oct)
         self._send_order_one("ORD21", self.cb_order21)
         self._send_order_one("ORD12", self.cb_order12)
         self._send_order_one("ORD11", self.cb_order11)
+        self._send_order_one("ORD4",  self.cb_order4)
+        self._send_order_one("ORD5",  self.cb_order5)
+        self._send_order_one("ORD6",  self.cb_order6)
         self._send_order_one("ORDDC", self.cb_orderdc)
-        # ★ 信号发生器 (DAC904): 振荡器源 / 幅值 / 偏置
         self._send_dac_mode()
         self._send_dac_amp(self.ed_dac_amp.text())
         self._send_dac_ofs(self.ed_dac_ofs.text())
@@ -2852,6 +2891,9 @@ class MainWindow(QMainWindow):
         OSC1_LBL: ("ch3_x_21", "ch3_y_21"),
         OSC2_LBL: ("ch3_x_12", "ch3_y_12"),
         OSC3_LBL: ("ch3_x_11", "ch3_y_11"),
+        OSC4_LBL: ("ch3_x_osc4", "ch3_y_osc4"),
+        OSC5_LBL: ("ch3_x_osc5", "ch3_y_osc5"),
+        OSC6_LBL: ("ch3_x_osc6", "ch3_y_osc6"),
         DC_LBL:   ("ch3_dc",   None),
     }
 
@@ -2923,6 +2965,9 @@ class MainWindow(QMainWindow):
         (OSC1_LBL, "ch3_x_21", "ch3_y_21"),
         (OSC2_LBL, "ch3_x_12", "ch3_y_12"),
         (OSC3_LBL, "ch3_x_11", "ch3_y_11"),
+        (OSC4_LBL, "ch3_x_osc4", "ch3_y_osc4"),
+        (OSC5_LBL, "ch3_x_osc5", "ch3_y_osc5"),
+        (OSC6_LBL, "ch3_x_osc6", "ch3_y_osc6"),
     )
 
     def _on_har_disp_toggled(self, *_):
@@ -2933,9 +2978,7 @@ class MainWindow(QMainWindow):
         self._update_har_text()
 
     def _update_har_text(self, *_):
-        """每一帧把 4 路 (3 谐波 + DC) 的实时值全部刷新.
-        电压按幅度自动 V/mV/µV (4 位小数); 相位 Θ 仍用 °.
-        """
+        """每一帧把 6 路振荡器 + DC 的实时值全部刷新."""
         d = self._last_frame
         if d is None:
             return
@@ -2944,10 +2987,11 @@ class MainWindow(QMainWindow):
         v_lsb  = self._v_per_lsb
 
         rt = (self._har_disp_mode == "rt")
-        for lbl, (name, kx, ky) in zip(
-            (self.lbl_har_21, self.lbl_har_12, self.lbl_har_11),
-            self._HAR_KEYS,
-        ):
+        labels = (
+            self.lbl_har_21, self.lbl_har_12, self.lbl_har_11,
+            self.lbl_har_4, self.lbl_har_5, self.lbl_har_6,
+        )
+        for lbl, (name, kx, ky) in zip(labels, self._HAR_KEYS):
             x_v = d.get(kx, 0) * v_lsb * scale
             y_v = d.get(ky, 0) * v_lsb * scale
             if rt:
@@ -2999,29 +3043,29 @@ class MainWindow(QMainWindow):
 
         if getattr(self, "_stress_off_avg_active", False):
             self._stress_offset_avg_feed(data)
-        
-        # 更新 4 路谐波/DC 实时文本 (与下拉框选择无关, 全部同时刷新)
-        if hasattr(self, 'lbl_har_dc'):
-            self._update_har_text()
-        if getattr(self, "chk_stress_live", None) and self.chk_stress_live.isChecked():
-            self._update_stress_display()
 
         # 派生频率轨迹也存进缓冲, 用于上行两个频率曲线
         self.buf["pll_freq_ch1_hz"].append(self._latest_freq_ch1)
         self.buf["pll_freq_ch2_hz"].append(self._latest_freq_ch2)
 
-        # 自动模式: 三路谐波 ref 实时跟随实测锁定频率 (节流: 每 5 帧刷新一次)
-        if self.frame_count % 5 == 0:
-            self._track_ref_freqs()
-
-        # ★ 诊断: 用回读的硬件实际参考频率覆盖显示 (放最后, 保证不被估算值盖掉)
-        self._update_osc_readback(data)
-
-        if self.csv_writer:
+        # ★ CSV: 只入队, 由后台线程写盘 (高帧率时不堵住主线程)
+        if self._csv_queue is not None:
             try:
-                self.csv_writer.writerow(self._build_csv_row(data))
-            except Exception as e:
-                self.on_log(f"[!] CSV 写入失败: {e}")
+                self._csv_queue.put_nowait(dict(data))
+            except queue.Full:
+                self._csv_dropped += 1
+
+        # 文字 / 应力 UI 按 UI_LABEL_HZ 节流 (曲线仍由 refresh_plots @ REFRESH_HZ 画)
+        now = time.time()
+        if now - self._ui_label_t0 >= 1.0 / UI_LABEL_HZ:
+            self._ui_label_t0 = now
+            if hasattr(self, 'lbl_har_dc'):
+                self._update_har_text()
+            if getattr(self, "chk_stress_live", None) and self.chk_stress_live.isChecked():
+                self._update_stress_display()
+            self._update_osc_readback(data)
+            if self.frame_count % 5 == 0:
+                self._track_ref_freqs()
 
     # ============================================================ 绘图刷新
     def refresh_plots(self):
@@ -3052,6 +3096,11 @@ class MainWindow(QMainWindow):
             self._fps_t0 = now
         self.lbl_status_fps.setText(f"FPS: {self._fps:5.1f}")
         self.lbl_status_buf.setText(f"缓冲: {len(self.t_buf)}/{PLOT_BUF}")
+        if self._csv_queue is not None:
+            qsz = self._csv_queue.qsize()
+            self.lbl_status_rec.setText(
+                f"● 录制中 q={qsz} w={self._csv_written} drop={self._csv_dropped}"
+            )
 
     # ============================================================ CSV 录制
     # CSV 表头. 列定义:
@@ -3075,10 +3124,13 @@ class MainWindow(QMainWindow):
     CSV_COLUMNS = [
         "timestamp",
         "pll_freq_ch1_hz", "pll_freq_ch2_hz", "locked_ch1", "locked_ch2",
-        # --- 通道3 三谐波: X, Y, R, theta(°) ---
+        # --- 通道3 六路振荡器: X, Y, R, theta(°) ---
         "ch3_21_X_mV", "ch3_21_Y_mV", "ch3_21_R_mV", "ch3_21_theta_deg",
         "ch3_12_X_mV", "ch3_12_Y_mV", "ch3_12_R_mV", "ch3_12_theta_deg",
         "ch3_11_X_mV", "ch3_11_Y_mV", "ch3_11_R_mV", "ch3_11_theta_deg",
+        "ch3_osc4_X_mV", "ch3_osc4_Y_mV", "ch3_osc4_R_mV", "ch3_osc4_theta_deg",
+        "ch3_osc5_X_mV", "ch3_osc5_Y_mV", "ch3_osc5_R_mV", "ch3_osc5_theta_deg",
+        "ch3_osc6_X_mV", "ch3_osc6_Y_mV", "ch3_osc6_R_mV", "ch3_osc6_theta_deg",
         # --- 通道3 DC ---
         "ch3_dc_mV",
         # --- 通道1/2 PLL 内部 X/Y/R/theta ---
@@ -3116,7 +3168,10 @@ class MainWindow(QMainWindow):
         ]
         for kx, ky in (("ch3_x_21", "ch3_y_21"),
                        ("ch3_x_12", "ch3_y_12"),
-                       ("ch3_x_11", "ch3_y_11")):
+                       ("ch3_x_11", "ch3_y_11"),
+                       ("ch3_x_osc4", "ch3_y_osc4"),
+                       ("ch3_x_osc5", "ch3_y_osc5"),
+                       ("ch3_x_osc6", "ch3_y_osc6")):
             x, y, r, th = _xy_block(kx, ky)
             row += [f"{x:.6f}", f"{y:.6f}", f"{r:.6f}", f"{th:.4f}"]
         row.append(f"{d.get('ch3_dc', 0) * mv_dc:.6f}")
@@ -3172,7 +3227,7 @@ class MainWindow(QMainWindow):
         f.write("\n".join(meta_lines) + "\n")
 
     def on_record_clicked(self):
-        if self.csv_writer:
+        if self._csv_queue is not None or self.csv_writer:
             self._stop_recording()
         else:
             path, _ = QFileDialog.getSaveFileName(
@@ -3189,11 +3244,22 @@ class MainWindow(QMainWindow):
                 self._write_csv_metadata_header(self.csv_file)
                 self.csv_writer = csv.writer(self.csv_file)
                 self.csv_writer.writerow(self.CSV_COLUMNS)
+
+                self._csv_path = path
+                self._csv_written = 0
+                self._csv_dropped = 0
+                self._csv_stop.clear()
+                self._csv_queue = queue.Queue(maxsize=CSV_QUEUE_MAX)
+                self._csv_thread = threading.Thread(
+                    target=self._csv_writer_loop, name="csv-writer", daemon=True)
+                self._csv_thread.start()
+
                 self.btn_record.setText("⏹ 停止录制")
                 self.btn_record.setStyleSheet("background:#a33; color:white;")
                 self.lbl_status_rec.setText(f"● 录制中: {path.split('/')[-1]}")
                 self.lbl_status_rec.setStyleSheet("color:#f55;")
-                self.on_log(f"[+] 开始录制: {path}")
+                self.on_log(f"[+] 开始录制(后台队列): {path}")
+                self.on_log(f"    队列上限={CSV_QUEUE_MAX}, UI标签≤{UI_LABEL_HZ} Hz")
                 self.on_log(f"    电压单位 = mV peak (CALIB_K_HAR={self._calib_k_har:.4f}, "
                             f"K_DC={self._calib_k_dc:.4f})")
                 if self._csv_stress_cfg:
@@ -3202,17 +3268,77 @@ class MainWindow(QMainWindow):
                     self.on_log("[!] Offset 或 K 非法, stress_* 列将为空")
             except Exception as e:
                 self._csv_stress_cfg = None
+                self._csv_queue = None
+                self.csv_writer = None
+                if self.csv_file:
+                    try:
+                        self.csv_file.close()
+                    except Exception:
+                        pass
+                    self.csv_file = None
                 self.on_log(f"[!] 打开 CSV 失败: {e}")
 
+    def _csv_writer_loop(self):
+        """后台线程: 从队列取帧 → 拼行 → 写 CSV, 不占用 GUI/收包路径."""
+        n_since_flush = 0
+        q = self._csv_queue
+        writer = self.csv_writer
+        fh = self.csv_file
+        if q is None or writer is None or fh is None:
+            return
+        try:
+            while True:
+                if self._csv_stop.is_set() and q.empty():
+                    break
+                try:
+                    data = q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                try:
+                    writer.writerow(self._build_csv_row(data))
+                    self._csv_written += 1
+                    n_since_flush += 1
+                    if n_since_flush >= CSV_FLUSH_EVERY:
+                        fh.flush()
+                        n_since_flush = 0
+                except Exception:
+                    break
+            try:
+                fh.flush()
+            except Exception:
+                pass
+        finally:
+            pass
+
     def _stop_recording(self):
+        # 先停入队, 再等后台把队列写完
+        self._csv_stop.set()
+        th = self._csv_thread
+        if th is not None:
+            th.join(timeout=30.0)
+            if th.is_alive():
+                self.on_log("[!] CSV 后台线程结束超时, 可能仍有未写完数据")
+            else:
+                self.on_log(
+                    f"[+] 录制结束: 已写 {self._csv_written} 行, "
+                    f"队列丢弃 {self._csv_dropped} 帧"
+                )
+        self._csv_thread = None
+        self._csv_queue = None
+
         if self.csv_file:
-            self.csv_file.close()
+            try:
+                self.csv_file.close()
+            except Exception:
+                pass
         self.csv_writer = None
         self.csv_file = None
         self._csv_stress_cfg = None
+        self._csv_path = ""
         self.btn_record.setText("录制 CSV")
         self.btn_record.setStyleSheet("")
         self.lbl_status_rec.setText("")
+        self.lbl_status_rec.setStyleSheet("")
 
     # ============================================================ 日志
     def on_log(self, msg: str):

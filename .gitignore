@@ -3,7 +3,16 @@
 # =============================================
 
 # 综合/实现/仿真运行产物（可由 Vivado 重建）
+# 注意：Git 忽略父目录后无法单独“反忽略”其中的文件，
+# 因此对 runs 采用“忽略目录内容 + 放行 impl_1 的 .bit/.ltx”
 *.runs/
+!project_1.runs/
+project_1.runs/**
+!project_1.runs/impl_1/
+project_1.runs/impl_1/**
+!project_1.runs/impl_1/*.bit
+!project_1.runs/impl_1/*.ltx
+
 *.sim/
 
 # 缓存
@@ -34,9 +43,9 @@ webtalk*.xml
 webtalk*.html
 webtalk*.jou
 
-# Bitstream（体积大，通常不提交）
-*.bit
-*.ltx
+# Bitstream / ILA 探针：需要随版本保存（根目录与 impl_1 均跟踪）
+# *.bit / *.ltx 不再忽略
+# 仍忽略裸 Flash 镜像等大体积产物
 *.bin
 
 # IP 生成物（只保留 .xci 配置文件）

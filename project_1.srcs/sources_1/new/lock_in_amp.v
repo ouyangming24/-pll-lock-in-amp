@@ -90,24 +90,30 @@ wire [15:0] pll_ki_w;
 wire [4:0]  tau1_x_w, tau1_y_w, tau2_x_w, tau2_y_w;
 // ch3 谐波/DC IIR 时间常数 (X/Y 共用, 与商用 SR830 等保持一致)
 wire [4:0]  tau21_w, tau12_w, tau11_w, tau_dc_w;
+wire [4:0]  tau4_w, tau5_w, tau6_w;   // 振荡器4/5/6
 wire [47:0] tx1_phase_word;         // (仅注释掉的 tx DDS 用, 不跨域消费)
 wire [47:0] tx1_freq_word_w;
 wire [47:0] tx2_phase_word = 48'd0;
 wire [47:0] tx2_freq_word_w;
-// ★ 通道3 三路振荡器 ref_freq
-//   REFMODE=0: 手动, 频率字由 FRQ21/FRQ12/FRQ11 下发
-//   REFMODE=1: 自动, 硬件实时 n*pll_freq_ch1 + m*pll_freq_ch2 (系数 OSC1/2/3)
+// ★ 通道3 六路振荡器 ref_freq
+//   REFMODE=0: 手动, 频率字由 FRQ21/12/11 + FRQ4/5/6 下发
+//   REFMODE=1: 自动, 硬件实时 n*pll_freq_ch1 + m*pll_freq_ch2 (系数 OSC1..6)
 wire [47:0] freq_word_21_w, freq_word_12_w, freq_word_11_w;
+wire [47:0] freq_word_4_w, freq_word_5_w, freq_word_6_w;
 wire        ref_freq_auto_w;        // REFMODE: 0=手动 / 1=自动
 wire [7:0]  osc1_n_w, osc1_m_w, osc2_n_w, osc2_m_w, osc3_n_w, osc3_m_w;
+wire [7:0]  osc4_n_w, osc4_m_w, osc5_n_w, osc5_m_w, osc6_n_w, osc6_m_w;
 wire [1:0]  osc1_src_w, osc2_src_w, osc3_src_w;
+wire [1:0]  osc4_src_w, osc5_src_w, osc6_src_w;
 wire [7:0]  osc1_oh_w, osc2_oh_w, osc3_oh_w;
-// ★ 通道3 4 路 IIR 阶数 (各路独立, ORD21/ORD12/ORD11/ORDDC 命令: 1..4)
+wire [7:0]  osc4_oh_w, osc5_oh_w, osc6_oh_w;
+// ★ 通道3 IIR 阶数 (OSC1..6 + DC, ORD* 命令: 1..4)
 wire [2:0]  order21_w, order12_w, order11_w, order_dc_w;
+wire [2:0]  order4_w, order5_w, order6_w;
 // ★ PLL 锁定阈值 (由 USB 命令 LOCKSWY/LOCKTHX 动态下发)
 wire signed [27:0] sweep_thres_w, lock_x_thres_w;
 // ★ 信号发生器 (DAC904) 控制 (DMOD/DAMP/DOFS)
-wire [1:0]         dac_src_mode_w;     // 0=振荡器1 / 1=振荡器2 / 2=振荡器3
+wire [2:0]         dac_src_mode_w;     // 0..5 = 振荡器1..6
 wire [15:0]        dac_amp_w;         // 幅度 16bit, 65535=满幅
 wire signed [13:0] dac_ofs_w;         // 偏置 (DAC 有符号码)
 
@@ -259,7 +265,7 @@ pll_loop #(
 
 
 // =========================================================================
-// ★ 通道3 锁相放大器 (PSD × 3 振荡器 + DC 通路)
+// ★ 通道3 锁相放大器 (PSD × 6 振荡器 + DC 通路)
 // =========================================================================
 // ★ 通道3 ref_freq 来源 mux
 //
@@ -270,21 +276,35 @@ pll_loop #(
 wire [7:0] oh1_eff = (osc1_oh_w == 8'd0) ? 8'd1 : osc1_oh_w;
 wire [7:0] oh2_eff = (osc2_oh_w == 8'd0) ? 8'd1 : osc2_oh_w;
 wire [7:0] oh3_eff = (osc3_oh_w == 8'd0) ? 8'd1 : osc3_oh_w;
+wire [7:0] oh4_eff = (osc4_oh_w == 8'd0) ? 8'd1 : osc4_oh_w;
+wire [7:0] oh5_eff = (osc5_oh_w == 8'd0) ? 8'd1 : osc5_oh_w;
+wire [7:0] oh6_eff = (osc6_oh_w == 8'd0) ? 8'd1 : osc6_oh_w;
 
 // 基准频率 (自动: n·F1+m·F2; 手动: FRQxx) → ×N 得最终参考频率字 (诊断/手动 DDS)
 reg [55:0] f_base_21, f_base_12, f_base_11;
+reg [55:0] f_base_4, f_base_5, f_base_6;
 wire [63:0] f_harm_21 = f_base_21 * oh1_eff;
 wire [63:0] f_harm_12 = f_base_12 * oh2_eff;
 wire [63:0] f_harm_11 = f_base_11 * oh3_eff;
+wire [63:0] f_harm_4  = f_base_4  * oh4_eff;
+wire [63:0] f_harm_5  = f_base_5  * oh5_eff;
+wire [63:0] f_harm_6  = f_base_6  * oh6_eff;
 reg [47:0] ref_freq_21_to_psd, ref_freq_12_to_psd, ref_freq_11_to_psd;
+reg [47:0] ref_freq_4_to_psd, ref_freq_5_to_psd, ref_freq_6_to_psd;
 always @(posedge clk_65M or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
         f_base_21 <= 56'd0;
         f_base_12 <= 56'd0;
         f_base_11 <= 56'd0;
+        f_base_4  <= 56'd0;
+        f_base_5  <= 56'd0;
+        f_base_6  <= 56'd0;
         ref_freq_21_to_psd <= 48'd0;
         ref_freq_12_to_psd <= 48'd0;
         ref_freq_11_to_psd <= 48'd0;
+        ref_freq_4_to_psd  <= 48'd0;
+        ref_freq_5_to_psd  <= 48'd0;
+        ref_freq_6_to_psd  <= 48'd0;
     end else begin
         f_base_21 <= ref_freq_auto_w ? (pll_freq_ch1 * osc1_n_w + pll_freq_ch2 * osc1_m_w)
                                      : {8'd0, freq_word_21_w};
@@ -292,9 +312,18 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
                                      : {8'd0, freq_word_12_w};
         f_base_11 <= ref_freq_auto_w ? (pll_freq_ch1 * osc3_n_w + pll_freq_ch2 * osc3_m_w)
                                      : {8'd0, freq_word_11_w};
+        f_base_4  <= ref_freq_auto_w ? (pll_freq_ch1 * osc4_n_w + pll_freq_ch2 * osc4_m_w)
+                                     : {8'd0, freq_word_4_w};
+        f_base_5  <= ref_freq_auto_w ? (pll_freq_ch1 * osc5_n_w + pll_freq_ch2 * osc5_m_w)
+                                     : {8'd0, freq_word_5_w};
+        f_base_6  <= ref_freq_auto_w ? (pll_freq_ch1 * osc6_n_w + pll_freq_ch2 * osc6_m_w)
+                                     : {8'd0, freq_word_6_w};
         ref_freq_21_to_psd <= f_harm_21[47:0];
         ref_freq_12_to_psd <= f_harm_12[47:0];
         ref_freq_11_to_psd <= f_harm_11[47:0];
+        ref_freq_4_to_psd  <= f_harm_4[47:0];
+        ref_freq_5_to_psd  <= f_harm_5[47:0];
+        ref_freq_6_to_psd  <= f_harm_6[47:0];
     end
 end
 
@@ -302,6 +331,9 @@ end
 wire signed [13:0] coh_sin_osc1, coh_cos_osc1;
 wire signed [13:0] coh_sin_osc2, coh_cos_osc2;
 wire signed [13:0] coh_sin_osc3, coh_cos_osc3;
+wire signed [13:0] coh_sin_osc4, coh_cos_osc4;
+wire signed [13:0] coh_sin_osc5, coh_cos_osc5;
+wire signed [13:0] coh_sin_osc6, coh_cos_osc6;
 
 coherent_harm_lo u_coh_lo_osc1 (
     .clk        (clk_65M),
@@ -336,6 +368,39 @@ coherent_harm_lo u_coh_lo_osc3 (
     .harm_cos   (coh_cos_osc3)
 );
 
+coherent_harm_lo u_coh_lo_osc4 (
+    .clk        (clk_65M),
+    .phase_ch1  (pll_phase_ch1),
+    .phase_ch2  (pll_phase_ch2),
+    .harm_n     (osc4_n_w),
+    .harm_m     (osc4_m_w),
+    .harm_order (oh4_eff),
+    .harm_sine  (coh_sin_osc4),
+    .harm_cos   (coh_cos_osc4)
+);
+
+coherent_harm_lo u_coh_lo_osc5 (
+    .clk        (clk_65M),
+    .phase_ch1  (pll_phase_ch1),
+    .phase_ch2  (pll_phase_ch2),
+    .harm_n     (osc5_n_w),
+    .harm_m     (osc5_m_w),
+    .harm_order (oh5_eff),
+    .harm_sine  (coh_sin_osc5),
+    .harm_cos   (coh_cos_osc5)
+);
+
+coherent_harm_lo u_coh_lo_osc6 (
+    .clk        (clk_65M),
+    .phase_ch1  (pll_phase_ch1),
+    .phase_ch2  (pll_phase_ch2),
+    .harm_n     (osc6_n_w),
+    .harm_m     (osc6_m_w),
+    .harm_order (oh6_eff),
+    .harm_sine  (coh_sin_osc6),
+    .harm_cos   (coh_cos_osc6)
+);
+
 // ---- 振荡器 ADC 输入源 mux (OSRC) — 两级流水, 打断 ADC→差分→PSD 长路径 ----
 wire signed [14:0] adc_diff15 = $signed({adc_ch3[13], adc_ch3})
                               - $signed({adc_ch4[13], adc_ch4});
@@ -353,11 +418,15 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
 end
 
 reg [13:0] adc_in_osc1, adc_in_osc2, adc_in_osc3;
+reg [13:0] adc_in_osc4, adc_in_osc5, adc_in_osc6;
 always @(posedge clk_65M or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
         adc_in_osc1 <= 14'd0;
         adc_in_osc2 <= 14'd0;
         adc_in_osc3 <= 14'd0;
+        adc_in_osc4 <= 14'd0;
+        adc_in_osc5 <= 14'd0;
+        adc_in_osc6 <= 14'd0;
     end else begin
         case (osc1_src_w)
             2'd1:    adc_in_osc1 <= adc_ch4;
@@ -373,6 +442,21 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
             2'd1:    adc_in_osc3 <= adc_ch4;
             2'd2:    adc_in_osc3 <= adc_diff_sat_r;
             default: adc_in_osc3 <= adc_ch3;
+        endcase
+        case (osc4_src_w)
+            2'd1:    adc_in_osc4 <= adc_ch4;
+            2'd2:    adc_in_osc4 <= adc_diff_sat_r;
+            default: adc_in_osc4 <= adc_ch3;
+        endcase
+        case (osc5_src_w)
+            2'd1:    adc_in_osc5 <= adc_ch4;
+            2'd2:    adc_in_osc5 <= adc_diff_sat_r;
+            default: adc_in_osc5 <= adc_ch3;
+        endcase
+        case (osc6_src_w)
+            2'd1:    adc_in_osc6 <= adc_ch4;
+            2'd2:    adc_in_osc6 <= adc_diff_sat_r;
+            default: adc_in_osc6 <= adc_ch3;
         endcase
     end
 end
@@ -452,19 +536,94 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_11 (
     .ref_sine_o  (osc_ref_sin_11)
 );
 
+// ---- 振荡器 4 (默认 3F1) ------------------------------------------------
+wire signed [13:0] osc_ref_sin_4;
+wire signed [27:0] dc_x_ch3_osc4, dc_y_ch3_osc4;
+wire               dc_valid_x_ch3_osc4, dc_valid_y_ch3_osc4;
+
+lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_osc4 (
+    .clk         (clk_65M),
+    .rst_n       (sys_rst_n),
+    .adc_in      (adc_in_osc4),
+    .ref_freq    (ref_freq_4_to_psd),
+    .ref_phase   (48'd0),
+    .use_coh_ref (ref_freq_auto_w),
+    .coh_ref_sine(coh_sin_osc4),
+    .coh_ref_cos (coh_cos_osc4),
+    .tau         (tau4_w),
+    .iir_order   (order4_w),
+    .dc_x        (dc_x_ch3_osc4),
+    .dc_y        (dc_y_ch3_osc4),
+    .cic_valid_x (),
+    .cic_valid_y (),
+    .dc_valid_x  (dc_valid_x_ch3_osc4),
+    .dc_valid_y  (dc_valid_y_ch3_osc4),
+    .ref_sine_o  (osc_ref_sin_4)
+);
+
+// ---- 振荡器 5 (默认 3F2) ------------------------------------------------
+wire signed [13:0] osc_ref_sin_5;
+wire signed [27:0] dc_x_ch3_osc5, dc_y_ch3_osc5;
+wire               dc_valid_x_ch3_osc5, dc_valid_y_ch3_osc5;
+
+lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_osc5 (
+    .clk         (clk_65M),
+    .rst_n       (sys_rst_n),
+    .adc_in      (adc_in_osc5),
+    .ref_freq    (ref_freq_5_to_psd),
+    .ref_phase   (48'd0),
+    .use_coh_ref (ref_freq_auto_w),
+    .coh_ref_sine(coh_sin_osc5),
+    .coh_ref_cos (coh_cos_osc5),
+    .tau         (tau5_w),
+    .iir_order   (order5_w),
+    .dc_x        (dc_x_ch3_osc5),
+    .dc_y        (dc_y_ch3_osc5),
+    .cic_valid_x (),
+    .cic_valid_y (),
+    .dc_valid_x  (dc_valid_x_ch3_osc5),
+    .dc_valid_y  (dc_valid_y_ch3_osc5),
+    .ref_sine_o  (osc_ref_sin_5)
+);
+
+// ---- 振荡器 6 (默认 2F1+2F2) --------------------------------------------
+wire signed [13:0] osc_ref_sin_6;
+wire signed [27:0] dc_x_ch3_osc6, dc_y_ch3_osc6;
+wire               dc_valid_x_ch3_osc6, dc_valid_y_ch3_osc6;
+
+lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_osc6 (
+    .clk         (clk_65M),
+    .rst_n       (sys_rst_n),
+    .adc_in      (adc_in_osc6),
+    .ref_freq    (ref_freq_6_to_psd),
+    .ref_phase   (48'd0),
+    .use_coh_ref (ref_freq_auto_w),
+    .coh_ref_sine(coh_sin_osc6),
+    .coh_ref_cos (coh_cos_osc6),
+    .tau         (tau6_w),
+    .iir_order   (order6_w),
+    .dc_x        (dc_x_ch3_osc6),
+    .dc_y        (dc_y_ch3_osc6),
+    .cic_valid_x (),
+    .cic_valid_y (),
+    .dc_valid_x  (dc_valid_x_ch3_osc6),
+    .dc_valid_y  (dc_valid_y_ch3_osc6),
+    .ref_sine_o  (osc_ref_sin_6)
+);
+
 // =========================================================================
 // ★ 信号发生器 (DAC904) — 振荡器本振 + 幅值/偏置
 //
-//   DMOD: 0=振荡器1, 1=振荡器2, 2=振荡器3 (与解调参考同源、同频同相)
+//   DMOD: 0..5 = 振荡器1..6 (与解调参考同源、同频同相)
 //   DAMP: 16bit 幅度系数, 65535=本振满幅;  DOFS: 14bit 有符号码偏置
 // =========================================================================
-reg [1:0]         dac_src_mode_r;
+reg [2:0]         dac_src_mode_r;
 reg [15:0]        dac_amp_r;
 reg signed [13:0] dac_ofs_r;
 
 always @(posedge clk_65M or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
-        dac_src_mode_r <= 2'd0;
+        dac_src_mode_r <= 3'd0;
         dac_amp_r      <= 16'd65535;
         dac_ofs_r      <= 14'sd0;
     end else begin
@@ -474,9 +633,13 @@ always @(posedge clk_65M or negedge sys_rst_n) begin
     end
 end
 
-wire signed [13:0] dac_ref_sin = (dac_src_mode_r == 2'd1) ? osc_ref_sin_12 :
-                                 (dac_src_mode_r == 2'd2) ? osc_ref_sin_11 :
-                                                            osc_ref_sin_21;
+wire signed [13:0] dac_ref_sin =
+    (dac_src_mode_r == 3'd1) ? osc_ref_sin_12 :
+    (dac_src_mode_r == 3'd2) ? osc_ref_sin_11 :
+    (dac_src_mode_r == 3'd3) ? osc_ref_sin_4  :
+    (dac_src_mode_r == 3'd4) ? osc_ref_sin_5  :
+    (dac_src_mode_r == 3'd5) ? osc_ref_sin_6  :
+                               osc_ref_sin_21;
 
 wire signed [29:0] dac_prod   = $signed(dac_ref_sin) * $signed({1'b0, dac_amp_r});
 wire signed [27:0] dac_sum28  = (dac_prod >>> 16) + $signed({{14{dac_ofs_r[13]}}, dac_ofs_r});
@@ -569,27 +732,18 @@ ft245_tx #(
 
 
 // =========================================================================
-// ★ 上位机回传帧打包 (80 字节 / 640 bit, 大端)
+// ★ 上位机回传帧打包 (152 字节 / 1216 bit, 大端)
 //   偏移        字段              类型           说明
 //   --------- ----------------- ------------- ----------------------------
-//   [ 0.. 3]  0xA5_5A_A5_5A    sync header   魔数, 用于对齐
-//   [ 4.. 7]  dc_x_ch1          int32         通道1 @ F1 X (PLL 锁相输出)
-//   [ 8..11]  dc_y_ch1          int32         通道1 @ F1 Y
-//   [12..15]  dc_x_ch2          int32         通道2 @ F2 X
-//   [16..19]  dc_y_ch2          int32         通道2 @ F2 Y
-//   [20..23]  dc_x_ch3_21       int32         通道3 @ 2F1+F2 X
-//   [24..27]  dc_y_ch3_21       int32         通道3 @ 2F1+F2 Y
-//   [28..31]  dc_x_ch3_12       int32         通道3 @ F1+2F2 X
-//   [32..35]  dc_y_ch3_12       int32         通道3 @ F1+2F2 Y
-//   [36..39]  dc_x_ch3_11       int32         通道3 @ F1+F2  X
-//   [40..43]  dc_y_ch3_11       int32         通道3 @ F1+F2  Y
-//   [44..47]  dc_ch3            int32         通道3 DC 直流
-//   [48..51]  adc_ch1           int32         ★ NEW: 通道1 原始 ADC 采样
-//   [52..55]  adc_ch2           int32         ★ NEW: 通道2 原始 ADC 采样
-//   [56..59]  adc_ch3           int32         ★ NEW: 通道3 原始 ADC 采样
-//   [60..67]  pll_freq_ch1      uint64        ★ NEW: 通道1 锁定频率字 (48bit, 高 16bit 补0)
-//   [68..75]  pll_freq_ch2      uint64        ★ NEW: 通道2 锁定频率字
-//   [76..79]  lock_flags        int32         ★ NEW: bit0=ch1 locked, bit1=ch2 locked
+//   [ 0.. 3]  0xA5_5A_A5_5A    sync header
+//   [ 4..19]  ch1/ch2 X/Y       4×int32       PLL 锁相输出
+//   [20..43]  osc1..3 X/Y       6×int32       振荡器1..3 (历史 21/12/11)
+//   [44..67]  osc4..6 X/Y       6×int32       ★ 振荡器4..6
+//   [68..71]  dc_ch3            int32
+//   [72..83]  adc_ch1/2/3       3×int32
+//   [84..99]  pll_freq ch1/ch2  2×uint64
+//   [100..103] lock_flags       int32
+//   [104..151] ref_word ×6      6×uint64      六路实际参考频率字
 // =========================================================================
 // 28bit -> 32bit 符号扩展 (锁相 X/Y)
 wire [31:0] s32_x_ch1    = {{4{dc_x_ch1   [27]}}, dc_x_ch1    };
@@ -602,6 +756,12 @@ wire [31:0] s32_x_ch3_12 = {{4{dc_x_ch3_12[27]}}, dc_x_ch3_12 };
 wire [31:0] s32_y_ch3_12 = {{4{dc_y_ch3_12[27]}}, dc_y_ch3_12 };
 wire [31:0] s32_x_ch3_11 = {{4{dc_x_ch3_11[27]}}, dc_x_ch3_11 };
 wire [31:0] s32_y_ch3_11 = {{4{dc_y_ch3_11[27]}}, dc_y_ch3_11 };
+wire [31:0] s32_x_osc4   = {{4{dc_x_ch3_osc4[27]}}, dc_x_ch3_osc4 };
+wire [31:0] s32_y_osc4   = {{4{dc_y_ch3_osc4[27]}}, dc_y_ch3_osc4 };
+wire [31:0] s32_x_osc5   = {{4{dc_x_ch3_osc5[27]}}, dc_x_ch3_osc5 };
+wire [31:0] s32_y_osc5   = {{4{dc_y_ch3_osc5[27]}}, dc_y_ch3_osc5 };
+wire [31:0] s32_x_osc6   = {{4{dc_x_ch3_osc6[27]}}, dc_x_ch3_osc6 };
+wire [31:0] s32_y_osc6   = {{4{dc_y_ch3_osc6[27]}}, dc_y_ch3_osc6 };
 wire [31:0] s32_dc_ch3   = {{4{dc_ch3     [27]}}, dc_ch3      };
 
 // 14bit -> 32bit 符号扩展 (原始 ADC)
@@ -616,25 +776,31 @@ wire [63:0] u64_pll_ch2  = {16'd0, pll_freq_ch2};
 // 锁定标志位 (位 0 = ch1 锁定, 位 1 = ch2 锁定)
 wire [31:0] s32_lock     = {30'd0, is_locked_ch2, is_locked_ch1};
 
-// ★ 诊断回读: 三路 PSD 实际生效的参考频率字 (48bit → 64bit 高位补 0)
-//   用于核对硬件到底收到了什么频率 (自动=f_osc*_auto, 手动=freq_word_*).
-wire [63:0] u64_ref_21 = {16'd0, ref_freq_21_to_psd};
-wire [63:0] u64_ref_12 = {16'd0, ref_freq_12_to_psd};
-wire [63:0] u64_ref_11 = {16'd0, ref_freq_11_to_psd};
+// ★ 诊断回读: 六路 PSD 实际生效的参考频率字
+wire [63:0] u64_ref_21   = {16'd0, ref_freq_21_to_psd};
+wire [63:0] u64_ref_12   = {16'd0, ref_freq_12_to_psd};
+wire [63:0] u64_ref_11   = {16'd0, ref_freq_11_to_psd};
+wire [63:0] u64_ref_osc4 = {16'd0, ref_freq_4_to_psd};
+wire [63:0] u64_ref_osc5 = {16'd0, ref_freq_5_to_psd};
+wire [63:0] u64_ref_osc6 = {16'd0, ref_freq_6_to_psd};
 
-wire [831:0] x_y_fir_packed = {
+wire [1215:0] x_y_fir_packed = {
     32'hA5_5A_A5_5A,                            // sync
     s32_x_ch1,    s32_y_ch1,
     s32_x_ch2,    s32_y_ch2,
     s32_x_ch3_21, s32_y_ch3_21,
     s32_x_ch3_12, s32_y_ch3_12,
     s32_x_ch3_11, s32_y_ch3_11,
+    s32_x_osc4,   s32_y_osc4,
+    s32_x_osc5,   s32_y_osc5,
+    s32_x_osc6,   s32_y_osc6,
     s32_dc_ch3,
-    s32_adc_ch1, s32_adc_ch2, s32_adc_ch3,      // 原始 ADC
+    s32_adc_ch1, s32_adc_ch2, s32_adc_ch3,
     u64_pll_ch1,
     u64_pll_ch2,
     s32_lock,
-    u64_ref_21, u64_ref_12, u64_ref_11          // ★ NEW 诊断: 三路实际参考频率字
+    u64_ref_21, u64_ref_12, u64_ref_11,
+    u64_ref_osc4, u64_ref_osc5, u64_ref_osc6
 };
 
 usb_commend u_usb_commend (
@@ -654,37 +820,50 @@ usb_commend u_usb_commend (
     .tau1_y(tau1_y_w),
     .tau2_x(tau2_x_w),
     .tau2_y(tau2_y_w),
-    // ★ 通道3 三路谐波 IIR 时间常数 (X/Y 共用, 商用做法)
     .tau21(tau21_w),
     .tau12(tau12_w),
     .tau11(tau11_w),
+    .tau4(tau4_w),
+    .tau5(tau5_w),
+    .tau6(tau6_w),
     .tau_dc(tau_dc_w),
     .phase_offset(tx1_phase_word),
     .freq_word_2(tx1_freq_word_w),
     .freq_word_3(tx2_freq_word_w),
-    // ★ 通道3 三路 ref_freq (FRQ21 / FRQ12 / FRQ11)
     .freq_word_21(freq_word_21_w),
     .freq_word_12(freq_word_12_w),
     .freq_word_11(freq_word_11_w),
-    .sweep_thres(sweep_thres_w),     // ★ LOCKSWY 命令下发的值
-    .lock_x_thres(lock_x_thres_w),   // ★ LOCKTHX 命令下发的值
-    // ★ 通道3 ref_freq 来源 + 振荡器谐波系数
+    .freq_word_4(freq_word_4_w),
+    .freq_word_5(freq_word_5_w),
+    .freq_word_6(freq_word_6_w),
+    .sweep_thres(sweep_thres_w),
+    .lock_x_thres(lock_x_thres_w),
     .ref_freq_auto(ref_freq_auto_w),
     .osc1_n (osc1_n_w), .osc1_m (osc1_m_w),
     .osc2_n (osc2_n_w), .osc2_m (osc2_m_w),
     .osc3_n (osc3_n_w), .osc3_m (osc3_m_w),
+    .osc4_n (osc4_n_w), .osc4_m (osc4_m_w),
+    .osc5_n (osc5_n_w), .osc5_m (osc5_m_w),
+    .osc6_n (osc6_n_w), .osc6_m (osc6_m_w),
     .osc1_src(osc1_src_w),
     .osc2_src(osc2_src_w),
     .osc3_src(osc3_src_w),
+    .osc4_src(osc4_src_w),
+    .osc5_src(osc5_src_w),
+    .osc6_src(osc6_src_w),
     .osc1_oh (osc1_oh_w),
     .osc2_oh (osc2_oh_w),
     .osc3_oh (osc3_oh_w),
-    // ★ 通道3 4 路 IIR 阶数 (ORD21/ORD12/ORD11/ORDDC 命令各自独立: 1..4)
+    .osc4_oh (osc4_oh_w),
+    .osc5_oh (osc5_oh_w),
+    .osc6_oh (osc6_oh_w),
     .order21 (order21_w),
     .order12 (order12_w),
     .order11 (order11_w),
+    .order4  (order4_w),
+    .order5  (order5_w),
+    .order6  (order6_w),
     .order_dc(order_dc_w),
-    // ★ 信号发生器 (DAC904): DMOD/DAMP/DOFS
     .dac_src_mode  (dac_src_mode_w),
     .dac_amp       (dac_amp_w),
     .dac_ofs       (dac_ofs_w),
