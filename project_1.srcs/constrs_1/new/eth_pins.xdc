@@ -31,6 +31,7 @@ set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G20 SLEW FAST DRIVE 12} [get
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN G21} [get_ports eth_mdc]
 set_property -dict {IOSTANDARD LVCMOS33 PACKAGE_PIN H22} [get_ports eth_mdio]
 
+
 # ----------------------------------------------------------------------------
 # 2) PL LED (可选, 不接外设也无所谓)
 # ----------------------------------------------------------------------------

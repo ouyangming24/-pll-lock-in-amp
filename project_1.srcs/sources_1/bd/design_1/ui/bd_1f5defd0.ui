@@ -1,0 +1,64 @@
+{
+   "ActiveEmotionalView":"Default View",
+   "Default View_ScaleFactor":"1.06332",
+   "Default View_TopLeft":"-24,-434",
+   "ExpandedHierarchyInLayout":"",
+   "guistr":"# # String gsaved with Nlview 7.8.0 2024-04-26 e1825d835c VDI=44 GEI=38 GUI=JA:21.0
+#  -string -flagsOSRD
+preplace port DDR -pg 1 -lvl 4 -x 1390 -y -240 -defaultsOSRD
+preplace port FIXED_IO -pg 1 -lvl 4 -x 1390 -y -260 -defaultsOSRD
+preplace port port-id_adc_clk_0 -pg 1 -lvl 4 -x 1390 -y -130 -defaultsOSRD
+preplace port port-id_adc_clk_2_0 -pg 1 -lvl 4 -x 1390 -y -70 -defaultsOSRD
+preplace port port-id_adc_oeb_b_0 -pg 1 -lvl 4 -x 1390 -y -150 -defaultsOSRD
+preplace port port-id_adc_oeb_b_2_0 -pg 1 -lvl 4 -x 1390 -y -90 -defaultsOSRD
+preplace port port-id_adc_otr_0 -pg 1 -lvl 0 -x -70 -y 80 -defaultsOSRD
+preplace port port-id_adc_otr_2_0 -pg 1 -lvl 0 -x -70 -y 20 -defaultsOSRD
+preplace port port-id_adc_pdn_0 -pg 1 -lvl 4 -x 1390 -y -170 -defaultsOSRD
+preplace port port-id_adc_pdn_2_0 -pg 1 -lvl 4 -x 1390 -y -110 -defaultsOSRD
+preplace port port-id_dac_clk_0 -pg 1 -lvl 4 -x 1390 -y 190 -defaultsOSRD
+preplace port port-id_dac_pd_0 -pg 1 -lvl 4 -x 1390 -y 170 -defaultsOSRD
+preplace port port-id_ft_rd_n_0 -pg 1 -lvl 4 -x 1390 -y -30 -defaultsOSRD
+preplace port port-id_ft_rxf_n_0 -pg 1 -lvl 0 -x -70 -y 40 -defaultsOSRD
+preplace port port-id_ft_txe_n_0 -pg 1 -lvl 0 -x -70 -y 60 -defaultsOSRD
+preplace port port-id_ft_wr_0 -pg 1 -lvl 4 -x 1390 -y -10 -defaultsOSRD
+preplace port port-id_sys_rst_n_0 -pg 1 -lvl 0 -x -70 -y -30 -defaultsOSRD
+preplace port port-id_sys_clk_0 -pg 1 -lvl 0 -x -70 -y -50 -defaultsOSRD
+preplace portBus adc_data_0 -pg 1 -lvl 0 -x -70 -y -70 -defaultsOSRD
+preplace portBus adc_data_2_0 -pg 1 -lvl 0 -x -70 -y 0 -defaultsOSRD
+preplace portBus da_data_0 -pg 1 -lvl 4 -x 1390 -y 210 -defaultsOSRD
+preplace portBus ft_d_0 -pg 1 -lvl 4 -x 1390 -y -190 -defaultsOSRD
+preplace inst processing_system7_0 -pg 1 -lvl 2 -x 640 -y -110 -defaultsOSRD
+preplace inst lock_in_amp_0 -pg 1 -lvl 1 -x 170 -y 20 -defaultsOSRD
+preplace inst rst_ps7_0_50M -pg 1 -lvl 3 -x 1110 -y -50 -defaultsOSRD
+preplace netloc Net1 1 1 3 370J -230 900J -190 NJ
+preplace netloc adc_data_0_1 1 0 1 -10J -70n
+preplace netloc adc_data_2_0_1 1 0 1 -10J 0n
+preplace netloc adc_otr_0_1 1 0 1 -20J 10n
+preplace netloc adc_otr_2_0_1 1 0 1 -30J 20n
+preplace netloc ft_rxf_n_0_1 1 0 1 -40J 40n
+preplace netloc ft_txe_n_0_1 1 0 1 -50J 60n
+preplace netloc lock_in_amp_0_adc_clk 1 1 3 350J -240 850J -160 1290J
+preplace netloc lock_in_amp_0_adc_clk_2 1 1 3 320J 60 NJ 60 1280J
+preplace netloc lock_in_amp_0_adc_oeb_b 1 1 3 360J -220 880J -150 NJ
+preplace netloc lock_in_amp_0_adc_oeb_b_2 1 1 3 340J -260 870J -170 1280J
+preplace netloc lock_in_amp_0_adc_pdn 1 1 3 320J -250 NJ -250 1310J
+preplace netloc lock_in_amp_0_adc_pdn_2 1 1 3 330J -270 NJ -270 1300J
+preplace netloc lock_in_amp_0_da_data 1 1 3 320J 210 NJ 210 NJ
+preplace netloc lock_in_amp_0_dac_clk 1 1 3 350J 190 NJ 190 NJ
+preplace netloc lock_in_amp_0_dac_pd 1 1 3 380J 170 NJ 170 NJ
+preplace netloc lock_in_amp_0_ft_rd_n 1 1 3 NJ 50 NJ 50 1300J
+preplace netloc lock_in_amp_0_ft_wr 1 1 3 NJ 70 NJ 70 1310J
+preplace netloc processing_system7_0_FCLK_CLK0 1 1 2 440 -210 840
+preplace netloc processing_system7_0_FCLK_RESET0_N 1 2 1 N -70
+preplace netloc sys_clk_0_1 1 0 1 N -50
+preplace netloc sys_rst_n_0_1 1 0 1 N -30
+preplace netloc processing_system7_0_DDR 1 2 2 860J -240 NJ
+preplace netloc processing_system7_0_FIXED_IO 1 2 2 890J -260 NJ
+levelinfo -pg 1 -70 170 640 1110 1390
+pagesize -pg 1 -db -bbox -sgen -250 -280 1550 490
+"
+}
+{
+   "da_clkrst_cnt":"1",
+   "da_ps7_cnt":"1"
+}

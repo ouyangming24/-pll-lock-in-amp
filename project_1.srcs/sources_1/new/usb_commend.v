@@ -37,7 +37,7 @@ module usb_commend(
     input wire [7:0] rec_data,
     input wire rec_done,
     input wire tx_done,
-    input wire [1215:0] x_y_fir,   // 152 字节回传帧 (含 6 路参考频率字回读)
+    input wire [1215:0] x_y_fir,   // 152 字节回传 ? ( ? 6 路参考频率字回读)
     input wire m_axis_data_tvalid_fir_x,
     output reg [47:0] center_freq,
     output reg [15:0] pll_kp,
@@ -46,52 +46,52 @@ module usb_commend(
     output reg [4:0]  tau1_y,
     output reg [4:0]  tau2_x,
     output reg [4:0]  tau2_y,
-    // ★ 通道3 三路谐波 IIR 时间常数 (X/Y 共用, 与商用 SR830 一致)
+    //  ? 通道3 三路谐波 IIR 时间常数 (X/Y 共用, 与商 ? SR830  ? ?)
     output reg [4:0]  tau21,    // ch3 @ 2F1+F2
     output reg [4:0]  tau12,    // ch3 @ F1+2F2
     output reg [4:0]  tau11,    // ch3 @ F1+F2
-    output reg [4:0]  tau4,     // 振荡器4
-    output reg [4:0]  tau5,     // 振荡器5
-    output reg [4:0]  tau6,     // 振荡器6
+    output reg [4:0]  tau4,     // 振荡 ?4
+    output reg [4:0]  tau5,     // 振荡 ?5
+    output reg [4:0]  tau6,     // 振荡 ?6
     output reg [4:0]  tau_dc,   // ch3 DC 通路 (本来就是单一 IIR)
     output reg [47:0] phase_offset,
     output reg [47:0] freq_word_2,
     output reg [47:0] freq_word_3,
-    // ★ 通道3 三路开环锁相放大器的参考频率 (PLL 注释期间可手动下发, 平时可由 PLL 输出运算得到)
+    //  ? 通道3 三路 ?环锁相放大器的参考频 ? (PLL 注释期间可手动下 ?, 平时可由 PLL 输出运算得到)
     output reg [47:0] freq_word_21,           // ch3 @ 2F1+F2 ref_freq (FRQ21)
     output reg [47:0] freq_word_12,           // ch3 @ F1+2F2 ref_freq (FRQ12)
     output reg [47:0] freq_word_11,           // ch3 @ F1+F2  ref_freq (FRQ11)
-    output reg [47:0] freq_word_4,            // 振荡器4 (FRQ4)
-    output reg [47:0] freq_word_5,            // 振荡器5 (FRQ5)
-    output reg [47:0] freq_word_6,            // 振荡器6 (FRQ6)
+    output reg [47:0] freq_word_4,            // 振荡 ?4 (FRQ4)
+    output reg [47:0] freq_word_5,            // 振荡 ?5 (FRQ5)
+    output reg [47:0] freq_word_6,            // 振荡 ?6 (FRQ6)
     output reg signed [27:0] sweep_thres,    // ???PLL Y ??LOCK ????? (LOCKSWY)
     output reg signed [27:0] lock_x_thres,   // ???PLL X ???? LOCK ????? (LOCKTHX)
-    // ★ 通道3 三路 ref_freq 来源选择 (REFMODE 命令下发)
-    //   0 = 手动 (用 FRQ21/FRQ12/FRQ11 三个值, 默认)
-    //   1 = 自动 (硬件实时: n*pll_freq_ch1 + m*pll_freq_ch2, 系数由 OSC1/2/3 下发)
+    //  ? 通道3 三路 ref_freq 来源选择 (REFMODE 命令下发)
+    //   0 = 手动 ( ? FRQ21/FRQ12/FRQ11 三个 ?, 默认)
+    //   1 = 自动 (硬件实时: n*pll_freq_ch1 + m*pll_freq_ch2, 系数 ? OSC1/2/3 下发)
     output reg ref_freq_auto,
-    // ★ 通道3 三路振荡器谐波系数 (OSC1/OSC2/OSC3 命令, 值打包: [15:8]=n, [7:0]=m)
+    //  ? 通道3 三路振荡器谐波系 ? (OSC1/OSC2/OSC3 命令, 值打 ?: [15:8]=n, [7:0]=m)
     output reg [7:0] osc1_n, osc1_m,
     output reg [7:0] osc2_n, osc2_m,
     output reg [7:0] osc3_n, osc3_m,
     output reg [7:0] osc4_n, osc4_m,
     output reg [7:0] osc5_n, osc5_m,
     output reg [7:0] osc6_n, osc6_m,
-    // ★ 振荡器 ADC 输入源 (OSRC1..6: 0=CH3, 1=CH4, 2=CH3-CH4 差分)
+    //  ? 振荡 ? ADC 输入 ? (OSRC1..6: 0=CH3, 1=CH4, 2=CH3-CH4 差分)
     output reg [1:0] osc1_src,
     output reg [1:0] osc2_src,
     output reg [1:0] osc3_src,
     output reg [1:0] osc4_src,
     output reg [1:0] osc5_src,
     output reg [1:0] osc6_src,
-    // ★ 振荡器谐波阶数 N (OHN1..6, 默认 1; 最终 f_ref = f_base × N)
+    //  ? 振荡器谐波阶 ? N (OHN1..6, 默认 1;  ? ? f_ref = f_base × N)
     output reg [7:0] osc1_oh,
     output reg [7:0] osc2_oh,
     output reg [7:0] osc3_oh,
     output reg [7:0] osc4_oh,
     output reg [7:0] osc5_oh,
     output reg [7:0] osc6_oh,
-    // ★ IIR 阶数 (OSC1..6 + DC, ORD* 命令)
+    //  ? IIR 阶数 (OSC1..6 + DC, ORD* 命令)
     output reg [2:0] order21,
     output reg [2:0] order12,
     output reg [2:0] order11,
@@ -99,7 +99,7 @@ module usb_commend(
     output reg [2:0] order5,
     output reg [2:0] order6,
     output reg [2:0] order_dc,
-    // ★ 信号发生器 (DAC904): dac_src_mode 0..5 = 振荡器1..6
+    //  ? 信号发生 ? (DAC904): dac_src_mode 0..5 = 振荡 ?1..6
     output reg [2:0]         dac_src_mode,    // DMOD 命令
     output reg [15:0]        dac_amp,         // DAMP: 幅度 16bit, 65535=满幅
     output reg signed [13:0] dac_ofs,         // DOFS: 偏置 (DAC 有符号码)
@@ -144,18 +144,18 @@ module usb_commend(
     parameter CMD_ORDDC   = 6'd28;
     parameter CMD_DMOD    = 6'd29;
     parameter CMD_DFRQ    = 6'd30;
-    parameter CMD_DPHS    = 6'd31;   // 信号发生器内部DDS相位字 (48bit)
-    parameter CMD_OSC1    = 6'd32;   // 振荡器1: n*F1+m*F2 系数 ([15:8]=n,[7:0]=m)
-    parameter CMD_OSC2    = 6'd33;   // 振荡器2
-    parameter CMD_OSC3    = 6'd34;   // 振荡器3
-    parameter CMD_OSRC1   = 6'd35;   // 振荡器1 ADC 源: 0=CH3, 1=CH4, 2=CH3-CH4
+    parameter CMD_DPHS    = 6'd31;   // 信号发生器内部DDS相位 ? (48bit)
+    parameter CMD_OSC1    = 6'd32;   // 振荡 ?1: n*F1+m*F2 系数 ([15:8]=n,[7:0]=m)
+    parameter CMD_OSC2    = 6'd33;   // 振荡 ?2
+    parameter CMD_OSC3    = 6'd34;   // 振荡 ?3
+    parameter CMD_OSRC1   = 6'd35;   // 振荡 ?1 ADC  ?: 0=CH3, 1=CH4, 2=CH3-CH4
     parameter CMD_OSRC2   = 6'd36;
     parameter CMD_OSRC3   = 6'd37;
-    parameter CMD_OHN1    = 6'd38;   // 振荡器1 谐波阶数 N (f_ref = f_base × N)
+    parameter CMD_OHN1    = 6'd38;   // 振荡 ?1 谐波阶数 N (f_ref = f_base × N)
     parameter CMD_OHN2    = 6'd39;
     parameter CMD_OHN3    = 6'd40;
     parameter CMD_DAMP    = 6'd41;   // DAC 幅度 (16bit, 65535=满幅)
-    parameter CMD_DOFS    = 6'd42;   // DAC 偏置 (14bit signed 码)
+    parameter CMD_DOFS    = 6'd42;   // DAC 偏置 (14bit signed  ?)
     parameter CMD_OSC4    = 6'd43;
     parameter CMD_OSC5    = 6'd44;
     parameter CMD_OSC6    = 6'd45;
@@ -183,20 +183,15 @@ module usb_commend(
 
     reg xy_data_enable;
     reg [7:0] byte_cnt;
-    reg [1215:0] xy_data_reg;      // 152 字节回传帧寄存
+    reg [1215:0] xy_data_reg;      // 152 字节回传帧寄 ?
     reg new_data_ready;
     reg data_sending;
 
     // ??????(?????), ???x_y_fir ??????????
     localparam [7:0] FRAME_BYTES = 8'd152;
 
-    // 帧间等待 (clk_65M):
-    //   原 5_000_000 ≈ 77 ms → ~13 fps
-    //   现 19_500 ≈ 0.3 ms → 帧率 ≈ 1/(T_send+0.3ms), 约 1k~3k fps (视 USB 主机而定)
-    //   平均带宽约 152B×2k ≈ 300 KB/s, 仍远低于 FT245BL Full Speed
-    // 若丢帧/命令变钝, 可改回 65_000(1ms) / 130_000(2ms).
     reg [31:0] delay_cnt;
-    parameter DELAY_1S = 32'd19_500;
+    parameter DELAY_1S = 32'd19500;
 
     reg [7:0] success_msg[0:17];
     reg [7:0] error_msg[0:15];
@@ -269,15 +264,15 @@ module usb_commend(
             tau_dc  <= 5'd2;
             phase_offset <= 48'd0;
             freq_word_2 <= 48'd433038425708 + 48'd433038425;
-            // ★ 通道3 三路 ref_freq 默认值 (对应 F1=50k, F2=60k 时的 2F1+F2 / F1+2F2 / F1+F2)
+            //  ? 通道3 三路 ref_freq 默认 ? (对应 F1=50k, F2=60k 时的 2F1+F2 / F1+2F2 / F1+F2)
             freq_word_21 <= 48'd692861481134;   // 160 kHz
             freq_word_12 <= 48'd736165323705;   // 170 kHz
             freq_word_11 <= 48'd476342268280;   // 110 kHz
             freq_word_4  <= 48'd649557638563;   // 150 kHz
             freq_word_5  <= 48'd779469166276;   // 180 kHz
             freq_word_6  <= 48'd952684536559;   // 220 kHz
-            ref_freq_auto <= 1'b0;              // 默认手动; GUI 连接后会发 REFMODE:1
-            // ★ 振荡器默认系数: 2F1+F2 / F1+2F2 / F1+F2 / 3F1 / 3F2 / 2F1+2F2
+            ref_freq_auto <= 1'b0;              // 默认手动; GUI 连接后会 ? REFMODE:1
+            //  ? 振荡器默认系 ?: 2F1+F2 / F1+2F2 / F1+F2 / 3F1 / 3F2 / 2F1+2F2
             osc1_n <= 8'd2;  osc1_m <= 8'd1;
             osc2_n <= 8'd1;  osc2_m <= 8'd2;
             osc3_n <= 8'd1;  osc3_m <= 8'd1;
@@ -323,9 +318,16 @@ module usb_commend(
                     data_sending <= 1'b0;
 
                     if (rec_done) begin
-                        cmd_buffer[0] <= rec_data;  
-                        cmd_cnt <= 4'd1;           
-                        curr_state <= REC_CMD;
+                        // 只忽略行尾多余 \r/\n。不要忽略 0x00：
+                        // 若 FT245 读到全 0，忽略 0x00 会表现为“完全无应答”。
+                        if (rec_data == 8'h0D || rec_data == 8'h0A) begin
+                            curr_state <= IDLE;
+                        end
+                        else begin
+                            cmd_buffer[0] <= rec_data;
+                            cmd_cnt <= 4'd1;
+                            curr_state <= REC_CMD;
+                        end
                     end
                     else if (xy_data_enable && new_data_ready) begin
                         curr_state <= SEND_XYDATA;
@@ -393,7 +395,7 @@ module usb_commend(
                                 msg_cnt <= 5'd0;
                                 msg_len <= 5'd18; 
                             end
-                            // ★ 信号发生器 (DAC904): DMOD / DFRQ / DPHS (均为 4 字符命令)
+                            //  ? 信号发生 ? (DAC904): DMOD / DFRQ / DPHS (均为 4 字符命令)
                             else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "M" && cmd_buffer[2] == "O" && cmd_buffer[3] == "D" && rec_data == ":") begin
                                 cmd_type <= CMD_DMOD;
                                 value_buffer <= 48'd0;
@@ -419,7 +421,7 @@ module usb_commend(
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
-                            // ★ 通道3 振荡器谐波系数 OSC1/OSC2/OSC3 (值=[15:8]n,[7:0]m)
+                            //  ? 通道3 振荡器谐波系 ? OSC1/OSC2/OSC3 ( ?=[15:8]n,[7:0]m)
                             else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "C" && cmd_buffer[3] == "1" && rec_data == ":") begin
                                 cmd_type <= CMD_OSC1;
                                 value_buffer <= 48'd0;
@@ -435,7 +437,7 @@ module usb_commend(
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
-                            // ★ 振荡器谐波阶数 OHN1/2/3 (N≥1, 0 视为 1)
+                            //  ? 振荡器谐波阶 ? OHN1/2/3 (N ?1, 0 视为 1)
                             else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "H" && cmd_buffer[2] == "N" && cmd_buffer[3] == "1" && rec_data == ":") begin
                                 cmd_type <= CMD_OHN1;
                                 value_buffer <= 48'd0;
@@ -527,7 +529,7 @@ module usb_commend(
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
-                            // ★ 通道3 三路谐波 IIR 时间常数 (X/Y 共用, 商用做法)
+                            //  ? 通道3 三路谐波 IIR 时间常数 (X/Y 共用, 商用做法)
                             else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "2" && cmd_buffer[4] == "1" && rec_data == ":") begin
                                 cmd_type <= CMD_TAU21;
                                 value_buffer <= 48'd0;
@@ -543,7 +545,7 @@ module usb_commend(
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
-                            // ★ 振荡器 ADC 输入源 OSRC1/2/3 (0=CH3, 1=CH4, 2=CH3-CH4)
+                            //  ? 振荡 ? ADC 输入 ? OSRC1/2/3 (0=CH3, 1=CH4, 2=CH3-CH4)
                             else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "R" && cmd_buffer[3] == "C" && cmd_buffer[4] == "1" && rec_data == ":") begin
                                 cmd_type <= CMD_OSRC1;
                                 value_buffer <= 48'd0;
@@ -568,7 +570,7 @@ module usb_commend(
                             else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "R" && cmd_buffer[3] == "C" && cmd_buffer[4] == "6" && rec_data == ":") begin
                                 cmd_type <= CMD_OSRC6; value_buffer <= 48'd0; curr_state <= REC_DATA;
                             end
-                            // ★ 通道3 三路 ref_freq 命令
+                            //  ? 通道3 三路 ref_freq 命令
                             else if (cmd_buffer[0] == "F" && cmd_buffer[1] == "R" && cmd_buffer[2] == "Q" && cmd_buffer[3] == "2" && cmd_buffer[4] == "1" && rec_data == ":") begin
                                 cmd_type <= CMD_FRQ21;
                                 value_buffer <= 48'd0;
@@ -584,7 +586,7 @@ module usb_commend(
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
-                            // ★ 通道3 4 路 IIR 阶数 (各路独立, 1..4 = 6/12/18/24 dB/oct)
+                            //  ? 通道3 4  ? IIR 阶数 (各路独立, 1..4 = 6/12/18/24 dB/oct)
                             else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "R" && cmd_buffer[2] == "D" && cmd_buffer[3] == "2" && cmd_buffer[4] == "1" && rec_data == ":") begin
                                 cmd_type <= CMD_ORD21;
                                 value_buffer <= 48'd0;
@@ -609,12 +611,12 @@ module usb_commend(
                                 cmd_cnt <= cmd_cnt + 1'b1;
                             end
                         end
-                        // cmd_cnt == 4'd6 分支已删除:
+                        // cmd_cnt == 4'd6 分支已删 ?:
                         //   旧的 6 字符 TAU21X/Y / TAU12X/Y / TAU11X/Y 命令被合并为
-                        //   5 字符的 TAU21 / TAU12 / TAU11 (见 cmd_cnt==5 分支),
-                        //   因为 X/Y 共用同一个时间常数 (与商用 SR830 等一致).
-                        //   到这里 cmd_cnt==6 时会落到末尾的 fall-through (cmd_cnt + 1),
-                        //   流程继续推进到 7 (LOCKSWY/LOCKTHX/REFMODE).
+                        //   5 字符 ? TAU21 / TAU12 / TAU11 ( ? cmd_cnt==5 分支),
+                        //   因为 X/Y 共用同一个时间常 ? (与商 ? SR830 等一 ?).
+                        //   到这 ? cmd_cnt==6 时会落到末尾 ? fall-through (cmd_cnt + 1),
+                        //   流程继续推进 ? 7 (LOCKSWY/LOCKTHX/REFMODE).
                         else if (cmd_cnt == 4'd7) begin
                             // 8 ?????????: LOCKSWY: / LOCKTHX: / REFMODE:
                             if (cmd_buffer[0] == "L" && cmd_buffer[1] == "O" && cmd_buffer[2] == "C" && cmd_buffer[3] == "K"
@@ -629,7 +631,7 @@ module usb_commend(
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
-                            // ★ 通道3 ref_freq 来源选择 (REFMODE:0 / REFMODE:1)
+                            //  ? 通道3 ref_freq 来源选择 (REFMODE:0 / REFMODE:1)
                             else if (cmd_buffer[0] == "R" && cmd_buffer[1] == "E" && cmd_buffer[2] == "F" && cmd_buffer[3] == "M"
                                   && cmd_buffer[4] == "O" && cmd_buffer[5] == "D" && cmd_buffer[6] == "E" && rec_data == ":") begin
                                 cmd_type <= CMD_REFMODE;
@@ -724,7 +726,7 @@ module usb_commend(
                             else if (cmd_type == CMD_REFMODE) begin
                                 ref_freq_auto <= value_buffer[0];   // 只取 bit0: 0=手动, 1=自动
                             end
-                            // ★ 4 路独立阶数, 范围钳位到 1..4 (非法值一律视为 1 阶)
+                            //  ? 4 路独立阶 ?, 范围钳位 ? 1..4 (非法值一律视 ? 1  ?)
                             else if (cmd_type == CMD_ORD21) begin
                                 if (value_buffer[3:0] >= 4'd1 && value_buffer[3:0] <= 4'd4)
                                     order21 <= value_buffer[2:0];
@@ -749,15 +751,15 @@ module usb_commend(
                                 else
                                     order_dc <= 3'd1;
                             end
-                            // ★ 信号发生器 (DAC904)
+                            //  ? 信号发生 ? (DAC904)
                             else if (cmd_type == CMD_DMOD) begin
                                 dac_src_mode <= value_buffer[2:0];
                             end
                             else if (cmd_type == CMD_DFRQ) begin
-                                // 已废弃: 频率由所选振荡器决定 (命令仍应答 Success, 不改寄存器)
+                                ; // 已废 ?: 频率由所选振荡器决定
                             end
                             else if (cmd_type == CMD_DPHS) begin
-                                // 已废弃: 相位由所选振荡器本振决定 (命令仍应答 Success, 不改寄存器)
+                                ; // 已废 ?: 相位由所选振荡器本振决定
                             end
                             else if (cmd_type == CMD_DAMP) begin
                                 dac_amp <= value_buffer[15:0];
@@ -765,7 +767,7 @@ module usb_commend(
                             else if (cmd_type == CMD_DOFS) begin
                                 dac_ofs <= $signed(value_buffer[13:0]);
                             end
-                            // ★ 振荡器谐波系数 (n,m 各 0..255)
+                            //  ? 振荡器谐波系 ? (n,m  ? 0..255)
                             else if (cmd_type == CMD_OSC1) begin
                                 osc1_n <= value_buffer[15:8];
                                 osc1_m <= value_buffer[7:0];

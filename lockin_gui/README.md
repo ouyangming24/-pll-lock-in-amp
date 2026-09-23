@@ -18,6 +18,28 @@ cd lockin_gui
 pip install -r requirements.txt
 ```
 
+## 绿色免安装包（拷到其他电脑直接用）
+
+在本机打包一次：
+
+```bat
+cd lockin_gui
+build_portable.bat
+```
+
+输出目录：`lockin_gui/dist/LockinGUI/`  
+把整个 **LockinGUI** 文件夹拷到目标 Windows 电脑即可，无需安装 Python。
+
+| 文件 | 作用 |
+|------|------|
+| `启动_UDP模式.bat` | 默认：命令 USB + 数据 UDP |
+| `启动_串口模式.bat` | 全走 FT245 |
+| `启动_演示模式.bat` | 离线模拟 |
+| `LockinGUI.exe` | 主程序（等同 UDP） |
+| `使用说明.txt` | 目标机使用说明 |
+
+目标机仍需：FTDI 驱动；UDP 时网卡 `192.168.99.100/24`。
+
 ## 运行
 
 支持 3 种工作模式：

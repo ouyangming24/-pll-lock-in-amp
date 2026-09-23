@@ -39,19 +39,19 @@ module lock_in_amp(
 
    // ★ 新增: 千兆以太网 (RTL8211E, RGMII 接 PL 端)
    //   注: 50 MHz 基准时钟复用现有 sys_clk (XDC = M19)
-   input  wire       eth_rxc,
-   input  wire       eth_rxctl,
-   input  wire [3:0] eth_rxd,
-   output wire       eth_txc,
-   output wire       eth_txctl,
-   output wire [3:0] eth_txd,
-   output wire       eth_nrst,
-   output wire       eth_mdc,
-   inout  wire       eth_mdio,
+//   input  wire       eth_rxc,
+//   input  wire       eth_rxctl,
+//   input  wire [3:0] eth_rxd,
+//   output wire       eth_txc,
+//   output wire       eth_txctl,
+//   output wire [3:0] eth_txd,
+//   output wire       eth_nrst,
+//   output wire       eth_mdc,
+//   inout  wire       eth_mdio,
 
-   // ★ 新增: PL LED 状态指示 (可选, 不接也行)
-   output wire       pl_led1,    // 链路状态: 长亮=1G 已链上
-   output wire       pl_led2,    // 帧丢失指示: 闪烁=有帧被丢弃
+//   // ★ 新增: PL LED 状态指示 (可选, 不接也行)
+//   output wire       pl_led1,    // 链路状态: 长亮=1G 已链上
+//   output wire       pl_led2,    // 帧丢失指示: 闪烁=有帧被丢弃
 
    // ★ 新增: 信号发生器 DAC904 接口
    output wire        dac_pd,    // DAC 掉电控制 (da_wave_send 内固定为 0)
@@ -146,7 +146,7 @@ ad_wave_rec u_ad_wave_rec_2 (
 
 
 // =========================================================================
-// ★ 通道1: 锁相环 (闭环 PLL)  —— 跟踪 adc_ch1 → 输出 F1 = pll_freq_ch1
+// ★ 通道1: 锁相环 (闭环 PLL)  -- 跟踪 adc_ch1 → 输出 F1 = pll_freq_ch1
 // =========================================================================
 wire [47:0]         pll_freq_ch1;
 wire [47:0]         pll_phase_ch1;
@@ -193,7 +193,7 @@ pll_loop #(
 
 
 // =========================================================================
-// ★ 通道2: 锁相环 (闭环 PLL)  —— ★ 跟踪 adc_ch2 → 输出 F2 = pll_freq_ch2
+// ★ 通道2: 锁相环 (闭环 PLL)  -- ★ 跟踪 adc_ch2 → 输出 F2 = pll_freq_ch2
 // =========================================================================
 wire [47:0]         pll_freq_ch2;
 wire [47:0]         pll_phase_ch2;
@@ -401,7 +401,7 @@ coherent_harm_lo u_coh_lo_osc6 (
     .harm_cos   (coh_cos_osc6)
 );
 
-// ---- 振荡器 ADC 输入源 mux (OSRC) — 两级流水, 打断 ADC→差分→PSD 长路径 ----
+// ---- 振荡器 ADC 输入源 mux (OSRC) - 两级流水, 打断 ADC→差分→PSD 长路径 ----
 wire signed [14:0] adc_diff15 = $signed({adc_ch3[13], adc_ch3})
                               - $signed({adc_ch4[13], adc_ch4});
 
@@ -612,7 +612,7 @@ lockin_psd #(.IN_WIDTH(28)) u_psd_ch3_osc6 (
 );
 
 // =========================================================================
-// ★ 信号发生器 (DAC904) — 振荡器本振 + 幅值/偏置
+// ★ 信号发生器 (DAC904) - 振荡器本振 + 幅值/偏置
 //
 //   DMOD: 0..5 = 振荡器1..6 (与解调参考同源、同频同相)
 //   DAMP: 16bit 幅度系数, 65535=本振满幅;  DOFS: 14bit 有符号码偏置

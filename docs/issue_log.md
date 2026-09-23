@@ -43,6 +43,19 @@ PCB / IO 物理层、上位机 GUI、网络通信、协议、综合工具链等�
 
 ---
 
+## 2026-09-23 · BD OOC 双 IOBUF 导致 wrapper 串口全 Command Error
+
+- **发现日期**: 2026-09-23
+- **关联模块/层**: 工具链 / RTL (`lock_in_amp` inout FT245) / 固化 BD
+- **现象**: 独立 `lock_in_amp.bit` 指令正常；`design_1_wrapper.bit` 一律回 `Command Error!`，GUI 无法连接。
+- **根因**: `lock_in_amp` 作为 BD module_ref 被 Hierarchical/OOC 综合，内部 `assign ft_d = oe ? tx : 8'bz` 在 IP 边界推断 IOBUF，wrapper 再推断一层 → 读总线错乱。
+- **修复**: `design_1.bd` 的 `synth_flow_mode` / `synth_checkpoint_mode` 改为 **None（Global）**，Reset Runs 后重出 bit。module_ref 的 `generate_synth_checkpoint` 只读，不必改。
+- **状态**: ✅ 已解决
+- **关联文件**: [完整说明](./BD_OOC_双IOBUF_USB命令Error.md)、`fix_bd_ooc_ft245.tcl`、`design_1.bd`、`pin_solidify.xdc`
+- **备注**: 带 inout 三态的模块不要 OOC；出问题先对比独立顶层 vs wrapper。
+
+---
+
 ## 2026-06-11 · 光弹应力 GUI / 验算脚本
 
 - **发现日期**: 2026-06-11
