@@ -25,11 +25,13 @@
 //  外部依赖 IP/模块:
 //      - dds_compiler_1   : 本振参考 DDS
 //      - mult_hunpin      : 14×14 有符号乘法器
-//      - cic_compiler_0   : CIC 降采样滤波
+//      - cic_compiler_0   : CIC 降采样滤波 (Use DSP48)
+//      - cic_compiler_1   : 同参数 CIC, 但不用 DSP48 (USE_LUT_CIC=1 时)
 //      - iir_lpf_cascade  : 1~4 阶级联 IIR 指数平均低通 (运行时可选阶数)
 // =============================================================================
 module lockin_psd #(
-    parameter IN_WIDTH = 28
+    parameter IN_WIDTH    = 28,
+    parameter USE_LUT_CIC = 0   // 1: 用 cic_compiler_1 (省 DSP, 耗 LUT)
 )(
     input                                clk,
     input                                rst_n,
@@ -99,22 +101,36 @@ module lockin_psd #(
     );
 
     // ========================================================================
-    // 3) CIC 降采样
+    // 3) CIC 降采样 (USE_LUT_CIC=1 时用无 DSP 的 cic_compiler_1)
     // ========================================================================
     wire signed [IN_WIDTH-1:0] cic_x;
     wire signed [IN_WIDTH-1:0] cic_y;
 
-    cic_compiler_0 u_cic_x (
-        .aclk                (clk),
-        .s_axis_data_tdata   (mix_x), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
-        .m_axis_data_tdata   (cic_x), .m_axis_data_tvalid (cic_valid_x)
-    );
-
-    cic_compiler_0 u_cic_y (
-        .aclk                (clk),
-        .s_axis_data_tdata   (mix_y), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
-        .m_axis_data_tdata   (cic_y), .m_axis_data_tvalid (cic_valid_y)
-    );
+    generate
+        if (USE_LUT_CIC) begin : gen_lut_cic
+            cic_compiler_1 u_cic_x (
+                .aclk                (clk),
+                .s_axis_data_tdata   (mix_x), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
+                .m_axis_data_tdata   (cic_x), .m_axis_data_tvalid (cic_valid_x)
+            );
+            cic_compiler_1 u_cic_y (
+                .aclk                (clk),
+                .s_axis_data_tdata   (mix_y), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
+                .m_axis_data_tdata   (cic_y), .m_axis_data_tvalid (cic_valid_y)
+            );
+        end else begin : gen_dsp_cic
+            cic_compiler_0 u_cic_x (
+                .aclk                (clk),
+                .s_axis_data_tdata   (mix_x), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
+                .m_axis_data_tdata   (cic_x), .m_axis_data_tvalid (cic_valid_x)
+            );
+            cic_compiler_0 u_cic_y (
+                .aclk                (clk),
+                .s_axis_data_tdata   (mix_y), .s_axis_data_tvalid (1'b1), .s_axis_data_tready (),
+                .m_axis_data_tdata   (cic_y), .m_axis_data_tvalid (cic_valid_y)
+            );
+        end
+    endgenerate
 
     // ========================================================================
     // 4) IIR 指数平均低通 (多阶级联, 阶数由 iir_order 运行时选择)

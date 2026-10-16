@@ -1,0 +1,247 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2025.1 (win64) Build 6140274 Thu May 22 00:12:29 MDT 2025
+| Date         : Wed Sep 23 17:39:04 2026
+| Host         : DESKTOP-PEDBCMF running 64-bit major release  (build 9200)
+| Command      : report_utilization -hierarchical -hierarchical_depth 6 -file E:/company/Aunion/Lock_In_Amp/FPGA-2/git_pll/docs/dsp_hierarchical_util.rpt
+| Design       : design_1_wrapper
+| Device       : xc7z020clg484-2
+| Speed File   : -2
+| Design State : Fully Placed
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Utilization Design Information
+
+Table of Contents
+-----------------
+1. Utilization by Hierarchy
+
+1. Utilization by Hierarchy
+---------------------------
+
++-----------------------------------------+----------------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+|                 Instance                |                    Module                    | Total LUTs | Logic LUTs | LUTRAMs | SRLs |  FFs  | RAMB36 | RAMB18 | DSP Blocks |
++-----------------------------------------+----------------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+| design_1_wrapper                        |                                        (top) |      31242 |      29465 |      24 | 1753 | 20387 |     29 |      0 |        215 |
+|   (design_1_wrapper)                    |                                        (top) |          0 |          0 |       0 |    0 |     0 |      0 |      0 |          0 |
+|   dbg_hub                               |                                      dbg_hub |        449 |        425 |      24 |    0 |   741 |      0 |      0 |          0 |
+|     inst                                |                           xsdbm_v3_0_4_xsdbm |        449 |        425 |      24 |    0 |   741 |      0 |      0 |          0 |
+|       BSCANID.u_xsdbm_id                |                        xsdbm_v3_0_4_xsdbm_id |        449 |        425 |      24 |    0 |   741 |      0 |      0 |          0 |
+|         SWITCH_N_EXT_BSCAN.bscan_switch |                    xsdbm_v3_0_4_bscan_switch |        124 |        124 |       0 |    0 |   125 |      0 |      0 |          0 |
+|         CORE_XSDB.UUT_MASTER            |                       xsdbm_v3_0_4_icon2xsdb |        273 |        249 |      24 |    0 |   554 |      0 |      0 |          0 |
+|           U_ICON_INTERFACE              |                              xsdbm_v3_0_4_if |        163 |        139 |      24 |    0 |   450 |      0 |      0 |          0 |
+|             U_CMD6_WR                   |                           xsdbm_v3_0_4_wrreg |         46 |         34 |      12 |    0 |   110 |      0 |      0 |          0 |
+|             U_CMD4                      |         xsdbm_v3_0_4_ctl_reg__parameterized0 |          9 |          9 |       0 |    0 |    62 |      0 |      0 |          0 |
+|             U_CMD6_RD                   |                           xsdbm_v3_0_4_rdreg |         67 |         55 |      12 |    0 |   134 |      0 |      0 |          0 |
+|           U_XSDB_BUS_CONTROLLER         |                         xsdbm_v3_0_4_bus_ctl |         70 |         70 |       0 |    0 |    48 |      0 |      0 |          0 |
+|   design_1_i                            |                                     design_1 |      30793 |      29040 |       0 | 1753 | 19646 |     29 |      0 |        215 |
+|     lock_in_amp_0                       |                     design_1_lock_in_amp_0_0 |      30793 |      29040 |       0 | 1753 | 19646 |     29 |      0 |        215 |
+|       inst                              |                                  lock_in_amp |      30793 |      29040 |       0 | 1753 | 19634 |     29 |      0 |        215 |
+|         (inst)                          |                                  lock_in_amp |        601 |        601 |       0 |    0 |   521 |      0 |      0 |         55 |
+|         u_cic_dc_ch3                    |                         cic_compiler_0_HD737 |        148 |         55 |       0 |   93 |   371 |      0 |      0 |          6 |
+|           U0                            |     cic_compiler_0cic_compiler_v4_0_21_HD738 |        148 |         55 |       0 |   93 |   371 |      0 |      0 |          6 |
+|             i_synth                     | cic_compiler_0cic_compiler_v4_0_21_viv_HD739 |        148 |         55 |       0 |   93 |   371 |      0 |      0 |          6 |
+|         u_coh_lo_osc1                   |                  coherent_harm_lo__xdcDup__1 |        223 |        221 |       0 |    2 |   321 |      2 |      0 |          9 |
+|           (u_coh_lo_osc1)               |                  coherent_harm_lo__xdcDup__1 |        122 |        122 |       0 |    0 |    51 |      0 |      0 |          9 |
+|           u_dds_harm                    |                         dds_compiler_1_HD798 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|             U0                          |     dds_compiler_1dds_compiler_v6_0_27_HD799 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|         u_coh_lo_osc2                   |                  coherent_harm_lo__xdcDup__2 |        209 |        207 |       0 |    2 |   321 |      2 |      0 |          9 |
+|           (u_coh_lo_osc2)               |                  coherent_harm_lo__xdcDup__2 |        108 |        108 |       0 |    0 |    51 |      0 |      0 |          9 |
+|           u_dds_harm                    |                         dds_compiler_1_HD825 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|             U0                          |     dds_compiler_1dds_compiler_v6_0_27_HD826 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|         u_coh_lo_osc3                   |                  coherent_harm_lo__xdcDup__3 |        209 |        207 |       0 |    2 |   321 |      2 |      0 |          9 |
+|           (u_coh_lo_osc3)               |                  coherent_harm_lo__xdcDup__3 |        108 |        108 |       0 |    0 |    51 |      0 |      0 |          9 |
+|           u_dds_harm                    |                         dds_compiler_1_HD852 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|             U0                          |     dds_compiler_1dds_compiler_v6_0_27_HD853 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|         u_coh_lo_osc4                   |                  coherent_harm_lo__xdcDup__4 |        223 |        221 |       0 |    2 |   321 |      2 |      0 |          9 |
+|           (u_coh_lo_osc4)               |                  coherent_harm_lo__xdcDup__4 |        122 |        122 |       0 |    0 |    51 |      0 |      0 |          9 |
+|           u_dds_harm                    |                         dds_compiler_1_HD879 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|             U0                          |     dds_compiler_1dds_compiler_v6_0_27_HD880 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|         u_coh_lo_osc5                   |                  coherent_harm_lo__xdcDup__5 |        209 |        207 |       0 |    2 |   321 |      2 |      0 |          9 |
+|           (u_coh_lo_osc5)               |                  coherent_harm_lo__xdcDup__5 |        108 |        108 |       0 |    0 |    51 |      0 |      0 |          9 |
+|           u_dds_harm                    |                         dds_compiler_1_HD906 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|             U0                          |     dds_compiler_1dds_compiler_v6_0_27_HD907 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|         u_coh_lo_osc6                   |                             coherent_harm_lo |        209 |        207 |       0 |    2 |   321 |      2 |      0 |          9 |
+|           (u_coh_lo_osc6)               |                             coherent_harm_lo |        108 |        108 |       0 |    0 |    51 |      0 |      0 |          9 |
+|           u_dds_harm                    |                               dds_compiler_1 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|             U0                          |           dds_compiler_1dds_compiler_v6_0_27 |        101 |         99 |       0 |    2 |   270 |      2 |      0 |          0 |
+|         u_iir_dc_ch3                    |                              iir_lpf_cascade |       1346 |       1346 |       0 |    0 |   355 |      0 |      0 |          0 |
+|           (u_iir_dc_ch3)                |                              iir_lpf_cascade |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|           u_stage1                      |                               iir_lpf_ema_64 |        259 |        259 |       0 |    0 |    89 |      0 |      0 |          0 |
+|           u_stage2                      |                               iir_lpf_ema_65 |        186 |        186 |       0 |    0 |    89 |      0 |      0 |          0 |
+|           u_stage3                      |                               iir_lpf_ema_66 |        214 |        214 |       0 |    0 |    89 |      0 |      0 |          0 |
+|           u_stage4                      |                               iir_lpf_ema_67 |        142 |        142 |       0 |    0 |    88 |      0 |      0 |          0 |
+|         u_ila_0                         |                                        ila_0 |        683 |        594 |       0 |   89 |  1186 |      1 |      0 |          0 |
+|           inst                          |                         ila_0ila_v6_2_18_ila |        683 |        594 |       0 |   89 |  1186 |      1 |      0 |          0 |
+|             ila_core_inst               |                    ila_0ila_v6_2_18_ila_core |        682 |        593 |       0 |   89 |  1180 |      1 |      0 |          0 |
+|         u_pll_ch1                       |                          pll_loop__xdcDup__1 |       2267 |       2052 |       0 |  215 |  1515 |      2 |      0 |         14 |
+|           u_pll_ctrl                    |                            pll_controller_63 |        448 |        448 |       0 |    0 |   192 |      0 |      0 |          2 |
+|           u_cic_x                       |                         cic_compiler_0_HD641 |        149 |         55 |       0 |   94 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD642 |        149 |         55 |       0 |   94 |   371 |      0 |      0 |          6 |
+|           u_cic_y                       |                         cic_compiler_0_HD689 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD690 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|           u_dds_ref                     |                        dds_compiler_1_HD1122 |        125 |         99 |       0 |   26 |   352 |      2 |      0 |          0 |
+|             U0                          |    dds_compiler_1dds_compiler_v6_0_27_HD1123 |        125 |         99 |       0 |   26 |   352 |      2 |      0 |          0 |
+|           u_iir_x                       |                               iir_lpf_ema_61 |        433 |        433 |       0 |    0 |    89 |      0 |      0 |          0 |
+|           u_iir_y                       |                               iir_lpf_ema_62 |        556 |        556 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_mix_x                       |                           mult_hunpin_HD1216 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1217 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|           u_mix_y                       |                           mult_hunpin_HD1220 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1221 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|         u_pll_ch2                       |                                     pll_loop |       2264 |       2050 |       0 |  214 |  1514 |      2 |      0 |         14 |
+|           u_pll_ctrl                    |                               pll_controller |        448 |        448 |       0 |    0 |   192 |      0 |      0 |          2 |
+|           u_cic_x                       |                         cic_compiler_0_HD545 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD546 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|           u_cic_y                       |                         cic_compiler_0_HD593 |        148 |         55 |       0 |   93 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD594 |        148 |         55 |       0 |   93 |   371 |      0 |      0 |          6 |
+|           u_dds_ref                     |                        dds_compiler_1_HD1095 |        125 |         99 |       0 |   26 |   352 |      2 |      0 |          0 |
+|             U0                          |    dds_compiler_1dds_compiler_v6_0_27_HD1096 |        125 |         99 |       0 |   26 |   352 |      2 |      0 |          0 |
+|           u_iir_x                       |                               iir_lpf_ema_59 |        432 |        432 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_iir_y                       |                               iir_lpf_ema_60 |        556 |        556 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_mix_x                       |                           mult_hunpin_HD1208 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1209 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|           u_mix_y                       |                           mult_hunpin_HD1212 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1213 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|         u_psd_ch3_11                    |                        lockin_psd__xdcDup__3 |       3545 |       3354 |       0 |  191 |  1726 |      2 |      0 |         12 |
+|           u_mix_y                       |                           mult_hunpin_HD1188 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1189 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|           u_cic_x                       |                         cic_compiler_0_HD257 |        149 |         55 |       0 |   94 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD258 |        149 |         55 |       0 |   94 |   371 |      0 |      0 |          6 |
+|           u_cic_y                       |                         cic_compiler_0_HD305 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD306 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|           u_dds_ref                     |                        dds_compiler_1_HD1014 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|             U0                          |    dds_compiler_1dds_compiler_v6_0_27_HD1015 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|           u_iir_x                       |                           iir_lpf_cascade_49 |       1347 |       1347 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_x)                   |                           iir_lpf_cascade_49 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_55 |        257 |        257 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_56 |        187 |        187 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_57 |        215 |        215 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_58 |        143 |        143 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_iir_y                       |                           iir_lpf_cascade_50 |       1347 |       1347 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_y)                   |                           iir_lpf_cascade_50 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_51 |        258 |        258 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_52 |        187 |        187 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_53 |        214 |        214 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_54 |        142 |        142 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_mix_x                       |                           mult_hunpin_HD1184 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1185 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|         u_psd_ch3_12                    |                        lockin_psd__xdcDup__2 |       3544 |       3354 |       0 |  190 |  1726 |      2 |      0 |         12 |
+|           u_mix_y                       |                           mult_hunpin_HD1180 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1181 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|           u_cic_x                       |                         cic_compiler_0_HD161 |        148 |         55 |       0 |   93 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD162 |        148 |         55 |       0 |   93 |   371 |      0 |      0 |          6 |
+|           u_cic_y                       |                         cic_compiler_0_HD209 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD210 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|           u_dds_ref                     |                         dds_compiler_1_HD987 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|             U0                          |     dds_compiler_1dds_compiler_v6_0_27_HD988 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|           u_iir_x                       |                           iir_lpf_cascade_39 |       1347 |       1347 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_x)                   |                           iir_lpf_cascade_39 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_45 |        257 |        257 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_46 |        188 |        188 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_47 |        214 |        214 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_48 |        143 |        143 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_iir_y                       |                           iir_lpf_cascade_40 |       1347 |       1347 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_y)                   |                           iir_lpf_cascade_40 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_41 |        258 |        258 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_42 |        186 |        186 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_43 |        215 |        215 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_44 |        142 |        142 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_mix_x                       |                           mult_hunpin_HD1176 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1177 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|         u_psd_ch3_21                    |                        lockin_psd__xdcDup__1 |       3540 |       3354 |       0 |  186 |  1726 |      2 |      0 |         12 |
+|           u_mix_y                       |                           mult_hunpin_HD1172 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1173 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|           u_cic_x                       |                          cic_compiler_0_HD65 |        148 |         55 |       0 |   93 |   371 |      0 |      0 |          6 |
+|             U0                          |      cic_compiler_0cic_compiler_v4_0_21_HD66 |        148 |         55 |       0 |   93 |   371 |      0 |      0 |          6 |
+|           u_cic_y                       |                         cic_compiler_0_HD113 |        147 |         55 |       0 |   92 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD114 |        147 |         55 |       0 |   92 |   371 |      0 |      0 |          6 |
+|           u_dds_ref                     |                         dds_compiler_1_HD960 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|             U0                          |     dds_compiler_1dds_compiler_v6_0_27_HD961 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|           u_iir_x                       |                           iir_lpf_cascade_29 |       1348 |       1348 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_x)                   |                           iir_lpf_cascade_29 |        573 |        573 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_35 |        257 |        257 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_36 |        187 |        187 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_37 |        215 |        215 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_38 |        143 |        143 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_iir_y                       |                           iir_lpf_cascade_30 |       1347 |       1347 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_y)                   |                           iir_lpf_cascade_30 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_31 |        258 |        258 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_32 |        187 |        187 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_33 |        214 |        214 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_34 |        142 |        142 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_mix_x                       |                           mult_hunpin_HD1168 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1169 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|         u_psd_ch3_osc4                  |                        lockin_psd__xdcDup__4 |       3548 |       3356 |       0 |  192 |  1726 |      2 |      0 |         12 |
+|           u_mix_y                       |                           mult_hunpin_HD1196 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1197 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|           u_cic_x                       |                         cic_compiler_0_HD353 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD354 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|           u_cic_y                       |                         cic_compiler_0_HD401 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD402 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|           u_dds_ref                     |                        dds_compiler_1_HD1041 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|             U0                          |    dds_compiler_1dds_compiler_v6_0_27_HD1042 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|           u_iir_x                       |                           iir_lpf_cascade_19 |       1348 |       1348 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_x)                   |                           iir_lpf_cascade_19 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_25 |        257 |        257 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_26 |        188 |        188 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_27 |        214 |        214 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_28 |        143 |        143 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_iir_y                       |                           iir_lpf_cascade_20 |       1347 |       1347 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_y)                   |                           iir_lpf_cascade_20 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_21 |        258 |        258 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_22 |        186 |        186 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_23 |        215 |        215 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_24 |        142 |        142 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_mix_x                       |                           mult_hunpin_HD1192 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1193 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|         u_psd_ch3_osc5                  |                        lockin_psd__xdcDup__5 |       3542 |       3353 |       0 |  189 |  1726 |      2 |      0 |         12 |
+|           u_mix_y                       |                           mult_hunpin_HD1204 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1205 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|           u_cic_x                       |                         cic_compiler_0_HD449 |        149 |         55 |       0 |   94 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD450 |        149 |         55 |       0 |   94 |   371 |      0 |      0 |          6 |
+|           u_cic_y                       |                         cic_compiler_0_HD497 |        149 |         55 |       0 |   94 |   371 |      0 |      0 |          6 |
+|             U0                          |     cic_compiler_0cic_compiler_v4_0_21_HD498 |        149 |         55 |       0 |   94 |   371 |      0 |      0 |          6 |
+|           u_dds_ref                     |                        dds_compiler_1_HD1068 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|             U0                          |    dds_compiler_1dds_compiler_v6_0_27_HD1069 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|           u_iir_x                       |                            iir_lpf_cascade_9 |       1347 |       1347 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_x)                   |                            iir_lpf_cascade_9 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_15 |        257 |        257 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_16 |        187 |        187 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_17 |        215 |        215 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_18 |        143 |        143 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_iir_y                       |                           iir_lpf_cascade_10 |       1347 |       1347 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_y)                   |                           iir_lpf_cascade_10 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                               iir_lpf_ema_11 |        258 |        258 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                               iir_lpf_ema_12 |        187 |        187 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                               iir_lpf_ema_13 |        214 |        214 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                               iir_lpf_ema_14 |        142 |        142 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_mix_x                       |                           mult_hunpin_HD1200 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1201 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|         u_psd_ch3_osc6                  |                                   lockin_psd |       3544 |       3354 |       0 |  190 |  1726 |      2 |      0 |         12 |
+|           u_mix_y                       |                           mult_hunpin_HD1164 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |          mult_hunpinmult_gen_v12_0_23_HD1165 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|           u_cic_x                       |                               cic_compiler_0 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|             U0                          |           cic_compiler_0cic_compiler_v4_0_21 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|           u_cic_y                       |                          cic_compiler_0_HD17 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|             U0                          |      cic_compiler_0cic_compiler_v4_0_21_HD18 |        150 |         55 |       0 |   95 |   371 |      0 |      0 |          6 |
+|           u_dds_ref                     |                         dds_compiler_1_HD933 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|             U0                          |     dds_compiler_1dds_compiler_v6_0_27_HD934 |        101 |         99 |       0 |    2 |   222 |      2 |      0 |          0 |
+|           u_iir_x                       |                            iir_lpf_cascade_0 |       1347 |       1347 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_x)                   |                            iir_lpf_cascade_0 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                                iir_lpf_ema_5 |        257 |        257 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                                iir_lpf_ema_6 |        187 |        187 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                                iir_lpf_ema_7 |        215 |        215 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                                iir_lpf_ema_8 |        143 |        143 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_iir_y                       |                            iir_lpf_cascade_1 |       1346 |       1346 |       0 |    0 |   355 |      0 |      0 |          0 |
+|             (u_iir_y)                   |                            iir_lpf_cascade_1 |        572 |        572 |       0 |    0 |     0 |      0 |      0 |          0 |
+|             u_stage1                    |                                  iir_lpf_ema |        258 |        258 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage2                    |                                iir_lpf_ema_2 |        187 |        187 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage3                    |                                iir_lpf_ema_3 |        214 |        214 |       0 |    0 |    89 |      0 |      0 |          0 |
+|             u_stage4                    |                                iir_lpf_ema_4 |        142 |        142 |       0 |    0 |    88 |      0 |      0 |          0 |
+|           u_mix_x                       |                                  mult_hunpin |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|             U0                          |                 mult_hunpinmult_gen_v12_0_23 |        215 |        215 |       0 |    0 |    26 |      0 |      0 |          0 |
+|         u_usb_commend                   |                                  usb_commend |        893 |        893 |       0 |    0 |  1824 |      0 |      0 |          0 |
++-----------------------------------------+----------------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+* Note: The sum of lower-level cells may be larger than their parent cells total, due to cross-hierarchy LUT combining
+
+

@@ -20,8 +20,10 @@
 //      T11 : WR↓ to TXE# change           5 ~ 25 ns
 //      T12 : TXE# inactive after WR cycle >= 80 ns
 //
-//  ※ 上层每次 send_en 之间的间隔由 usb_commend 状态机保证 (它要等 tx_done),
-//    不会发生冲突。
+//  ※ usb_commend 把 send_en 保持为高直到看见 tx_done, 再拉低.
+//    tx_done 那一拍本模块已回到 IDLE 而 send_en 仍为高, 若按电平触发会把同一
+//    字节再发一次 (表现为每帧多一个首字节、应答显示 "CCommand ..."), 并使后续
+//    字节与 tx_done 计数错位一拍. 因此这里只在 send_en 上升沿启动一次发送.
 // =============================================================================
 
 module ft245_tx #(
@@ -66,6 +68,13 @@ module ft245_tx #(
     end
     wire txe_ok = ~txe_sync[2];   // 低电平有效
 
+    reg send_en_d;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) send_en_d <= 1'b0;
+        else        send_en_d <= send_en;
+    end
+    wire send_start = send_en & ~send_en_d;
+
     // ---- 主状态机 -----------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -82,7 +91,7 @@ module ft245_tx #(
                 ST_IDLE: begin
                     ft_wr   <= 1'b0;
                     ft_d_oe <= 1'b0;          // 总线不驱动 (读方向/高阻)
-                    if (send_en) begin
+                    if (send_start) begin
                         ft_d_out <= send_data; // 锁存要发送的字节
                         ft_d_oe  <= 1'b1;      // 开启输出
                         state    <= ST_WAIT;

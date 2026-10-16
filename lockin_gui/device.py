@@ -14,6 +14,7 @@ device.py
   - cmd_response(str)
 """
 
+import binascii
 import math
 import socket
 import struct
@@ -27,12 +28,15 @@ import serial.tools.list_ports
 from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 
 # ============================================================================
-# 协议常量 (与 docs/Interface_Spec_for_SW.md 保持一致)
+# 协议常量 (帧协议 v2, 见 docs/帧协议v2_时间戳与CRC.md)
 # ============================================================================
 SYNC_HEADER = b"\xA5\x5A\xA5\x5A"
-FRAME_LEN = 152                   # 4 sync + 17i + 3i + 2Q + 1i + 6Q (六路参考频率字)
+FRAME_LEN = 178                   # 4 sync + 19i + 3i + 2Q + 1i + 7Q + 2I + CRC16
+FRAME_DATA_LEN = FRAME_LEN - 2    # CRC 覆盖的字节数 (含同步头)
 F_CLK = 65_000_000                # DDS 时钟 (Hz)
 PHASE_BITS = 48                   # DDS 相位累加器位宽
+CIC_DECIM = 65                    # CIC 抽取比, sample_cnt 每 CIC_DECIM 个 F_CLK 周期 +1
+SAMPLE_TICK_S = CIC_DECIM / F_CLK  # sample_cnt 1 LSB 对应的秒数 (标称 1 µs)
 
 # 数据字段名 (顺序必须与 lock_in_amp.v 的打包顺序一致)
 FIELD_NAMES = [
@@ -44,17 +48,21 @@ FIELD_NAMES = [
     "ch3_x_osc4", "ch3_y_osc4",
     "ch3_x_osc5", "ch3_y_osc5",
     "ch3_x_osc6", "ch3_y_osc6",
+    "ch3_x_osc7", "ch3_y_osc7",
     "ch3_dc",
     "adc_ch1", "adc_ch2", "adc_ch3",
     "pll_freq_ch1_word", "pll_freq_ch2_word",
     "lock_flags",
-    # ★ 诊断回读: 六路 PSD 实际生效的参考频率字
+    # ★ 诊断回读: 七路 PSD 实际生效的参考频率字
     "ref_word_21", "ref_word_12", "ref_word_11",
-    "ref_word_osc4", "ref_word_osc5", "ref_word_osc6",
+    "ref_word_osc4", "ref_word_osc5", "ref_word_osc6", "ref_word_osc7",
+    # ★ v2: FPGA 采样时间戳 (1 MHz 节拍计数) + 帧序号
+    "sample_cnt", "frame_seq",
 ]
 
-# struct 格式: 17 int32 + 3 int32 + 2 uint64 + 1 int32 + 6 uint64 (大端)
-FRAME_FMT = ">17i3iQQi6Q"
+# struct 格式: 19 int32 + 3 int32 + 2 uint64 + 1 int32 + 7 uint64 + 2 uint32 (大端)
+# 不含同步头与末尾 CRC16
+FRAME_FMT = ">19i3iQQi7QII"
 
 
 # ============================================================================
@@ -75,13 +83,23 @@ def list_serial_ports() -> list:
     return [p.device for p in serial.tools.list_ports.comports()]
 
 
+def frame_crc(buf: bytes) -> int:
+    """CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF), 与 usb_commend.v 一致"""
+    return binascii.crc_hqx(buf, 0xFFFF)
+
+
 def parse_frame(buf: bytes) -> dict:
-    """大端解析 FRAME_LEN 字节帧 → 数据字典 (额外提供解析后的 Hz/lock 值)"""
+    """大端解析 FRAME_LEN 字节帧 → 数据字典 (额外提供解析后的 Hz/lock 值)
+
+    同步头不对或 CRC 不符时抛 ValueError (半帧 / 字节损坏都在这里被拦下).
+    """
     if len(buf) != FRAME_LEN:
         raise ValueError("帧长度错误")
     if buf[:4] != SYNC_HEADER:
         raise ValueError("同步头不匹配")
-    vals = struct.unpack(FRAME_FMT, buf[4:])
+    if frame_crc(buf[:FRAME_DATA_LEN]) != int.from_bytes(buf[FRAME_DATA_LEN:], "big"):
+        raise ValueError("CRC 错误")
+    vals = struct.unpack(FRAME_FMT, buf[4:FRAME_DATA_LEN])
     data = dict(zip(FIELD_NAMES, vals))
     # 派生量, 方便 GUI 使用
     data["pll_freq_ch1_hz"] = freq_word_to_hz(data["pll_freq_ch1_word"])
@@ -93,10 +111,67 @@ def parse_frame(buf: bytes) -> dict:
     data["ref_hz_osc4"] = freq_word_to_hz(data["ref_word_osc4"])
     data["ref_hz_osc5"] = freq_word_to_hz(data["ref_word_osc5"])
     data["ref_hz_osc6"] = freq_word_to_hz(data["ref_word_osc6"])
+    data["ref_hz_osc7"] = freq_word_to_hz(data["ref_word_osc7"])
     data["locked_ch1"] = bool(data["lock_flags"] & 0x1)
     data["locked_ch2"] = bool(data["lock_flags"] & 0x2)
     data["timestamp"] = time.time()
     return data
+
+
+# ============================================================================
+# 帧流跟踪: FPGA 采样时间戳展开 + 帧序号丢帧/重复检测
+# ============================================================================
+class FrameTracker:
+    """用帧内 sample_cnt / frame_seq 给每帧定时并统计丢帧.
+
+    - timestamp   = 首帧到达的 PC 时间 + (sample_cnt 展开值 - 首帧值) × SAMPLE_TICK_S
+                    → 时间轴来自 FPGA 采样时刻, 不受 USB 成批交付影响
+    - fpga_time_s = 相对首帧的 FPGA 时间 (s)
+    - sample_cnt 32bit 约 71 分钟回绕, 这里自动展开; 倒退 (FPGA 复位) 则重新起算
+    - frame_seq 跳号累计到 lost, 与上一帧相同则判为重复帧 (返回 False 丢弃)
+    """
+
+    def __init__(self):
+        self.lost = 0
+        self.duplicates = 0
+        self._t0 = None
+        self._s0 = 0
+        self._last_cnt = 0
+        self._unwrapped = 0
+        self._last_seq = None
+
+    def update(self, d: dict) -> bool:
+        cnt, seq = d["sample_cnt"], d["frame_seq"]
+
+        if self._last_seq is not None:
+            dseq = (seq - self._last_seq) & 0xFFFFFFFF
+            if dseq == 0:
+                self.duplicates += 1
+                return False
+            if dseq < 0x80000000:
+                self.lost += dseq - 1
+        self._last_seq = seq
+
+        if self._t0 is None:
+            self._rebase(cnt)
+        else:
+            dcnt = (cnt - self._last_cnt) & 0xFFFFFFFF
+            if dcnt >= 0x80000000:
+                self._rebase(cnt)          # 计数倒退: FPGA 复位或重新上电
+            else:
+                self._unwrapped += dcnt
+                self._last_cnt = cnt
+
+        rel = (self._unwrapped - self._s0) * SAMPLE_TICK_S
+        d["fpga_time_s"] = rel
+        d["timestamp"] = self._t0 + rel
+        return True
+
+    def _rebase(self, cnt: int):
+        self._t0 = time.time()
+        self._last_cnt = cnt
+        self._unwrapped = cnt
+        self._s0 = cnt
 
 
 # ============================================================================
@@ -114,6 +189,18 @@ class LockinDevice(QObject):
         self._streaming = False
         self._thread: threading.Thread | None = None
         self._cmd_lock = threading.Lock()
+        self._tracker = FrameTracker()
+        self._crc_errors = 0
+
+    @property
+    def bad_frames(self) -> int:
+        """CRC 校验失败 (含半帧) 被丢弃的帧数"""
+        return self._crc_errors
+
+    @property
+    def lost_frames(self) -> int:
+        """按 frame_seq 跳号统计的丢帧数 (含 CRC 丢弃的帧)"""
+        return self._tracker.lost
 
     # --- 连接管理 ----------------------------------------------------------
     def connect(self, port: str, baud: int = 3_000_000) -> bool:
@@ -184,6 +271,8 @@ class LockinDevice(QObject):
         if self._streaming:
             return
         self.send_command("XYOUT")
+        self._tracker = FrameTracker()
+        self._crc_errors = 0
         self._streaming = True
         self._thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._thread.start()
@@ -202,14 +291,16 @@ class LockinDevice(QObject):
         # 3) 现在 rx 线程已退出, 主线程独占串口, 安全地发 stop 并读取响应
         if self.is_connected:
             self.send_command("stop")
-        self.log_message.emit("[+] 数据流已停止")
+        self.log_message.emit(
+            f"[+] 数据流已停止 (CRC 坏帧 {self._crc_errors}, 丢帧 {self._tracker.lost}, "
+            f"重复帧 {self._tracker.duplicates})")
 
     @property
     def is_streaming(self) -> bool:
         return self._streaming
 
     def _rx_loop(self):
-        """后台线程: 持续从串口读取并解析 80 字节数据帧.
+        """后台线程: 持续从串口读取并解析 FRAME_LEN 字节数据帧.
 
         本线程是唯一允许从串口 read 的线程. send_command 在流模式下
         只 write 不 read, 以避免与本线程并发 read 导致 Windows
@@ -232,13 +323,17 @@ class LockinDevice(QObject):
                     idx = buf.find(SYNC_HEADER)
                     if idx < 0 or len(buf) - idx < FRAME_LEN:
                         break
-                    frame = buf[idx:idx + FRAME_LEN]
-                    buf = buf[idx + FRAME_LEN:]
                     try:
-                        data = parse_frame(frame)
-                        self.frame_received.emit(data)
+                        data = parse_frame(buf[idx:idx + FRAME_LEN])
                     except ValueError:
-                        pass  # 偶发同步头碰撞, 忽略
+                        # 半帧 (被命令打断) / 字节损坏 / 同步头碰撞:
+                        # 只跳过这个同步头, 从下一字节重新找, 不吞掉后面的真帧
+                        self._crc_errors += 1
+                        buf = buf[idx + 1:]
+                        continue
+                    buf = buf[idx + FRAME_LEN:]
+                    if self._tracker.update(data):
+                        self.frame_received.emit(data)
                 # 防止 buf 无限增长
                 if len(buf) > 4096:
                     buf = buf[-2048:]
@@ -274,7 +369,16 @@ class UdpLockinDevice(QObject):
         self._thread: threading.Thread | None = None
         self._cmd_lock = threading.Lock()
         self._stat_total = 0       # 已收帧数
-        self._stat_bad   = 0       # 解析失败帧数
+        self._stat_bad   = 0       # 解析失败帧数 (同步头/CRC)
+        self._tracker = FrameTracker()
+
+    @property
+    def bad_frames(self) -> int:
+        return self._stat_bad
+
+    @property
+    def lost_frames(self) -> int:
+        return self._tracker.lost
 
     # --- 连接管理 ----------------------------------------------------------
     def connect(self, port: str, baud: int = 3_000_000) -> bool:
@@ -358,6 +462,7 @@ class UdpLockinDevice(QObject):
         self._streaming = True
         self._stat_total = 0
         self._stat_bad   = 0
+        self._tracker = FrameTracker()
         self._thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._thread.start()
         self.log_message.emit("[+] UDP 数据流已启动")
@@ -371,14 +476,14 @@ class UdpLockinDevice(QObject):
             self._thread = None
         self.log_message.emit(
             f"[+] UDP 数据流已停止 (共收 {self._stat_total} 帧, "
-            f"解析失败 {self._stat_bad})")
+            f"解析失败 {self._stat_bad}, 丢帧 {self._tracker.lost})")
 
     @property
     def is_streaming(self) -> bool:
         return self._streaming
 
     def _rx_loop(self):
-        """后台线程: 持续 recvfrom UDP, 每个 datagram 必为 80 字节一帧."""
+        """后台线程: 持续 recvfrom UDP, 每个 datagram 必为 FRAME_LEN 字节一帧."""
         try:
             while self._streaming and self.sock:
                 try:
@@ -399,7 +504,8 @@ class UdpLockinDevice(QObject):
                 except ValueError:
                     self._stat_bad += 1
                     continue
-                self.frame_received.emit(data)
+                if self._tracker.update(data):
+                    self.frame_received.emit(data)
         finally:
             self._streaming = False
 
@@ -426,7 +532,7 @@ class MockDevice(QObject):
             "TAU2X": 20, "TAU2Y": 8,
             # 通道3 六路谐波 X/Y 共用 TC
             "TAU21": 2, "TAU12": 2, "TAU11": 2,
-            "TAU4": 2, "TAU5": 2, "TAU6": 2,
+            "TAU4": 2, "TAU5": 2, "TAU6": 2, "TAU7": 2,
             "TAUDC": 2,
             "PHAS": 0,
             "FRQ2": hz_to_freq_word(50000),
@@ -437,6 +543,7 @@ class MockDevice(QObject):
             "FRQ4": hz_to_freq_word(150_000),
             "FRQ5": hz_to_freq_word(180_000),
             "FRQ6": hz_to_freq_word(220_000),
+            "FRQ7": hz_to_freq_word(200_000),
             "LOCKSWY": 100_000,
             "LOCKTHX": 300_000,
             "REFMODE": 1,
@@ -446,12 +553,13 @@ class MockDevice(QObject):
             "OSC4": (3 << 8) | 0,
             "OSC5": (0 << 8) | 3,
             "OSC6": (2 << 8) | 2,
+            "OSC7": (4 << 8) | 0,
             "OSRC1": 0, "OSRC2": 0, "OSRC3": 0,
-            "OSRC4": 0, "OSRC5": 0, "OSRC6": 0,
+            "OSRC4": 0, "OSRC5": 0, "OSRC6": 0, "OSRC7": 0,
             "OHN1": 1, "OHN2": 1, "OHN3": 1,
-            "OHN4": 1, "OHN5": 1, "OHN6": 1,
+            "OHN4": 1, "OHN5": 1, "OHN6": 1, "OHN7": 1,
             "ORD21": 1, "ORD12": 1, "ORD11": 1,
-            "ORD4": 1, "ORD5": 1, "ORD6": 1,
+            "ORD4": 1, "ORD5": 1, "ORD6": 1, "ORD7": 1,
             "ORDDC": 1,
             "DMOD":  0,
             "DAMP":  65535,
@@ -552,6 +660,8 @@ class MockDevice(QObject):
             "ch3_y_osc5": int(1.1e6 * math.sin(t * 0.9)) + noise(25_000),
             "ch3_x_osc6": int(1.0e6 * math.cos(t * 1.3)) + noise(25_000),
             "ch3_y_osc6": int(1.0e6 * math.sin(t * 1.3)) + noise(25_000),
+            "ch3_x_osc7": int(0.9e6 * math.cos(t * 1.5)) + noise(25_000),
+            "ch3_y_osc7": int(0.9e6 * math.sin(t * 1.5)) + noise(25_000),
             "ch3_dc":    int(5e5 + 1e5 * math.sin(t * 0.2)) + noise(20_000),
             "adc_ch1":   clip14(adc1_raw),
             "adc_ch2":   clip14(adc2_raw),
@@ -565,6 +675,7 @@ class MockDevice(QObject):
             "ref_word_osc4": hz_to_freq_word(3 * f1_hz),
             "ref_word_osc5": hz_to_freq_word(3 * f2_hz),
             "ref_word_osc6": hz_to_freq_word(2 * f1_hz + 2 * f2_hz),
+            "ref_word_osc7": hz_to_freq_word(4 * f1_hz),
             "pll_freq_ch1_hz": f1_hz,
             "pll_freq_ch2_hz": f2_hz,
             "ref_hz_21": 2 * f1_hz + f2_hz,
@@ -573,8 +684,12 @@ class MockDevice(QObject):
             "ref_hz_osc4": 3 * f1_hz,
             "ref_hz_osc5": 3 * f2_hz,
             "ref_hz_osc6": 2 * f1_hz + 2 * f2_hz,
+            "ref_hz_osc7": 4 * f1_hz,
             "locked_ch1": locked_ch1,
             "locked_ch2": locked_ch2,
+            "sample_cnt": int(t / SAMPLE_TICK_S) & 0xFFFFFFFF,
+            "frame_seq": self._frame_id & 0xFFFFFFFF,
+            "fpga_time_s": t,
             "timestamp": time.time(),
         }
         self._frame_id += 1
