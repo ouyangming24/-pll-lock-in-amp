@@ -748,6 +748,14 @@ wire [7:0] ft_d_tx;
 wire       ft_d_oe;
 wire [7:0] ft_d_in;
 
+// ft_d 收发共用, 必须互斥: rx 仅在 tx 未驱动总线且 usb_commend 可接收时读 (读优先);
+// tx 在 rx 读期间 (或 rx 本拍发起读) 不驱动总线
+wire       ft_rx_busy;
+wire       ft_rx_pending;
+wire       ft_tx_busy;
+wire       ft_tx_bus_owned;
+wire       usb_rx_ready;
+
 assign ft_d    = ft_d_oe ? ft_d_tx : 8'bz;
 assign ft_d_in = ft_d;
 
@@ -762,7 +770,10 @@ ft245_rx #(
     .ft_rd_n  (ft_rd_n ),
     .ft_d_in  (ft_d_in ),
     .rec_data (rec_data),
-    .rec_done (rec_done)
+    .rec_done (rec_done),
+    .rd_allow (usb_rx_ready & ~ft_tx_bus_owned),
+    .rx_busy  (ft_rx_busy),
+    .rx_pending(ft_rx_pending)
 );
 
 ft245_tx #(
@@ -778,7 +789,10 @@ ft245_tx #(
     .ft_d_oe  (ft_d_oe ),
     .send_en  (send_en ),
     .send_data(send_data),
-    .tx_done  (tx_done )
+    .tx_done  (tx_done ),
+    .bus_hold (ft_rx_busy),
+    .tx_busy  (ft_tx_busy),
+    .bus_owned(ft_tx_bus_owned)
 );
 
 
@@ -878,6 +892,9 @@ usb_commend u_usb_commend (
     .rec_data(rec_data),
     .rec_done(rec_done),
     .tx_done(tx_done),
+    .tx_busy(ft_tx_busy),
+    .rx_ready(usb_rx_ready),
+    .rx_pending(ft_rx_pending),
     .x_y_fir(x_y_fir_packed),
     // 数据帧触发: 用 PLL ch1 的 dc_valid_x 一拍 → 每帧上传一次
     .m_axis_data_tvalid_fir_x(dc_valid_x_ch1),

@@ -11,6 +11,9 @@
 //      output       rec_done (1 拍脉冲, 表示一字节接收完成)
 //  因此 usb_commend 可直接复用, 无需修改。
 //
+//  D[7:0] 与 ft245_tx 共用: 只在 rd_allow=1 (上层可接收且 ft245_tx 未驱动总线) 时
+//  发起读; 否则 PC 发来的字节暂存在 FT245 内部 FIFO, 不会丢.
+//
 //  FT245BL 读周期时序 (数据手册):
 //      T1  : RD# Active Pulse Width       >= 50 ns
 //      T3  : RD# Active to Valid Data     20 ~ 50 ns
@@ -33,7 +36,12 @@ module ft245_rx #(
 
     // 对上层的字节流接口 (与 uart_rec 一致)
     output reg [7:0]  rec_data,
-    output reg        rec_done
+    output reg        rec_done,
+
+    // 总线仲裁 / 反压: rd_allow=0 时不发起读, 字节留在 FT245 RX FIFO
+    input  wire       rd_allow,    // = 上层可接收 && ft245_tx 未占用总线
+    output wire       rx_busy,     // RD# 周期进行中 (含冷却), 或本拍将发起读
+    output wire       rx_pending   // FT245 有待读字节或正在读: 上层据此先收命令再发帧
 );
 
     // ---- 周期计算: 用 ceil 保证不小于时序要求 -------------------------------
@@ -49,13 +57,17 @@ module ft245_rx #(
     reg [2:0]  state;
     reg [15:0] cnt;
 
+    wire rxf_valid;
+    assign rx_busy    = (state != ST_IDLE) || (rxf_valid && rd_allow);
+    assign rx_pending = (state != ST_IDLE) || rxf_valid;
+
     // ---- RXF# 三级同步, 避免亚稳态 -----------------------------------------
     reg [2:0] rxf_sync;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) rxf_sync <= 3'b111;
         else        rxf_sync <= {rxf_sync[1:0], ft_rxf_n};
     end
-    wire rxf_valid = ~rxf_sync[2];   // 低电平有效
+    assign rxf_valid = ~rxf_sync[2];   // 低电平有效
 
     // ---- 主状态机 ----------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
@@ -72,7 +84,7 @@ module ft245_rx #(
                 ST_IDLE: begin
                     ft_rd_n <= 1'b1;
                     cnt     <= 16'd0;
-                    if (rxf_valid) begin
+                    if (rxf_valid && rd_allow) begin
                         ft_rd_n <= 1'b0;       // 立即拉低 RD#
                         state   <= ST_RD_LOW;
                     end

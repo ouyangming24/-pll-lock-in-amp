@@ -24,6 +24,11 @@
 //    tx_done 那一拍本模块已回到 IDLE 而 send_en 仍为高, 若按电平触发会把同一
 //    字节再发一次 (表现为每帧多一个首字节、应答显示 "CCommand ..."), 并使后续
 //    字节与 tx_done 计数错位一拍. 因此这里只在 send_en 上升沿启动一次发送.
+//
+//  ※ D[7:0] 与 ft245_rx 共用. ST_WAIT 不驱动总线; 只有 bus_hold=0 (ft245_rx
+//    既不在读、本拍也不发起读) 时才进入 WR 周期并驱动总线 (bus_owned=1).
+//    ft245_rx 只在 bus_owned=0 时发起读. 读优先, 因此即使 TXE# 长时间为高
+//    (PC 未取数) 卡在 ST_WAIT, 命令仍能被读入.
 // =============================================================================
 
 module ft245_tx #(
@@ -43,7 +48,12 @@ module ft245_tx #(
     // 对上层的字节流接口 (与 uart_send 一致)
     input  wire       send_en,
     input  wire [7:0] send_data,
-    output reg        tx_done
+    output reg        tx_done,
+
+    // 与 ft245_rx 的总线仲裁
+    input  wire       bus_hold,     // ft245_rx 忙或本拍要发起读 (读优先)
+    output wire       tx_busy,      // 本模块非空闲 (已接字节, 未完成)
+    output wire       bus_owned     // 正在驱动 D[7:0] (WR 周期中)
 );
 
     // ---- 周期计算 -----------------------------------------------------------
@@ -59,6 +69,9 @@ module ft245_tx #(
 
     reg [2:0]  state;
     reg [15:0] cnt;
+
+    assign tx_busy   = (state != ST_IDLE);
+    assign bus_owned = (state == ST_WR_HIGH) || (state == ST_WR_LOW) || (state == ST_DONE);
 
     // ---- TXE# 三级同步 ------------------------------------------------------
     reg [2:0] txe_sync;
@@ -93,17 +106,17 @@ module ft245_tx #(
                     ft_d_oe <= 1'b0;          // 总线不驱动 (读方向/高阻)
                     if (send_start) begin
                         ft_d_out <= send_data; // 锁存要发送的字节
-                        ft_d_oe  <= 1'b1;      // 开启输出
                         state    <= ST_WAIT;
                     end
                 end
 
                 ST_WAIT: begin
-                    ft_d_oe <= 1'b1;
-                    if (txe_ok) begin
-                        ft_wr <= 1'b1;         // 先拉高 WR
-                        state <= ST_WR_HIGH;
-                        cnt   <= 16'd0;
+                    ft_d_oe <= 1'b0;
+                    if (txe_ok && !bus_hold) begin
+                        ft_d_oe <= 1'b1;       // 取得总线: 数据与 WR 同拍出现, WR 高 80ns 满足 T9
+                        ft_wr   <= 1'b1;
+                        state   <= ST_WR_HIGH;
+                        cnt     <= 16'd0;
                     end
                 end
 

@@ -36,6 +36,9 @@ module usb_commend(
     input wire [7:0] rec_data,
     input wire rec_done,
     input wire tx_done,
+    input wire tx_busy,            // ft245_tx 非空闲 (含等待总线/TXE#); 空闲时才发起新字节
+    output wire rx_ready,          // 本模块能处理 rec_done 的状态; 为 0 时 ft245_rx 暂不读, 字节留在 FT245 FIFO
+    input wire rx_pending,         // FT245 有待读命令字节: IDLE 时先收命令, 不开新帧
     input wire [1375:0] x_y_fir,   // 172 字节快照 (含 sample_cnt); 本模块追加 frame_seq + CRC16 → 178 字节
     input wire m_axis_data_tvalid_fir_x,
     output reg [47:0] center_freq,
@@ -187,6 +190,11 @@ module usb_commend(
     parameter CMD_ORD7    = 7'd66;
 
     reg [2:0] curr_state;
+    // 发应答期间 FSM 不处理 rec_done, 此时读出的命令字节会丢失
+    assign rx_ready = (curr_state != SEND_RESPONSE) && (curr_state != WAIT_SEND);
+    // 发帧中只有非 CR/LF 字节才算新命令开头: 上条命令的 "\n" 在应答期间被暂缓读取,
+    // 应答后才读入, 若也打断帧会被当成下一条命令的首字符
+    wire rec_cmd_start = rec_done && (rec_data != 8'h0D) && (rec_data != 8'h0A);
     reg [6:0] cmd_type;
     reg [7:0] cmd_buffer[0:9];
     reg [3:0] cmd_cnt;
@@ -367,7 +375,7 @@ module usb_commend(
                             curr_state <= REC_CMD;
                         end
                     end
-                    else if (xy_data_enable && new_data_ready) begin
+                    else if (xy_data_enable && new_data_ready && !rx_pending) begin
                         curr_state <= SEND_XYDATA;
                         byte_cnt <= 8'd0;
                         tx_crc <= 16'hFFFF;
@@ -900,7 +908,7 @@ module usb_commend(
                 end
 
                 SEND_RESPONSE: begin
-                    if (!send_en && !tx_done) begin
+                    if (!send_en && !tx_done && !tx_busy) begin
                         send_en <= 1'b1;
                         if (cmd_type != 0) begin
                             send_data <= success_msg[msg_cnt];
@@ -929,7 +937,7 @@ module usb_commend(
                 end
 
                 SEND_XYDATA: begin
-                    if (rec_done) begin
+                    if (rec_cmd_start) begin
                         cmd_buffer[0] <= rec_data;
                         cmd_cnt <= 4'd1;
                         curr_state <= REC_CMD;
@@ -942,7 +950,7 @@ module usb_commend(
                         data_sending <= 1'b0;
                         byte_cnt <= 8'd0;
                     end
-                    else if (!send_en && !tx_done) begin
+                    else if (!send_en && !tx_done && !tx_busy) begin
                         send_en <= 1'b1;
                         data_sending <= 1'b1;
                         // byte_cnt = 0 -> 最高字节 (同步头 0xA5) 先发; 数据之后发 CRC 高/低字节
@@ -957,7 +965,7 @@ module usb_commend(
                 end
 
                 WAIT_XYDATA: begin
-                    if (rec_done) begin
+                    if (rec_cmd_start) begin
                         cmd_buffer[0] <= rec_data;
                         cmd_cnt <= 4'd1;
                         curr_state <= REC_CMD;
@@ -989,7 +997,7 @@ module usb_commend(
                 end
 
                 WAIT_DELAY: begin
-                    if (rec_done) begin
+                    if (rec_cmd_start) begin
                         cmd_buffer[0] <= rec_data;
                         cmd_cnt <= 4'd1;
                         curr_state <= REC_CMD;
