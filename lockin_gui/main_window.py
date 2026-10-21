@@ -1559,13 +1559,32 @@ class MainWindow(QMainWindow):
         mode_h.addStretch()
         outer.addLayout(mode_h)
 
+        wave_h = QHBoxLayout()
+        lbl_wave = QLabel("波形"); lbl_wave.setFixedWidth(95); lbl_wave.setStyleSheet("font-size:10pt;")
+        self.cb_dac_wave = QComboBox()
+        self.cb_dac_wave.addItem("正弦波", 0)
+        self.cb_dac_wave.addItem("方波", 1)
+        self.cb_dac_wave.setFixedHeight(30)
+        self.cb_dac_wave.setFixedWidth(268)
+        self.cb_dac_wave.setStyleSheet("font-size: 11pt; padding: 4px 8px;")
+        self.cb_dac_wave.setToolTip(
+            "DWAV: 正弦 = 所选振荡器本振; 方波 = 本振符号 (同频同相, 占空比 50%).\n"
+            "切换后立即下发; 幅值/偏置对两种波形同样有效 (方波峰值 = 幅值).")
+        self.cb_dac_wave.currentIndexChanged.connect(self._send_dac_wave)
+        btn_wave = QPushButton("▶"); btn_wave.setFixedSize(42, 30)
+        btn_wave.setStyleSheet("font-size: 11pt; font-weight: bold;")
+        btn_wave.clicked.connect(self._send_dac_wave)
+        wave_h.addWidget(lbl_wave); wave_h.addWidget(self.cb_dac_wave); wave_h.addWidget(btn_wave)
+        wave_h.addStretch()
+        outer.addLayout(wave_h)
+
         grid = QGridLayout()
         self._setup_normal_grid(grid)
         self.ed_dac_amp = self._mk_val_row(
             grid, 0, "幅值 (Vpk)", f"{DAC_V_PEAK:g}",
             lambda: self._send_dac_amp(self.ed_dac_amp.text()))
         self.ed_dac_amp.setToolTip(
-            f"正弦峰值幅度 0~{DAC_V_PEAK} V (DAMP). 65535 码对应满量程.")
+            f"峰值幅度 0~{DAC_V_PEAK} V (DAMP, 正弦/方波通用). 65535 码对应满量程.")
         self.ed_dac_ofs = self._mk_val_row(
             grid, 1, "偏置 (V)", "0",
             lambda: self._send_dac_ofs(self.ed_dac_ofs.text()))
@@ -1601,6 +1620,11 @@ class MainWindow(QMainWindow):
         mode = int(self.cb_dac_mode.currentData())
         self.dev.send_command(f"DMOD:{mode}")
         self.on_log(f"[i] 信号发生器 ← {self.cb_dac_mode.currentText()} (DMOD:{mode})")
+
+    def _send_dac_wave(self, *_):
+        wave = int(self.cb_dac_wave.currentData())
+        self.dev.send_command(f"DWAV:{wave}")
+        self.on_log(f"[i] 信号发生器波形 ← {self.cb_dac_wave.currentText()} (DWAV:{wave})")
 
     def _volt_to_dac_amp(self, v_pk: float) -> int:
         """峰值电压 → DAMP 16bit (65535 = DAC_V_PEAK)."""
@@ -2511,6 +2535,7 @@ class MainWindow(QMainWindow):
                 self._send_all_osc_src(quiet=True)
                 self._send_all_osc_harm(quiet=True)
             self._send_dac_mode()
+            self._send_dac_wave()
             self._send_dac_amp(self.ed_dac_amp.text())
             self._send_dac_ofs(self.ed_dac_ofs.text())
         else:
@@ -2697,6 +2722,7 @@ class MainWindow(QMainWindow):
         self._send_order_one("ORD7",  self.cb_order7)
         self._send_order_one("ORDDC", self.cb_orderdc)
         self._send_dac_mode()
+        self._send_dac_wave()
         self._send_dac_amp(self.ed_dac_amp.text())
         self._send_dac_ofs(self.ed_dac_ofs.text())
 

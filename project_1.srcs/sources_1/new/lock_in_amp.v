@@ -116,6 +116,7 @@ wire signed [27:0] sweep_thres_w, lock_x_thres_w;
 wire [2:0]         dac_src_mode_w;     // 0..6 = 振荡器1..7
 wire [15:0]        dac_amp_w;         // 幅度 16bit, 65535=满幅
 wire signed [13:0] dac_ofs_w;         // 偏置 (DAC 有符号码)
+wire               dac_wave_sel_w;    // DWAV: 0=正弦, 1=方波
 
 // =========================================================================
 // ★ AD 数据接收
@@ -666,20 +667,24 @@ lockin_psd #(.IN_WIDTH(28), .USE_LUT_CIC(1)) u_psd_ch3_osc7 (
 //
 //   DMOD: 0..6 = 振荡器1..7 (与解调参考同源、同频同相)
 //   DAMP: 16bit 幅度系数, 65535=本振满幅;  DOFS: 14bit 有符号码偏置
+//   DWAV: 0=正弦, 1=方波 (取所选本振符号位, 同频同相, 边沿对齐 65 MHz 采样时钟)
 // =========================================================================
 reg [2:0]         dac_src_mode_r;
 reg [15:0]        dac_amp_r;
 reg signed [13:0] dac_ofs_r;
+reg               dac_wave_sel_r;
 
 always @(posedge clk_65M or negedge sys_rst_n) begin
     if (!sys_rst_n) begin
         dac_src_mode_r <= 3'd0;
         dac_amp_r      <= 16'd65535;
         dac_ofs_r      <= 14'sd0;
+        dac_wave_sel_r <= 1'b0;
     end else begin
         dac_src_mode_r <= dac_src_mode_w;
         dac_amp_r      <= dac_amp_w;
         dac_ofs_r      <= dac_ofs_w;
+        dac_wave_sel_r <= dac_wave_sel_w;
     end
 end
 
@@ -692,7 +697,11 @@ wire signed [13:0] dac_ref_sin =
     (dac_src_mode_r == 3'd6) ? osc_ref_sin_7  :
                                osc_ref_sin_21;
 
-wire signed [29:0] dac_prod   = $signed(dac_ref_sin) * $signed({1'b0, dac_amp_r});
+// 方波幅度取 ±8191 (正弦本振峰值附近), 同样受 DAMP/DOFS 控制
+wire signed [13:0] dac_ref_sq  = dac_ref_sin[13] ? -14'sd8191 : 14'sd8191;
+wire signed [13:0] dac_ref_sel = dac_wave_sel_r ? dac_ref_sq : dac_ref_sin;
+
+wire signed [29:0] dac_prod   = $signed(dac_ref_sel) * $signed({1'b0, dac_amp_r});
 wire signed [27:0] dac_sum28  = (dac_prod >>> 16) + $signed({{14{dac_ofs_r[13]}}, dac_ofs_r});
 
 reg signed [13:0] dac_clip;
@@ -959,6 +968,7 @@ usb_commend u_usb_commend (
     .dac_src_mode  (dac_src_mode_w),
     .dac_amp       (dac_amp_w),
     .dac_ofs       (dac_ofs_w),
+    .dac_wave_sel  (dac_wave_sel_w),
     .send_en(send_en),
     .send_data(send_data)
 );

@@ -111,6 +111,7 @@ module usb_commend(
     output reg [2:0]         dac_src_mode,    // DMOD 命令
     output reg [15:0]        dac_amp,         // DAMP: 幅度 16bit, 65535=满幅
     output reg signed [13:0] dac_ofs,         // DOFS: 偏置 (DAC 有符号码)
+    output reg               dac_wave_sel,    // DWAV: 0=正弦, 1=方波 (所选振荡器本振的符号)
     output reg send_en,
     output reg [7:0] send_data
 );
@@ -188,6 +189,7 @@ module usb_commend(
     parameter CMD_TAU7    = 7'd64;
     parameter CMD_FRQ7    = 7'd65;
     parameter CMD_ORD7    = 7'd66;
+    parameter CMD_DWAV    = 7'd67;   // DAC 波形: 0=正弦, 1=方波
 
     reg [2:0] curr_state;
     // 发应答期间 FSM 不处理 rec_done, 此时读出的命令字节会丢失
@@ -347,6 +349,7 @@ module usb_commend(
             dac_src_mode <= 3'd0;
             dac_amp      <= 16'd65535;
             dac_ofs      <= 14'sd0;
+            dac_wave_sel <= 1'b0;
             // ???PLL ?????????????????(????, ???????????????????
             sweep_thres  <= 28'd100_000;   // |dc_y| > 100K ?????LOCK
             lock_x_thres <= 28'd300_000;   // LOCK ?????? |dc_x| ??> 300K ????
@@ -467,6 +470,11 @@ module usb_commend(
                             end
                             else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "O" && cmd_buffer[2] == "F" && cmd_buffer[3] == "S" && rec_data == ":") begin
                                 cmd_type <= CMD_DOFS;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "W" && cmd_buffer[2] == "A" && cmd_buffer[3] == "V" && rec_data == ":") begin
+                                cmd_type <= CMD_DWAV;
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
                             end
@@ -833,6 +841,9 @@ module usb_commend(
                             end
                             else if (cmd_type == CMD_DOFS) begin
                                 dac_ofs <= $signed(value_buffer[13:0]);
+                            end
+                            else if (cmd_type == CMD_DWAV) begin
+                                dac_wave_sel <= value_buffer[0];
                             end
                             //  ? 振荡器谐波系 ? (n,m  ? 0..255)
                             else if (cmd_type == CMD_OSC1) begin
