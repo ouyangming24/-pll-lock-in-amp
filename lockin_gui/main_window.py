@@ -37,12 +37,13 @@ from PyQt5.QtWidgets import (
 
 from device import (
     LockinDevice, UdpLockinDevice, MockDevice, list_serial_ports,
-    hz_to_freq_word, FIELD_NAMES, F_CLK, FRAME_LEN, SAMPLE_TICK_S,
+    hz_to_freq_word, FIELD_NAMES, F_CLK, FRAME_LEN, SAMPLE_TICK_S, FPGA_IP,
 )
 from stress_calc import (
     StressInputs, ChannelVoltages, StressCalib, StressResult,
     compute_stress, format_stress_report,
 )
+from scope_window import ScopeWindow
 
 # ============================================================================
 # 配置
@@ -513,8 +514,8 @@ class MainWindow(QMainWindow):
         if self._demo_mode:
             self.on_log("[+] 通信模式: DEMO (离线模拟)")
         elif self._udp_mode:
-            self.on_log("[+] 通信模式: UDP 数据 + 串口命令 "
-                        "(需 FPGA 已启用 eth_lockin_top; 当前工程默认未启用)")
+            self.on_log(f"[+] 通信模式: 以太网 UDP (命令 + 数据), FPGA {FPGA_IP}, "
+                        "PC 网卡需设 192.168.99.100/24")
         else:
             self.on_log("[+] 通信模式: 串口 (FT245 USB, 命令+数据; 需点「开始数据流」发 XYOUT)")
 
@@ -561,6 +562,12 @@ class MainWindow(QMainWindow):
         )
         self.cb_csv_rate.currentIndexChanged.connect(self._on_csv_rate_changed)
         top_bar.addWidget(self.cb_csv_rate)
+        top_bar.addSpacing(20)
+        self.btn_scope = QPushButton("示波器 V5/V6")
+        self.btn_scope.setToolTip("打开示波器窗口: AD7606C 通道 V5 / V6 的真实波形 (1 MSa/s, 1024 点)")
+        self.btn_scope.clicked.connect(self._on_scope_clicked)
+        top_bar.addWidget(self.btn_scope)
+        self._scope_win: ScopeWindow | None = None
         top_bar.addStretch()
         if isinstance(self.dev, MockDevice):
             mode_text, mode_color = "DEMO 模式", "#ff9"
@@ -2508,6 +2515,10 @@ class MainWindow(QMainWindow):
 
     # ============================================================ 事件处理
     def _refresh_ports(self):
+        if isinstance(self.dev, UdpLockinDevice):
+            self.port_combo.clear()
+            self.port_combo.addItem(f"以太网 {FPGA_IP}")
+            return
         ports = list_serial_ports()
         cur = self.port_combo.currentText()
         self.port_combo.clear()
@@ -2516,11 +2527,13 @@ class MainWindow(QMainWindow):
             self.port_combo.setCurrentText(cur)
 
     def on_connect_clicked(self):
-        if self.dev.is_connected:
+        if self.dev.is_connected or getattr(self.dev, "is_connecting", False):
             self.dev.disconnect()
         else:
             port = self.port_combo.currentText()
             self.dev.connect(port)
+            if getattr(self.dev, "is_connecting", False):
+                self.btn_connect.setText("取消连接")
 
     def on_conn_changed(self, connected: bool):
         if connected:
@@ -2549,8 +2562,17 @@ class MainWindow(QMainWindow):
             self.panel_ch1.header.update(0.0, False)
             self.panel_ch2.header.update(0.0, False)
 
+    def _on_scope_clicked(self):
+        if self._scope_win is None:
+            self._scope_win = ScopeWindow(self.dev, self)
+        self._scope_win.show()
+        self._scope_win.raise_()
+        self._scope_win.activateWindow()
+
     def on_stream_clicked(self):
         if self.dev.is_streaming:
+            if self._scope_win is not None:
+                self._scope_win.stop()
             self.dev.stop_streaming()
             self.btn_stream.setText("开始数据流")
             self.btn_record.setEnabled(False)

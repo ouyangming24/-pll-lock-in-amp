@@ -1,0 +1,812 @@
+"""
+device.py
+─────────
+设备抽象层:
+  - LockinDevice    : 真实 FPGA 通信 (FT245BL VCP 模式, pyserial), 上下行都走串口
+  - UdpLockinDevice : ★ 新版 ★ 命令走 FT245 串口, 数据走以太网 UDP
+                     (FPGA PL 端千兆 RGMII 直接发 UDP, 见 docs/ethernet_migration_plan.md)
+  - MockDevice      : 离线模拟器, 产生伪锁相数据 (用于无硬件时调试 GUI)
+
+三个类都是 QObject, 发出相同的 Qt 信号供 main_window 订阅:
+  - frame_received(dict)
+  - scope_received(dict)   示波器包 (V5/V6 整段波形; UDP 模式不支持)
+  - log_message(str)
+  - connection_changed(bool)
+  - cmd_response(str)
+"""
+
+import binascii
+import math
+import socket
+import struct
+import threading
+import time
+from collections import deque
+from random import gauss
+
+import numpy as np
+import serial
+import serial.tools.list_ports
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+
+# ============================================================================
+# 协议常量 (帧协议 v2, 见 docs/帧协议v2_时间戳与CRC.md)
+# ============================================================================
+SYNC_HEADER = b"\xA5\x5A\xA5\x5A"
+FRAME_LEN = 178                   # 4 sync + 19i + 3i + 2Q + 1i + 7Q + 2I + CRC16
+FRAME_DATA_LEN = FRAME_LEN - 2    # CRC 覆盖的字节数 (含同步头)
+F_CLK = 65_000_000                # DDS 时钟 (Hz)
+PHASE_BITS = 48                   # DDS 相位累加器位宽
+CIC_DECIM = 65                    # CIC 抽取比, sample_cnt 每 CIC_DECIM 个 F_CLK 周期 +1
+SAMPLE_TICK_S = CIC_DECIM / F_CLK  # sample_cnt 1 LSB 对应的秒数 (标称 1 µs)
+
+# 数据字段名 (顺序必须与 lock_in_amp.v 的打包顺序一致)
+FIELD_NAMES = [
+    "ch1_x", "ch1_y",
+    "ch2_x", "ch2_y",
+    "ch3_x_21", "ch3_y_21",
+    "ch3_x_12", "ch3_y_12",
+    "ch3_x_11", "ch3_y_11",
+    "ch3_x_osc4", "ch3_y_osc4",
+    "ch3_x_osc5", "ch3_y_osc5",
+    "ch3_x_osc6", "ch3_y_osc6",
+    "ch3_x_osc7", "ch3_y_osc7",
+    "ch3_dc",
+    "adc_ch1", "adc_ch2", "adc_ch3",
+    "pll_freq_ch1_word", "pll_freq_ch2_word",
+    "lock_flags",
+    # ★ 诊断回读: 七路 PSD 实际生效的参考频率字
+    "ref_word_21", "ref_word_12", "ref_word_11",
+    "ref_word_osc4", "ref_word_osc5", "ref_word_osc6", "ref_word_osc7",
+    # ★ v2: FPGA 采样时间戳 (1 MHz 节拍计数) + 帧序号
+    "sample_cnt", "frame_seq",
+]
+
+# struct 格式: 19 int32 + 3 int32 + 2 uint64 + 1 int32 + 7 uint64 + 2 uint32 (大端)
+# 不含同步头与末尾 CRC16
+FRAME_FMT = ">19i3iQQi7QII"
+
+# 示波器包 (usb_commend.v SCAP 命令触发): 16 字节包头 + N×{V5,V6 int16} + CRC16
+#   包头: sync(4) N(H) pre(H) decim(H) flags(B) 0(B) seq(I)
+#   flags = {4'd0, 触发模式[2:0], 强制触发}
+SCOPE_SYNC = b"\xA5\x5A\x5A\xA5"
+SCOPE_HDR_LEN = 16
+SCOPE_HDR_FMT = ">HHHBBI"
+SCOPE_MAX_N = 8192
+SCOPE_ADC_HZ = 1_000_000          # AD7606C 采样率 (65 MHz / 65)
+SCOPE_V_PER_LSB = 10.0 / 32768    # ±10 V 量程, 16 bit 补码
+
+
+# ============================================================================
+# 工具函数
+# ============================================================================
+def hz_to_freq_word(hz: float) -> int:
+    """物理频率 (Hz) → DDS 频率字 (48 bit 整数)"""
+    return int(round(hz * (1 << PHASE_BITS) / F_CLK)) & ((1 << PHASE_BITS) - 1)
+
+
+def freq_word_to_hz(word: int) -> float:
+    """DDS 频率字 → 物理频率 (Hz)"""
+    return word * F_CLK / (1 << PHASE_BITS)
+
+
+def list_serial_ports() -> list:
+    """枚举系统所有可用串口"""
+    return [p.device for p in serial.tools.list_ports.comports()]
+
+
+def frame_crc(buf: bytes) -> int:
+    """CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF), 与 usb_commend.v 一致"""
+    return binascii.crc_hqx(buf, 0xFFFF)
+
+
+def parse_frame(buf: bytes) -> dict:
+    """大端解析 FRAME_LEN 字节帧 → 数据字典 (额外提供解析后的 Hz/lock 值)
+
+    同步头不对或 CRC 不符时抛 ValueError (半帧 / 字节损坏都在这里被拦下).
+    """
+    if len(buf) != FRAME_LEN:
+        raise ValueError("帧长度错误")
+    if buf[:4] != SYNC_HEADER:
+        raise ValueError("同步头不匹配")
+    if frame_crc(buf[:FRAME_DATA_LEN]) != int.from_bytes(buf[FRAME_DATA_LEN:], "big"):
+        raise ValueError("CRC 错误")
+    vals = struct.unpack(FRAME_FMT, buf[4:FRAME_DATA_LEN])
+    data = dict(zip(FIELD_NAMES, vals))
+    # 派生量, 方便 GUI 使用
+    data["pll_freq_ch1_hz"] = freq_word_to_hz(data["pll_freq_ch1_word"])
+    data["pll_freq_ch2_hz"] = freq_word_to_hz(data["pll_freq_ch2_word"])
+    # ★ 诊断: 三路参考频率字 → Hz (硬件实际生效值)
+    data["ref_hz_21"] = freq_word_to_hz(data["ref_word_21"])
+    data["ref_hz_12"] = freq_word_to_hz(data["ref_word_12"])
+    data["ref_hz_11"] = freq_word_to_hz(data["ref_word_11"])
+    data["ref_hz_osc4"] = freq_word_to_hz(data["ref_word_osc4"])
+    data["ref_hz_osc5"] = freq_word_to_hz(data["ref_word_osc5"])
+    data["ref_hz_osc6"] = freq_word_to_hz(data["ref_word_osc6"])
+    data["ref_hz_osc7"] = freq_word_to_hz(data["ref_word_osc7"])
+    data["locked_ch1"] = bool(data["lock_flags"] & 0x1)
+    data["locked_ch2"] = bool(data["lock_flags"] & 0x2)
+    data["timestamp"] = time.time()
+    return data
+
+
+def scope_packet_len(buf: bytes) -> int | None:
+    """buf 以 SCOPE_SYNC 开头; 包头未收全返回 None, 包头不合理抛 ValueError"""
+    if len(buf) < SCOPE_HDR_LEN:
+        return None
+    n, pre, _decim, _flags, _rsv, _seq = struct.unpack(SCOPE_HDR_FMT, buf[4:SCOPE_HDR_LEN])
+    if n < 16 or n > SCOPE_MAX_N or (n & (n - 1)) or pre >= n:
+        raise ValueError("示波器包头不合理")
+    return SCOPE_HDR_LEN + 4 * n + 2
+
+
+def parse_scope_packet(buf: bytes) -> dict:
+    """完整示波器包 → {n, pre, decim, mode, forced, seq, dt, a, b} (a/b 为 int16 码值数组)"""
+    n_bytes = scope_packet_len(buf)
+    if n_bytes is None or len(buf) != n_bytes:
+        raise ValueError("示波器包长度错误")
+    body = n_bytes - 2
+    if frame_crc(buf[:body]) != int.from_bytes(buf[body:], "big"):
+        raise ValueError("示波器包 CRC 错误")
+    n, pre, decim, flags, _rsv, seq = struct.unpack(SCOPE_HDR_FMT, buf[4:SCOPE_HDR_LEN])
+    smp = np.frombuffer(buf, dtype=">i2", count=2 * n, offset=SCOPE_HDR_LEN).reshape(n, 2)
+    return {
+        "n": n, "pre": pre, "decim": decim,
+        "mode": (flags >> 1) & 0x7, "forced": bool(flags & 1), "seq": seq,
+        "dt": (decim + 1) / SCOPE_ADC_HZ,
+        "a": smp[:, 0].astype(np.int32),
+        "b": smp[:, 1].astype(np.int32),
+        "timestamp": time.time(),
+    }
+
+
+# ============================================================================
+# 帧流跟踪: FPGA 采样时间戳展开 + 帧序号丢帧/重复检测
+# ============================================================================
+class FrameTracker:
+    """用帧内 sample_cnt / frame_seq 给每帧定时并统计丢帧.
+
+    - timestamp   = 首帧到达的 PC 时间 + (sample_cnt 展开值 - 首帧值) × SAMPLE_TICK_S
+                    → 时间轴来自 FPGA 采样时刻, 不受 USB 成批交付影响
+    - fpga_time_s = 相对首帧的 FPGA 时间 (s)
+    - sample_cnt 32bit 约 71 分钟回绕, 这里自动展开; 倒退 (FPGA 复位) 则重新起算
+    - frame_seq 跳号累计到 lost, 与上一帧相同则判为重复帧 (返回 False 丢弃)
+    """
+
+    def __init__(self):
+        self.lost = 0
+        self.duplicates = 0
+        self._t0 = None
+        self._s0 = 0
+        self._last_cnt = 0
+        self._unwrapped = 0
+        self._last_seq = None
+
+    def update(self, d: dict) -> bool:
+        cnt, seq = d["sample_cnt"], d["frame_seq"]
+
+        if self._last_seq is not None:
+            dseq = (seq - self._last_seq) & 0xFFFFFFFF
+            if dseq == 0:
+                self.duplicates += 1
+                return False
+            if dseq < 0x80000000:
+                self.lost += dseq - 1
+        self._last_seq = seq
+
+        if self._t0 is None:
+            self._rebase(cnt)
+        else:
+            dcnt = (cnt - self._last_cnt) & 0xFFFFFFFF
+            if dcnt >= 0x80000000:
+                self._rebase(cnt)          # 计数倒退: FPGA 复位或重新上电
+            else:
+                self._unwrapped += dcnt
+                self._last_cnt = cnt
+
+        rel = (self._unwrapped - self._s0) * SAMPLE_TICK_S
+        d["fpga_time_s"] = rel
+        d["timestamp"] = self._t0 + rel
+        return True
+
+    def _rebase(self, cnt: int):
+        self._t0 = time.time()
+        self._last_cnt = cnt
+        self._unwrapped = cnt
+        self._s0 = cnt
+
+
+# ============================================================================
+# 真实设备 (FT245BL VCP 模式)
+# ============================================================================
+class LockinDevice(QObject):
+    frame_received = pyqtSignal(dict)
+    scope_received = pyqtSignal(dict)
+    log_message = pyqtSignal(str)
+    connection_changed = pyqtSignal(bool)
+    cmd_response = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.ser: serial.Serial | None = None
+        self._streaming = False
+        self._thread: threading.Thread | None = None
+        self._cmd_lock = threading.Lock()
+        self._tracker = FrameTracker()
+        self._crc_errors = 0
+        self._scope_errors = 0
+
+    @property
+    def bad_frames(self) -> int:
+        """CRC 校验失败 (含半帧) 被丢弃的帧数"""
+        return self._crc_errors
+
+    @property
+    def bad_scope_packets(self) -> int:
+        """CRC 校验失败被丢弃的示波器包数"""
+        return self._scope_errors
+
+    @property
+    def lost_frames(self) -> int:
+        """按 frame_seq 跳号统计的丢帧数 (含 CRC 丢弃的帧)"""
+        return self._tracker.lost
+
+    # --- 连接管理 ----------------------------------------------------------
+    def connect(self, port: str, baud: int = 3_000_000) -> bool:
+        try:
+            self.ser = serial.Serial(port, baud, timeout=0.05)
+            self.connection_changed.emit(True)
+            self.log_message.emit(f"[+] 已连接 {port} @ {baud}")
+            return True
+        except Exception as e:
+            self.log_message.emit(f"[!] 连接失败: {e}")
+            return False
+
+    def disconnect(self):
+        self.stop_streaming()
+        if self.ser:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+            self.ser = None
+        self.connection_changed.emit(False)
+        self.log_message.emit("[+] 已断开")
+
+    @property
+    def is_connected(self) -> bool:
+        return self.ser is not None and self.ser.is_open
+
+    # --- 命令收发 ----------------------------------------------------------
+    def send_command(self, cmd: str, quiet: bool = False) -> str:
+        """发送一条 ASCII 命令, 返回 FPGA 应答字符串
+
+        quiet: 流模式下不写日志 (示波器连续重触发用, 避免刷屏)
+
+        ⚠ 关键:
+        - 流模式下 *只能* write, 不能在主线程 read,
+          否则会与 _rx_loop 后台线程并发 read 同一串口,
+          在 Windows 上会触发 pyserial overlapped I/O 崩溃 (闪退).
+        - 非流模式下 (start_streaming 之前 / stop 之后) 才能 read 响应.
+        """
+        if not self.is_connected:
+            self.log_message.emit(f"[!] 未连接, 无法发送: {cmd}")
+            return ""
+        # 写串口本身是线程安全的 (pyserial 允许 1 写 + 1 读),
+        # 用锁只是为了序列化多个 send_command 调用 (例如"一键下发").
+        with self._cmd_lock:
+            try:
+                self.ser.write((cmd + "\r\n").encode("ascii"))
+            except Exception as e:
+                self.log_message.emit(f"[!] 发送异常: {e}")
+                return ""
+
+        if self._streaming:
+            # 流模式: 不读响应 (响应字节会被 _rx_loop 当作非同步头数据丢弃, 这是 OK 的)
+            if not quiet:
+                self.log_message.emit(f"  >> {cmd}")
+            return ""
+
+        # 非流模式: 安全读取响应
+        try:
+            time.sleep(0.05)
+            resp = self.ser.read(256).decode("ascii", errors="replace").strip()
+            self.log_message.emit(f"  >> {cmd:18s} ← {resp}")
+            self.cmd_response.emit(resp)
+            return resp
+        except Exception as e:
+            self.log_message.emit(f"[!] 读响应异常: {e}")
+            return ""
+
+    # --- 数据流 ------------------------------------------------------------
+    def start_streaming(self):
+        if self._streaming:
+            return
+        self.send_command("XYOUT")
+        self._tracker = FrameTracker()
+        self._crc_errors = 0
+        self._streaming = True
+        self._thread = threading.Thread(target=self._rx_loop, daemon=True)
+        self._thread.start()
+        self.log_message.emit("[+] 数据流已启动")
+
+    def stop_streaming(self):
+        if not self._streaming:
+            return
+        # 1) 先置标志, 让 rx_loop 在下一次循环退出
+        self._streaming = False
+        # 2) ⚠ 必须先 join rx 线程, 再发 "stop" 命令 -- 否则 send_command
+        #    与 rx_loop 同时 read 同一串口, Windows 上会触发 overlapped I/O 崩溃.
+        if self._thread:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+        # 3) 现在 rx 线程已退出, 主线程独占串口, 安全地发 stop 并读取响应
+        if self.is_connected:
+            self.send_command("stop")
+        self.log_message.emit(
+            f"[+] 数据流已停止 (CRC 坏帧 {self._crc_errors}, 丢帧 {self._tracker.lost}, "
+            f"重复帧 {self._tracker.duplicates})")
+
+    @property
+    def is_streaming(self) -> bool:
+        return self._streaming
+
+    def _rx_loop(self):
+        """后台线程: 持续从串口读取并解析 FRAME_LEN 字节数据帧.
+
+        本线程是唯一允许从串口 read 的线程. send_command 在流模式下
+        只 write 不 read, 以避免与本线程并发 read 导致 Windows
+        overlapped I/O 崩溃.
+        """
+        buf = b""
+        try:
+            while self._streaming and self.ser:
+                try:
+                    chunk = self.ser.read(512)
+                except Exception as e:
+                    if self._streaming:
+                        self.log_message.emit(f"[!] 接收异常: {e}")
+                    break
+                if not chunk:
+                    continue
+                buf += chunk
+                # 搜帧, 一次可能搜到多帧; 数据帧与示波器包按先出现者处理
+                while True:
+                    idx = buf.find(SYNC_HEADER)
+                    sidx = buf.find(SCOPE_SYNC)
+                    if sidx >= 0 and (idx < 0 or sidx < idx):
+                        try:
+                            need = scope_packet_len(buf[sidx:])
+                        except ValueError:
+                            buf = buf[sidx + 1:]
+                            continue
+                        if need is None or len(buf) - sidx < need:
+                            break
+                        try:
+                            pkt = parse_scope_packet(buf[sidx:sidx + need])
+                        except ValueError:
+                            self._scope_errors += 1
+                            buf = buf[sidx + 1:]
+                            continue
+                        buf = buf[sidx + need:]
+                        self.scope_received.emit(pkt)
+                        continue
+                    if idx < 0 or len(buf) - idx < FRAME_LEN:
+                        break
+                    try:
+                        data = parse_frame(buf[idx:idx + FRAME_LEN])
+                    except ValueError:
+                        # 半帧 (被命令打断) / 字节损坏 / 同步头碰撞:
+                        # 只跳过这个同步头, 从下一字节重新找, 不吞掉后面的真帧
+                        self._crc_errors += 1
+                        buf = buf[idx + 1:]
+                        continue
+                    buf = buf[idx + FRAME_LEN:]
+                    if self._tracker.update(data):
+                        self.frame_received.emit(data)
+                # 丢掉第一个同步头之前的无用字节 (命令应答等), 让 buf 只留待收全的一包
+                starts = [i for i in (buf.find(SYNC_HEADER), buf.find(SCOPE_SYNC)) if i >= 0]
+                buf = buf[min(starts):] if starts else buf[-3:]
+                if len(buf) > 65536:
+                    buf = buf[-32768:]
+        finally:
+            # 即使被异常打断, 也确保流标志被清掉
+            self._streaming = False
+
+
+# ============================================================================
+# 以太网 UDP 设备 (FPGA PL 端 千兆 RGMII 直接发 UDP)
+#   - 数据通道: UDP socket, 监听 7777 端口
+#   - 命令通道: 仍走 FT245 串口 (FPGA 端 usb_commend 模块没有 UDP 输入)
+#   - 一旦 FPGA 端实现 UDP 命令解析, 就可以彻底甩掉 USB
+# ============================================================================
+UDP_LISTEN_IP   = "0.0.0.0"     # 监听所有网卡
+UDP_LISTEN_PORT = 7777          # 与 eth_lockin_top.v 的 DEST_PORT 一致
+UDP_RECV_BUFSZ  = 1 << 20       # 1 MiB socket 内核缓冲
+UDP_SOCK_TIMEOUT = 0.5          # recvfrom 超时 (s), 让 rx 线程能定期检查退出标志
+
+
+class UdpLockinDevice(QObject):
+    """命令走 FT245 串口, 数据走以太网 UDP (FPGA PL 端千兆 RGMII)"""
+    frame_received = pyqtSignal(dict)
+    scope_received = pyqtSignal(dict)      # 示波器包只走 FT245, 本模式不发出
+    log_message = pyqtSignal(str)
+    connection_changed = pyqtSignal(bool)
+    cmd_response = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.ser: serial.Serial | None = None
+        self.sock: socket.socket | None = None
+        self._streaming = False
+        self._thread: threading.Thread | None = None
+        self._cmd_lock = threading.Lock()
+        self._stat_total = 0       # 已收帧数
+        self._stat_bad   = 0       # 解析失败帧数 (同步头/CRC)
+        self._tracker = FrameTracker()
+
+    @property
+    def bad_frames(self) -> int:
+        return self._stat_bad
+
+    @property
+    def lost_frames(self) -> int:
+        return self._tracker.lost
+
+    # --- 连接管理 ----------------------------------------------------------
+    def connect(self, port: str, baud: int = 3_000_000) -> bool:
+        """打开命令串口 + 创建 UDP socket. 任意一步失败都回滚."""
+        # 1) 命令串口
+        try:
+            self.ser = serial.Serial(port, baud, timeout=0.05)
+        except Exception as e:
+            self.log_message.emit(f"[!] 命令串口 {port} 打开失败: {e}")
+            return False
+
+        # 2) UDP socket
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, UDP_RECV_BUFSZ)
+            # SO_REUSEADDR 让程序异常退出后, 端口能立刻被重新 bind
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind((UDP_LISTEN_IP, UDP_LISTEN_PORT))
+            self.sock.settimeout(UDP_SOCK_TIMEOUT)
+        except Exception as e:
+            self.log_message.emit(f"[!] UDP 监听 {UDP_LISTEN_PORT} 失败: {e}")
+            # 回滚串口
+            try: self.ser.close()
+            except Exception: pass
+            self.ser = None
+            self.sock = None
+            return False
+
+        self.connection_changed.emit(True)
+        self.log_message.emit(
+            f"[+] 命令串口 {port} 已打开; UDP 监听 {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}")
+        return True
+
+    def disconnect(self):
+        self.stop_streaming()
+        if self.ser:
+            try: self.ser.close()
+            except Exception: pass
+            self.ser = None
+        if self.sock:
+            try: self.sock.close()
+            except Exception: pass
+            self.sock = None
+        self.connection_changed.emit(False)
+        self.log_message.emit("[+] 已断开")
+
+    @property
+    def is_connected(self) -> bool:
+        # UDP 模式下, "连接" 等价于 "命令串口已开 + UDP socket 已绑定"
+        return (self.ser is not None and self.ser.is_open
+                and self.sock is not None)
+
+    # --- 命令收发 (走 FT245 串口) -----------------------------------------
+    def send_command(self, cmd: str, quiet: bool = False) -> str:
+        """UDP 模式下命令走串口, 数据走 UDP, 没有 read 冲突,
+        所以可以直接 write + 读响应 (不用像 LockinDevice 那样区分流模式).
+        """
+        if not self.is_connected:
+            self.log_message.emit(f"[!] 未连接, 无法发送: {cmd}")
+            return ""
+        with self._cmd_lock:
+            try:
+                self.ser.write((cmd + "\r\n").encode("ascii"))
+                time.sleep(0.05)
+                resp = self.ser.read(256).decode("ascii", errors="replace").strip()
+                self.log_message.emit(f"  >> {cmd:18s} ← {resp}")
+                self.cmd_response.emit(resp)
+                return resp
+            except Exception as e:
+                self.log_message.emit(f"[!] 命令异常: {e}")
+                return ""
+
+    # --- 数据流 (走 UDP socket) -------------------------------------------
+    def start_streaming(self):
+        """UDP 端不需要发 XYOUT — FPGA 端 udp_lockin_tx 是被
+        dc_valid 自动触发的, 上电后就一直在发包. 我们只要打开
+        socket 接收就行.
+        """
+        if self._streaming or not self.sock:
+            return
+        self._streaming = True
+        self._stat_total = 0
+        self._stat_bad   = 0
+        self._tracker = FrameTracker()
+        self._thread = threading.Thread(target=self._rx_loop, daemon=True)
+        self._thread.start()
+        self.log_message.emit("[+] UDP 数据流已启动")
+
+    def stop_streaming(self):
+        if not self._streaming:
+            return
+        self._streaming = False
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        self.log_message.emit(
+            f"[+] UDP 数据流已停止 (共收 {self._stat_total} 帧, "
+            f"解析失败 {self._stat_bad}, 丢帧 {self._tracker.lost})")
+
+    @property
+    def is_streaming(self) -> bool:
+        return self._streaming
+
+    def _rx_loop(self):
+        """后台线程: 持续 recvfrom UDP, 每个 datagram 必为 FRAME_LEN 字节一帧."""
+        try:
+            while self._streaming and self.sock:
+                try:
+                    payload, _addr = self.sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    # socket 被 close 时这里会抛, 直接退出
+                    break
+                except Exception as e:
+                    if self._streaming:
+                        self.log_message.emit(f"[!] UDP 接收异常: {e}")
+                    break
+
+                self._stat_total += 1
+                try:
+                    data = parse_frame(payload)
+                except ValueError:
+                    self._stat_bad += 1
+                    continue
+                if self._tracker.update(data):
+                    self.frame_received.emit(data)
+        finally:
+            self._streaming = False
+
+
+# ============================================================================
+# 模拟设备 (用于无板子开发)
+# ============================================================================
+class MockDevice(QObject):
+    frame_received = pyqtSignal(dict)
+    scope_received = pyqtSignal(dict)
+    log_message = pyqtSignal(str)
+    connection_changed = pyqtSignal(bool)
+    cmd_response = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._connected = False
+        self._streaming = False
+        self._t0 = time.time()
+        self._frame_id = 0
+        # 内部状态(被命令修改)
+        self.params = {
+            "KP": 500, "KI": 50,
+            "TAU1X": 20, "TAU1Y": 8,
+            "TAU2X": 20, "TAU2Y": 8,
+            # 通道3 六路谐波 X/Y 共用 TC
+            "TAU21": 2, "TAU12": 2, "TAU11": 2,
+            "TAU4": 2, "TAU5": 2, "TAU6": 2, "TAU7": 2,
+            "TAUDC": 2,
+            "PHAS": 0,
+            "FRQ2": hz_to_freq_word(50000),
+            "FRQ3": hz_to_freq_word(40000),
+            "FRQ21": hz_to_freq_word(160_000),
+            "FRQ12": hz_to_freq_word(170_000),
+            "FRQ11": hz_to_freq_word(110_000),
+            "FRQ4": hz_to_freq_word(150_000),
+            "FRQ5": hz_to_freq_word(180_000),
+            "FRQ6": hz_to_freq_word(220_000),
+            "FRQ7": hz_to_freq_word(200_000),
+            "LOCKSWY": 100_000,
+            "LOCKTHX": 300_000,
+            "REFMODE": 1,
+            "OSC1": (2 << 8) | 1,
+            "OSC2": (1 << 8) | 2,
+            "OSC3": (1 << 8) | 1,
+            "OSC4": (3 << 8) | 0,
+            "OSC5": (0 << 8) | 3,
+            "OSC6": (2 << 8) | 2,
+            "OSC7": (4 << 8) | 0,
+            "OSRC1": 0, "OSRC2": 0, "OSRC3": 0,
+            "OSRC4": 0, "OSRC5": 0, "OSRC6": 0, "OSRC7": 0,
+            "OHN1": 1, "OHN2": 1, "OHN3": 1,
+            "OHN4": 1, "OHN5": 1, "OHN6": 1, "OHN7": 1,
+            "ORD21": 1, "ORD12": 1, "ORD11": 1,
+            "ORD4": 1, "ORD5": 1, "ORD6": 1, "ORD7": 1,
+            "ORDDC": 1,
+            "DMOD":  0,
+            "DAMP":  65535,
+            "DOFS":  0,
+        }
+        # 模拟数据生成定时器 (~50 fps; 真实硬件帧率 ≤ 10 fps, 这里足够看动效)
+        self._timer = QTimer()
+        self._timer.timeout.connect(self._gen_frame)
+        self._timer.setInterval(20)
+
+    def connect(self, port: str = "DEMO", baud: int = 0) -> bool:
+        self._connected = True
+        self.connection_changed.emit(True)
+        self.log_message.emit("[+] 离线模拟模式 已启动")
+        return True
+
+    def disconnect(self):
+        self.stop_streaming()
+        self._connected = False
+        self.connection_changed.emit(False)
+        self.log_message.emit("[+] 模拟器已关闭")
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def send_command(self, cmd: str, quiet: bool = False) -> str:
+        # 模拟命令解析 (不对参数做严格校验)
+        if cmd in ("XYOUT", "stop"):
+            ok = "Command Success!"
+        else:
+            try:
+                key, val = cmd.split(":")
+                self.params[key] = int(val)
+                ok = "Command Success!"
+                if key == "SCAP":
+                    QTimer.singleShot(15, self._gen_scope)
+            except Exception:
+                ok = "Command Error!"
+        if not quiet:
+            self.log_message.emit(f"  >> {cmd:18s} ← {ok}  (mock)")
+        self.cmd_response.emit(ok)
+        return ok
+
+    def _gen_scope(self, n: int = 1024, pre: int = 128):
+        """模拟一包示波器数据: V5 = 50 kHz 正弦, V6 = 60 kHz 正弦 + 2 次谐波, 按 SCAP 触发"""
+        if not self._streaming:
+            return
+        mode_word = self.params.get("SCAP", 0)
+        mode, normal = mode_word & 0x7, bool(mode_word & 0x8)
+        decim = self.params.get("SDEC", 0)
+        level = self.params.get("STLV", 32768) - 32768
+        dt = (decim + 1) / SCOPE_ADC_HZ
+        t = (np.arange(4 * n) + np.random.uniform(0, 1e5)) * dt
+        lsb = 1 / SCOPE_V_PER_LSB
+        a = 3.0 * np.sin(2 * np.pi * 50e3 * t) * lsb
+        b = (2.0 * np.sin(2 * np.pi * 60e3 * t + 0.7)
+             + 0.5 * np.sin(2 * np.pi * 120e3 * t)) * lsb
+        a = np.clip(a + np.random.normal(0, 30, a.size), -32768, 32767).astype(np.int32)
+        b = np.clip(b + np.random.normal(0, 30, b.size), -32768, 32767).astype(np.int32)
+
+        start, forced = 0, False
+        if mode in (1, 2, 3, 4):
+            src = a if mode in (1, 2) else b
+            if mode in (1, 3):
+                hit = (src[pre:-1] < level) & (src[pre + 1:] >= level)
+            else:
+                hit = (src[pre:-1] > level) & (src[pre + 1:] <= level)
+            idx = np.flatnonzero(hit[:2 * n])
+            if idx.size:
+                start = int(idx[0]) + 1
+            elif normal:
+                return
+            else:
+                forced = True
+        self._scope_seq = getattr(self, "_scope_seq", 0) + 1
+        self.scope_received.emit({
+            "n": n, "pre": pre, "decim": decim, "mode": mode, "forced": forced,
+            "seq": self._scope_seq, "dt": dt,
+            "a": a[start:start + n], "b": b[start:start + n],
+            "timestamp": time.time(),
+        })
+
+    def start_streaming(self):
+        if self._streaming or not self._connected:
+            return
+        self._streaming = True
+        self._t0 = time.time()
+        self._timer.start()
+        self.log_message.emit("[+] 模拟数据流已启动")
+
+    def stop_streaming(self):
+        if not self._streaming:
+            return
+        self._streaming = False
+        self._timer.stop()
+        self.log_message.emit("[+] 模拟数据流已停止")
+
+    @property
+    def is_streaming(self) -> bool:
+        return self._streaming
+
+    def _gen_frame(self):
+        """生成一帧伪数据 (与硬件帧字段一致)"""
+        t = time.time() - self._t0
+        amp_drift = 1.0 + 0.05 * math.sin(2 * math.pi * 0.05 * t)
+        noise = lambda s: int(gauss(0, s))
+
+        ch1_amp = 8e6 * amp_drift
+        ch2_amp = 5e6 * amp_drift
+
+        # 模拟 PLL 锁定: 启动 2 秒内未锁定, 之后锁定
+        locked_ch1 = t > 2.0
+        locked_ch2 = t > 2.5
+        f1_hz = 50000.0 + 0.5 * math.sin(t * 0.3) if locked_ch1 else 49000 + 500 * t
+        f2_hz = 40000.0 + 0.3 * math.sin(t * 0.4) if locked_ch2 else 39000 + 500 * t
+
+        # 模拟 ADC 原始波形 (PC 帧率下的快照, 看上去是慢正弦)
+        adc1_raw = int(8000 * math.sin(2 * math.pi * 5 * t)) + noise(200)
+        adc2_raw = int(6000 * math.sin(2 * math.pi * 7 * t + 0.5)) + noise(200)
+        adc3_raw = int(7000 * math.sin(2 * math.pi * 11 * t)
+                       + 3000 * math.sin(2 * math.pi * 17 * t)) + noise(300)
+        # 截到 14 bit 范围 (-8192..+8191)
+        clip14 = lambda v: max(-8192, min(8191, v))
+
+        data = {
+            "ch1_x":     int(ch1_amp * math.cos(0.3)) + noise(50_000),
+            "ch1_y":     int(ch1_amp * math.sin(0.3)) + noise(50_000),
+            "ch2_x":     int(ch2_amp * math.cos(0.6)) + noise(40_000),
+            "ch2_y":     int(ch2_amp * math.sin(0.6)) + noise(40_000),
+            "ch3_x_21":  int(2e6   * math.cos(t * 0.8)) + noise(30_000),
+            "ch3_y_21":  int(2e6   * math.sin(t * 0.8)) + noise(30_000),
+            "ch3_x_12":  int(1.5e6 * math.cos(t * 1.1)) + noise(25_000),
+            "ch3_y_12":  int(1.5e6 * math.sin(t * 1.1)) + noise(25_000),
+            "ch3_x_11":  int(3e6   * math.cos(t * 0.5)) + noise(40_000),
+            "ch3_y_11":  int(3e6   * math.sin(t * 0.5)) + noise(40_000),
+            "ch3_x_osc4": int(1.2e6 * math.cos(t * 0.7)) + noise(25_000),
+            "ch3_y_osc4": int(1.2e6 * math.sin(t * 0.7)) + noise(25_000),
+            "ch3_x_osc5": int(1.1e6 * math.cos(t * 0.9)) + noise(25_000),
+            "ch3_y_osc5": int(1.1e6 * math.sin(t * 0.9)) + noise(25_000),
+            "ch3_x_osc6": int(1.0e6 * math.cos(t * 1.3)) + noise(25_000),
+            "ch3_y_osc6": int(1.0e6 * math.sin(t * 1.3)) + noise(25_000),
+            "ch3_x_osc7": int(0.9e6 * math.cos(t * 1.5)) + noise(25_000),
+            "ch3_y_osc7": int(0.9e6 * math.sin(t * 1.5)) + noise(25_000),
+            "ch3_dc":    int(5e5 + 1e5 * math.sin(t * 0.2)) + noise(20_000),
+            "adc_ch1":   clip14(adc1_raw),
+            "adc_ch2":   clip14(adc2_raw),
+            "adc_ch3":   clip14(adc3_raw),
+            "pll_freq_ch1_word": hz_to_freq_word(f1_hz),
+            "pll_freq_ch2_word": hz_to_freq_word(f2_hz),
+            "lock_flags":  (1 if locked_ch1 else 0) | (2 if locked_ch2 else 0),
+            "ref_word_21": hz_to_freq_word(2 * f1_hz + f2_hz),
+            "ref_word_12": hz_to_freq_word(f1_hz + 2 * f2_hz),
+            "ref_word_11": hz_to_freq_word(f1_hz + f2_hz),
+            "ref_word_osc4": hz_to_freq_word(3 * f1_hz),
+            "ref_word_osc5": hz_to_freq_word(3 * f2_hz),
+            "ref_word_osc6": hz_to_freq_word(2 * f1_hz + 2 * f2_hz),
+            "ref_word_osc7": hz_to_freq_word(4 * f1_hz),
+            "pll_freq_ch1_hz": f1_hz,
+            "pll_freq_ch2_hz": f2_hz,
+            "ref_hz_21": 2 * f1_hz + f2_hz,
+            "ref_hz_12": f1_hz + 2 * f2_hz,
+            "ref_hz_11": f1_hz + f2_hz,
+            "ref_hz_osc4": 3 * f1_hz,
+            "ref_hz_osc5": 3 * f2_hz,
+            "ref_hz_osc6": 2 * f1_hz + 2 * f2_hz,
+            "ref_hz_osc7": 4 * f1_hz,
+            "locked_ch1": locked_ch1,
+            "locked_ch2": locked_ch2,
+            "sample_cnt": int(t / SAMPLE_TICK_S) & 0xFFFFFFFF,
+            "frame_seq": self._frame_id & 0xFFFFFFFF,
+            "fpga_time_s": t,
+            "timestamp": time.time(),
+        }
+        self._frame_id += 1
+        self.frame_received.emit(data)

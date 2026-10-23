@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Fri Oct 16 11:50:49 2026" VIVADOVERSION="2025.1">
+<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Fri Oct 23 10:49:48 2026" VIVADOVERSION="2025.1">
 
   <SYSTEMINFO ARCH="zynq" DEVICE="7z020" NAME="design_1" PACKAGE="clg484" SPEEDGRADE="-2"/>
 
@@ -109,54 +109,49 @@
         <CONNECTION INSTANCE="processing_system7_0" PORT="PS_SRSTB"/>
       </CONNECTIONS>
     </PORT>
-    <PORT CLKFREQUENCY="100000000" DIR="O" NAME="adc_clk_0" SIGIS="clk" SIGNAME="lock_in_amp_0_adc_clk">
+    <PORT DIR="I" NAME="ad_busy_0" SIGIS="undef" SIGNAME="External_Ports_ad_busy_0">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_clk"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ad_busy"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="O" NAME="adc_clk_2_0" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_clk_2">
+    <PORT DIR="O" NAME="ad_convst_0" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_convst">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_clk_2"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ad_convst"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="I" LEFT="13" NAME="adc_data_0" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_adc_data_0">
+    <PORT DIR="O" NAME="ad_cs_n_0" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_cs_n">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_data"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ad_cs_n"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="I" LEFT="13" NAME="adc_data_2_0" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_adc_data_2_0">
+    <PORT DIR="IO" LEFT="15" NAME="ad_db_0" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_ad_db_0">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_data_2"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ad_db"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="O" NAME="adc_oeb_b_0" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_oeb_b">
+    <PORT DIR="I" NAME="ad_frstdata_0" SIGIS="undef" SIGNAME="External_Ports_ad_frstdata_0">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_oeb_b"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ad_frstdata"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="O" NAME="adc_oeb_b_2_0" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_oeb_b_2">
+    <PORT DIR="O" LEFT="2" NAME="ad_os_0" RIGHT="0" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_os">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_oeb_b_2"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ad_os"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="I" NAME="adc_otr_0" SIGIS="undef" SIGNAME="External_Ports_adc_otr_0">
+    <PORT DIR="O" NAME="ad_rd_n_0" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_rd_n">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_otr"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ad_rd_n"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="I" NAME="adc_otr_2_0" SIGIS="undef" SIGNAME="External_Ports_adc_otr_2_0">
+    <PORT DIR="O" NAME="ad_reset_0" POLARITY="ACTIVE_LOW" SIGIS="rst" SIGNAME="lock_in_amp_0_ad_reset">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_otr_2"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ad_reset"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="O" NAME="adc_pdn_0" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_pdn">
+    <PORT DIR="O" NAME="ad_wr_n_0" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_wr_n">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_pdn"/>
-      </CONNECTIONS>
-    </PORT>
-    <PORT DIR="O" NAME="adc_pdn_2_0" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_pdn_2">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="adc_pdn_2"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ad_wr_n"/>
       </CONNECTIONS>
     </PORT>
     <PORT DIR="O" LEFT="13" NAME="da_data_0" RIGHT="0" SIGIS="undef" SIGNAME="lock_in_amp_0_da_data">
@@ -174,29 +169,59 @@
         <CONNECTION INSTANCE="lock_in_amp_0" PORT="dac_pd"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="IO" LEFT="7" NAME="ft_d_0" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_ft_d_0">
+    <PORT DIR="O" NAME="eth_mdc_0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_mdc">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ft_d"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_mdc"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="O" NAME="ft_rd_n_0" SIGIS="undef" SIGNAME="lock_in_amp_0_ft_rd_n">
+    <PORT DIR="IO" NAME="eth_mdio_0" SIGIS="undef" SIGNAME="External_Ports_eth_mdio_0">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ft_rd_n"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_mdio"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="I" NAME="ft_rxf_n_0" SIGIS="undef" SIGNAME="External_Ports_ft_rxf_n_0">
+    <PORT DIR="O" NAME="eth_nrst_0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_nrst">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ft_rxf_n"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_nrst"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="I" NAME="ft_txe_n_0" SIGIS="undef" SIGNAME="External_Ports_ft_txe_n_0">
+    <PORT DIR="I" NAME="eth_rxc_0" SIGIS="undef" SIGNAME="External_Ports_eth_rxc_0">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ft_txe_n"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_rxc"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="O" NAME="ft_wr_0" SIGIS="undef" SIGNAME="lock_in_amp_0_ft_wr">
+    <PORT DIR="I" NAME="eth_rxctl_0" SIGIS="undef" SIGNAME="External_Ports_eth_rxctl_0">
       <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="ft_wr"/>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_rxctl"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="I" LEFT="3" NAME="eth_rxd_0" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_eth_rxd_0">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_rxd"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="eth_txc_0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txc">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_txc"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="eth_txctl_0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txctl">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_txctl"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" LEFT="3" NAME="eth_txd_0" RIGHT="0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txd">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_txd"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="pl_led1_0" SIGIS="undef" SIGNAME="lock_in_amp_0_pl_led1">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="pl_led1"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="pl_led2_0" SIGIS="undef" SIGNAME="lock_in_amp_0_pl_led2">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="pl_led2"/>
       </CONNECTIONS>
     </PORT>
     <PORT CLKFREQUENCY="50000000" DIR="I" NAME="sys_clk_0" SIGIS="clk" SIGNAME="External_Ports_sys_clk_0">
@@ -266,54 +291,49 @@
         <PARAMETER NAME="EDK_IPTYPE" VALUE="PERIPHERAL"/>
       </PARAMETERS>
       <PORTS>
-        <PORT CLKFREQUENCY="100000000" DIR="O" NAME="adc_clk" SIGIS="clk" SIGNAME="lock_in_amp_0_adc_clk">
+        <PORT DIR="I" NAME="ad_busy" SIGIS="undef" SIGNAME="External_Ports_ad_busy_0">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_clk_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="ad_busy_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="O" NAME="adc_clk_2" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_clk_2">
+        <PORT DIR="O" NAME="ad_convst" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_convst">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_clk_2_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="ad_convst_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="I" LEFT="13" NAME="adc_data" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_adc_data_0">
+        <PORT DIR="O" NAME="ad_cs_n" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_cs_n">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_data_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="ad_cs_n_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="I" LEFT="13" NAME="adc_data_2" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_adc_data_2_0">
+        <PORT DIR="IO" LEFT="15" NAME="ad_db" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_ad_db_0">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_data_2_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="ad_db_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="O" NAME="adc_oeb_b" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_oeb_b">
+        <PORT DIR="I" NAME="ad_frstdata" SIGIS="undef" SIGNAME="External_Ports_ad_frstdata_0">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_oeb_b_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="ad_frstdata_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="O" NAME="adc_oeb_b_2" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_oeb_b_2">
+        <PORT DIR="O" LEFT="2" NAME="ad_os" RIGHT="0" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_os">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_oeb_b_2_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="ad_os_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="I" NAME="adc_otr" SIGIS="undef" SIGNAME="External_Ports_adc_otr_0">
+        <PORT DIR="O" NAME="ad_rd_n" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_rd_n">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_otr_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="ad_rd_n_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="I" NAME="adc_otr_2" SIGIS="undef" SIGNAME="External_Ports_adc_otr_2_0">
+        <PORT DIR="O" NAME="ad_reset" POLARITY="ACTIVE_LOW" SIGIS="rst" SIGNAME="lock_in_amp_0_ad_reset">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_otr_2_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="ad_reset_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="O" NAME="adc_pdn" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_pdn">
+        <PORT DIR="O" NAME="ad_wr_n" SIGIS="undef" SIGNAME="lock_in_amp_0_ad_wr_n">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_pdn_0"/>
-          </CONNECTIONS>
-        </PORT>
-        <PORT DIR="O" NAME="adc_pdn_2" SIGIS="undef" SIGNAME="lock_in_amp_0_adc_pdn_2">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="adc_pdn_2_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="ad_wr_n_0"/>
           </CONNECTIONS>
         </PORT>
         <PORT DIR="O" LEFT="13" NAME="da_data" RIGHT="0" SIGIS="undef" SIGNAME="lock_in_amp_0_da_data">
@@ -331,29 +351,59 @@
             <CONNECTION INSTANCE="External_Ports" PORT="dac_pd_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="IO" LEFT="7" NAME="ft_d" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_ft_d_0">
+        <PORT DIR="O" NAME="eth_mdc" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_mdc">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="ft_d_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="eth_mdc_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="O" NAME="ft_rd_n" SIGIS="undef" SIGNAME="lock_in_amp_0_ft_rd_n">
+        <PORT DIR="IO" NAME="eth_mdio" SIGIS="undef" SIGNAME="External_Ports_eth_mdio_0">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="ft_rd_n_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="eth_mdio_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="I" NAME="ft_rxf_n" SIGIS="undef" SIGNAME="External_Ports_ft_rxf_n_0">
+        <PORT DIR="O" NAME="eth_nrst" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_nrst">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="ft_rxf_n_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="eth_nrst_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="I" NAME="ft_txe_n" SIGIS="undef" SIGNAME="External_Ports_ft_txe_n_0">
+        <PORT DIR="I" NAME="eth_rxc" SIGIS="undef" SIGNAME="External_Ports_eth_rxc_0">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="ft_txe_n_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="eth_rxc_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="O" NAME="ft_wr" SIGIS="undef" SIGNAME="lock_in_amp_0_ft_wr">
+        <PORT DIR="I" NAME="eth_rxctl" SIGIS="undef" SIGNAME="External_Ports_eth_rxctl_0">
           <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="ft_wr_0"/>
+            <CONNECTION INSTANCE="External_Ports" PORT="eth_rxctl_0"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="I" LEFT="3" NAME="eth_rxd" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_eth_rxd_0">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="eth_rxd_0"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="eth_txc" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txc">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="eth_txc_0"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="eth_txctl" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txctl">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="eth_txctl_0"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" LEFT="3" NAME="eth_txd" RIGHT="0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txd">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="eth_txd_0"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="pl_led1" SIGIS="undef" SIGNAME="lock_in_amp_0_pl_led1">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="pl_led1_0"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="pl_led2" SIGIS="undef" SIGNAME="lock_in_amp_0_pl_led2">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="pl_led2_0"/>
           </CONNECTIONS>
         </PORT>
         <PORT CLKFREQUENCY="50000000" DIR="I" NAME="sys_clk" SIGIS="clk" SIGNAME="External_Ports_sys_clk_0">

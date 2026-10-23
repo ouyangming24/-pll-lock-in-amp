@@ -2,7 +2,7 @@
 //Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
 //--------------------------------------------------------------------------------
 //Tool Version: Vivado v.2025.1 (win64) Build 6140274 Thu May 22 00:12:29 MDT 2025
-//Date        : Fri Oct 16 11:50:49 2026
+//Date        : Fri Oct 23 10:49:48 2026
 //Host        : DESKTOP-PEDBCMF running 64-bit major release  (build 9200)
 //Command     : generate_target design_1_wrapper.bd
 //Design      : design_1_wrapper
@@ -32,24 +32,29 @@ module design_1_wrapper
     FIXED_IO_ps_clk,
     FIXED_IO_ps_porb,
     FIXED_IO_ps_srstb,
-    adc_clk_0,
-    adc_clk_2_0,
-    adc_data_0,
-    adc_data_2_0,
-    adc_oeb_b_0,
-    adc_oeb_b_2_0,
-    adc_otr_0,
-    adc_otr_2_0,
-    adc_pdn_0,
-    adc_pdn_2_0,
+    ad_busy_0,
+    ad_convst_0,
+    ad_cs_n_0,
+    ad_db_0,
+    ad_frstdata_0,
+    ad_os_0,
+    ad_rd_n_0,
+    ad_reset_0,
+    ad_wr_n_0,
     da_data_0,
     dac_clk_0,
     dac_pd_0,
-    ft_d_0,
-    ft_rd_n_0,
-    ft_rxf_n_0,
-    ft_txe_n_0,
-    ft_wr_0,
+    eth_mdc_0,
+    eth_mdio_0,
+    eth_nrst_0,
+    eth_rxc_0,
+    eth_rxctl_0,
+    eth_rxd_0,
+    eth_txc_0,
+    eth_txctl_0,
+    eth_txd_0,
+    pl_led1_0,
+    pl_led2_0,
     sys_clk_0,
     sys_rst_n_0);
   inout [14:0]DDR_addr;
@@ -73,24 +78,29 @@ module design_1_wrapper
   inout FIXED_IO_ps_clk;
   inout FIXED_IO_ps_porb;
   inout FIXED_IO_ps_srstb;
-  output adc_clk_0;
-  output adc_clk_2_0;
-  input [13:0]adc_data_0;
-  input [13:0]adc_data_2_0;
-  output adc_oeb_b_0;
-  output adc_oeb_b_2_0;
-  input adc_otr_0;
-  input adc_otr_2_0;
-  output adc_pdn_0;
-  output adc_pdn_2_0;
+  input ad_busy_0;
+  output ad_convst_0;
+  output ad_cs_n_0;
+  inout [15:0]ad_db_0;
+  input ad_frstdata_0;
+  output [2:0]ad_os_0;
+  output ad_rd_n_0;
+  output ad_reset_0;
+  output ad_wr_n_0;
   output [13:0]da_data_0;
   output dac_clk_0;
   output dac_pd_0;
-  inout [7:0]ft_d_0;
-  output ft_rd_n_0;
-  input ft_rxf_n_0;
-  input ft_txe_n_0;
-  output ft_wr_0;
+  output eth_mdc_0;
+  inout eth_mdio_0;
+  output eth_nrst_0;
+  input eth_rxc_0;
+  input eth_rxctl_0;
+  input [3:0]eth_rxd_0;
+  output eth_txc_0;
+  output eth_txctl_0;
+  output [3:0]eth_txd_0;
+  output pl_led1_0;
+  output pl_led2_0;
   input sys_clk_0;
   input sys_rst_n_0;
 
@@ -115,24 +125,29 @@ module design_1_wrapper
   wire FIXED_IO_ps_clk;
   wire FIXED_IO_ps_porb;
   wire FIXED_IO_ps_srstb;
-  wire adc_clk_0;
-  wire adc_clk_2_0;
-  wire [13:0]adc_data_0;
-  wire [13:0]adc_data_2_0;
-  wire adc_oeb_b_0;
-  wire adc_oeb_b_2_0;
-  wire adc_otr_0;
-  wire adc_otr_2_0;
-  wire adc_pdn_0;
-  wire adc_pdn_2_0;
+  wire ad_busy_0;
+  wire ad_convst_0;
+  wire ad_cs_n_0;
+  wire [15:0]ad_db_0;
+  wire ad_frstdata_0;
+  wire [2:0]ad_os_0;
+  wire ad_rd_n_0;
+  wire ad_reset_0;
+  wire ad_wr_n_0;
   wire [13:0]da_data_0;
   wire dac_clk_0;
   wire dac_pd_0;
-  wire [7:0]ft_d_0;
-  wire ft_rd_n_0;
-  wire ft_rxf_n_0;
-  wire ft_txe_n_0;
-  wire ft_wr_0;
+  wire eth_mdc_0;
+  wire eth_mdio_0;
+  wire eth_nrst_0;
+  wire eth_rxc_0;
+  wire eth_rxctl_0;
+  wire [3:0]eth_rxd_0;
+  wire eth_txc_0;
+  wire eth_txctl_0;
+  wire [3:0]eth_txd_0;
+  wire pl_led1_0;
+  wire pl_led2_0;
   wire sys_clk_0;
   wire sys_rst_n_0;
 
@@ -158,24 +173,29 @@ module design_1_wrapper
         .FIXED_IO_ps_clk(FIXED_IO_ps_clk),
         .FIXED_IO_ps_porb(FIXED_IO_ps_porb),
         .FIXED_IO_ps_srstb(FIXED_IO_ps_srstb),
-        .adc_clk_0(adc_clk_0),
-        .adc_clk_2_0(adc_clk_2_0),
-        .adc_data_0(adc_data_0),
-        .adc_data_2_0(adc_data_2_0),
-        .adc_oeb_b_0(adc_oeb_b_0),
-        .adc_oeb_b_2_0(adc_oeb_b_2_0),
-        .adc_otr_0(adc_otr_0),
-        .adc_otr_2_0(adc_otr_2_0),
-        .adc_pdn_0(adc_pdn_0),
-        .adc_pdn_2_0(adc_pdn_2_0),
+        .ad_busy_0(ad_busy_0),
+        .ad_convst_0(ad_convst_0),
+        .ad_cs_n_0(ad_cs_n_0),
+        .ad_db_0(ad_db_0),
+        .ad_frstdata_0(ad_frstdata_0),
+        .ad_os_0(ad_os_0),
+        .ad_rd_n_0(ad_rd_n_0),
+        .ad_reset_0(ad_reset_0),
+        .ad_wr_n_0(ad_wr_n_0),
         .da_data_0(da_data_0),
         .dac_clk_0(dac_clk_0),
         .dac_pd_0(dac_pd_0),
-        .ft_d_0(ft_d_0),
-        .ft_rd_n_0(ft_rd_n_0),
-        .ft_rxf_n_0(ft_rxf_n_0),
-        .ft_txe_n_0(ft_txe_n_0),
-        .ft_wr_0(ft_wr_0),
+        .eth_mdc_0(eth_mdc_0),
+        .eth_mdio_0(eth_mdio_0),
+        .eth_nrst_0(eth_nrst_0),
+        .eth_rxc_0(eth_rxc_0),
+        .eth_rxctl_0(eth_rxctl_0),
+        .eth_rxd_0(eth_rxd_0),
+        .eth_txc_0(eth_txc_0),
+        .eth_txctl_0(eth_txctl_0),
+        .eth_txd_0(eth_txd_0),
+        .pl_led1_0(pl_led1_0),
+        .pl_led2_0(pl_led2_0),
         .sys_clk_0(sys_clk_0),
         .sys_rst_n_0(sys_rst_n_0));
 endmodule

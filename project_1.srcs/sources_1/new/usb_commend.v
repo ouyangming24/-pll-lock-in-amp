@@ -29,8 +29,24 @@
 //      [172..175] frame_seq  uint32  锁存一帧快照 +1
 //      [176..177] CRC16      CRC-16/CCITT-FALSE, 覆盖 [0..175]
 //  详见 docs/帧协议v2_时间戳与CRC.md
+//
+//  示波器 (scope_cap, AD7606C V5/V6):
+//      SDEC:<n>          抽取: 每 n+1 个 ADC 样点存 1 点 (0 = 1 MSPS)
+//      STLV:<v>          触发电平, 偏移码: v = 补码电平 + 32768
+//      SCAP:<m>          启动一次抓取, [2:0] 0=立即 1=V5↑ 2=V5↓ 3=V6↑ 4=V6↓,
+//                        [3] 1=正常模式 (不超时强制触发)
+//  抓完后插在数据帧之间上传一包 (大端), 抓取期间数据帧照常:
+//      [0..3]   0xA5_5A_5A_A5  同步头 (与数据帧 0xA55AA55A 区分)
+//      [4..5]   点数 N          [6..7]  预触发点数 (触发样点下标)
+//      [8..9]   抽取 n          [10]    {4'd0, 触发模式[2:0], 强制触发}
+//      [11]     0               [12..15] 包序号 uint32
+//      [16..]   N × {V5 int16, V6 int16}
+//      末尾 2 字节 CRC16 (覆盖前面全部字节, 算法同数据帧)
 // =============================================================================
-module usb_commend(
+module usb_commend #(
+    parameter SCOPE_AW  = 10,          // 与 scope_cap.AW 一致
+    parameter SCOPE_PRE = 128          // 与 scope_cap.PRE 一致
+)(
     input wire clk,
     input wire rst_n,
     input wire [7:0] rec_data,
@@ -112,18 +128,34 @@ module usb_commend(
     output reg [15:0]        dac_amp,         // DAMP: 幅度 16bit, 65535=满幅
     output reg signed [13:0] dac_ofs,         // DOFS: 偏置 (DAC 有符号码)
     output reg               dac_wave_sel,    // DWAV: 0=正弦, 1=方波 (所选振荡器本振的符号)
+    // 示波器抓取 (scope_cap)
+    output reg                 scope_arm,       // SCAP 收完一拍
+    output reg  [3:0]          scope_mode,      // [2:0] 触发模式, [3] 正常模式
+    output reg  [15:0]         scope_level,     // 补码
+    output reg  [15:0]         scope_decim,
+    input  wire                scope_done,
+    output reg                 scope_clear,     // 上传完一拍
+    input  wire                scope_forced,
+    input  wire [2:0]          scope_cap_mode,
+    input  wire [15:0]         scope_cap_decim,
+    output wire [SCOPE_AW-1:0] scope_rd_idx,
+    input  wire [31:0]         scope_rd_data,   // 读延迟 2 拍
     output reg send_en,
     output reg [7:0] send_data
 );
 
-    parameter IDLE = 3'd0;
-    parameter REC_CMD = 3'd1;
-    parameter REC_DATA = 3'd2;
-    parameter SEND_RESPONSE = 3'd3;
-    parameter WAIT_SEND = 3'd4;
-    parameter SEND_XYDATA = 3'd5;
-    parameter WAIT_XYDATA = 3'd6;
-    parameter WAIT_DELAY = 3'd7;
+    parameter IDLE = 4'd0;
+    parameter REC_CMD = 4'd1;
+    parameter REC_DATA = 4'd2;
+    parameter SEND_RESPONSE = 4'd3;
+    parameter WAIT_SEND = 4'd4;
+    parameter SEND_XYDATA = 4'd5;
+    parameter WAIT_XYDATA = 4'd6;
+    parameter WAIT_DELAY = 4'd7;
+    parameter SEND_SCOPE = 4'd8;
+    parameter WAIT_SCOPE = 4'd9;
+    parameter SCOPE_GAP  = 4'd10;   // 等示波器缓存读出 (2 拍延迟)
+    parameter SCOPE_END  = 4'd11;   // 等 scope_done 被清, 防止 IDLE 重复上传
 
     parameter CMD_FREQ    = 7'd1;
     parameter CMD_KP      = 7'd2;
@@ -190,10 +222,16 @@ module usb_commend(
     parameter CMD_FRQ7    = 7'd65;
     parameter CMD_ORD7    = 7'd66;
     parameter CMD_DWAV    = 7'd67;   // DAC 波形: 0=正弦, 1=方波
+    parameter CMD_SCAP    = 7'd68;   // 示波器: 启动一次抓取
+    parameter CMD_STLV    = 7'd69;   // 示波器: 触发电平 (偏移码)
+    parameter CMD_SDEC    = 7'd70;   // 示波器: 抽取
 
-    reg [2:0] curr_state;
-    // 发应答期间 FSM 不处理 rec_done, 此时读出的命令字节会丢失
-    assign rx_ready = (curr_state != SEND_RESPONSE) && (curr_state != WAIT_SEND);
+    reg [3:0] curr_state;
+    wire scope_tx = (curr_state == SEND_SCOPE) || (curr_state == WAIT_SCOPE)
+                 || (curr_state == SCOPE_GAP)  || (curr_state == SCOPE_END);
+    // 发应答 / 示波器包期间 FSM 不处理 rec_done, 此时读出的命令字节会丢失;
+    // 拉低 rx_ready 让命令字节留在 FT245 FIFO, 发完再读
+    assign rx_ready = (curr_state != SEND_RESPONSE) && (curr_state != WAIT_SEND) && !scope_tx;
     // 发帧中只有非 CR/LF 字节才算新命令开头: 上条命令的 "\n" 在应答期间被暂缓读取,
     // 应答后才读入, 若也打断帧会被当成下一条命令的首字符
     wire rec_cmd_start = rec_done && (rec_data != 8'h0D) && (rec_data != 8'h0A);
@@ -213,6 +251,20 @@ module usb_commend(
     // 帧 = 176 字节数据 (含同步头) + 2 字节 CRC (高字节在前)
     localparam [7:0] DATA_BYTES  = 8'd176;
     localparam [7:0] FRAME_BYTES = 8'd178;
+
+    // 示波器包 = 16 字节包头 + N×4 字节样点 + 2 字节 CRC
+    localparam [15:0] SC_N        = 16'd1 << SCOPE_AW;
+    localparam [15:0] SC_PRE      = SCOPE_PRE;
+    localparam [15:0] SC_DATA_END = 16'd16 + (SC_N << 2);
+    localparam [15:0] SC_TOTAL    = SC_DATA_END + 16'd2;
+
+    reg  [15:0] sc_cnt;
+    reg  [1:0]  sc_gap;
+    reg  [31:0] scope_seq;
+    wire [15:0] sc_off = sc_cnt - 16'd16;
+    assign scope_rd_idx = sc_off[SCOPE_AW+1:2];
+    wire [127:0] sc_hdr = {32'hA5_5A_5A_A5, SC_N, SC_PRE, scope_cap_decim,
+                           4'd0, scope_cap_mode, scope_forced, 8'd0, scope_seq};
 
     // CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, 不反射, 无异或输出
     // (与 Python binascii.crc_hqx(data, 0xFFFF) 一致)
@@ -350,6 +402,14 @@ module usb_commend(
             dac_amp      <= 16'd65535;
             dac_ofs      <= 14'sd0;
             dac_wave_sel <= 1'b0;
+            scope_arm    <= 1'b0;
+            scope_mode   <= 4'd0;
+            scope_level  <= 16'd0;
+            scope_decim  <= 16'd0;
+            scope_clear  <= 1'b0;
+            scope_seq    <= 32'd0;
+            sc_cnt       <= 16'd0;
+            sc_gap       <= 2'd0;
             // ???PLL ?????????????????(????, ???????????????????
             sweep_thres  <= 28'd100_000;   // |dc_y| > 100K ?????LOCK
             lock_x_thres <= 28'd300_000;   // LOCK ?????? |dc_x| ??> 300K ????
@@ -362,6 +422,8 @@ module usb_commend(
             delay_cnt <= 32'd0;
         end
         else begin
+            scope_arm   <= 1'b0;
+            scope_clear <= 1'b0;
             case (curr_state)
                 IDLE: begin
                     data_sending <= 1'b0;
@@ -377,6 +439,13 @@ module usb_commend(
                             cmd_cnt <= 4'd1;
                             curr_state <= REC_CMD;
                         end
+                    end
+                    else if (scope_done && !rx_pending) begin
+                        curr_state <= SEND_SCOPE;
+                        sc_cnt <= 16'd0;
+                        tx_crc <= 16'hFFFF;
+                        // 上传期间冻结数据帧快照, 不让 frame_seq 空跳
+                        data_sending <= 1'b1;
                     end
                     else if (xy_data_enable && new_data_ready && !rx_pending) begin
                         curr_state <= SEND_XYDATA;
@@ -477,6 +546,15 @@ module usb_commend(
                                 cmd_type <= CMD_DWAV;
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "S" && cmd_buffer[1] == "C" && cmd_buffer[2] == "A" && cmd_buffer[3] == "P" && rec_data == ":") begin
+                                cmd_type <= CMD_SCAP; value_buffer <= 48'd0; curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "S" && cmd_buffer[1] == "T" && cmd_buffer[2] == "L" && cmd_buffer[3] == "V" && rec_data == ":") begin
+                                cmd_type <= CMD_STLV; value_buffer <= 48'd0; curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "S" && cmd_buffer[1] == "D" && cmd_buffer[2] == "E" && cmd_buffer[3] == "C" && rec_data == ":") begin
+                                cmd_type <= CMD_SDEC; value_buffer <= 48'd0; curr_state <= REC_DATA;
                             end
                             //  ? 通道3 振荡器谐波系 ? OSC1/OSC2/OSC3 ( ?=[15:8]n,[7:0]m)
                             else if (cmd_buffer[0] == "O" && cmd_buffer[1] == "S" && cmd_buffer[2] == "C" && cmd_buffer[3] == "1" && rec_data == ":") begin
@@ -845,6 +923,16 @@ module usb_commend(
                             else if (cmd_type == CMD_DWAV) begin
                                 dac_wave_sel <= value_buffer[0];
                             end
+                            else if (cmd_type == CMD_SCAP) begin
+                                scope_mode <= value_buffer[3:0];
+                                scope_arm  <= 1'b1;
+                            end
+                            else if (cmd_type == CMD_STLV) begin
+                                scope_level <= {~value_buffer[15], value_buffer[14:0]};
+                            end
+                            else if (cmd_type == CMD_SDEC) begin
+                                scope_decim <= value_buffer[15:0];
+                            end
                             //  ? 振荡器谐波系 ? (n,m  ? 0..255)
                             else if (cmd_type == CMD_OSC1) begin
                                 osc1_n <= value_buffer[15:8];
@@ -1023,6 +1111,58 @@ module usb_commend(
                     end else begin
                         delay_cnt <= delay_cnt + 1'b1;
                     end
+                end
+
+                // 示波器包: 不被命令打断 (rx_ready=0, 命令字节留在 FT245 FIFO)
+                SEND_SCOPE: begin
+                    if (!send_en && !tx_done && !tx_busy) begin
+                        send_en <= 1'b1;
+                        if (sc_cnt < 16'd16)
+                            send_data <= sc_hdr[127 - sc_cnt[3:0]*8 -: 8];
+                        else if (sc_cnt < SC_DATA_END)
+                            case (sc_off[1:0])
+                                2'd0: send_data <= scope_rd_data[31:24];
+                                2'd1: send_data <= scope_rd_data[23:16];
+                                2'd2: send_data <= scope_rd_data[15:8];
+                                default: send_data <= scope_rd_data[7:0];
+                            endcase
+                        else if (sc_cnt == SC_DATA_END)
+                            send_data <= tx_crc[15:8];
+                        else
+                            send_data <= tx_crc[7:0];
+                        curr_state <= WAIT_SCOPE;
+                    end
+                end
+
+                WAIT_SCOPE: begin
+                    if (tx_done) begin
+                        send_en <= 1'b0;
+                        if (sc_cnt < SC_DATA_END)
+                            tx_crc <= crc16_ccitt_byte(tx_crc, send_data);
+                        if (sc_cnt < SC_TOTAL - 16'd1) begin
+                            sc_cnt <= sc_cnt + 16'd1;
+                            sc_gap <= 2'd0;
+                            curr_state <= SCOPE_GAP;
+                        end
+                        else begin
+                            sc_cnt <= 16'd0;
+                            scope_seq <= scope_seq + 32'd1;
+                            scope_clear <= 1'b1;
+                            curr_state <= SCOPE_END;
+                        end
+                    end
+                end
+
+                SCOPE_GAP: begin
+                    if (sc_gap == 2'd3)
+                        curr_state <= SEND_SCOPE;
+                    else
+                        sc_gap <= sc_gap + 2'd1;
+                end
+
+                SCOPE_END: begin
+                    data_sending <= 1'b0;
+                    curr_state <= IDLE;
                 end
 
                 default: curr_state <= IDLE;

@@ -1,7 +1,7 @@
 {
   "design": {
     "design_info": {
-      "boundary_crc": "0xADD5DE0ADA3CBA8A",
+      "boundary_crc": "0xACEACF21741D003A",
       "device": "xc7z020clg484-2",
       "gen_directory": "../../../../project_1.gen/sources_1/bd/design_1",
       "name": "design_1",
@@ -186,63 +186,6 @@
       }
     },
     "ports": {
-      "adc_clk_0": {
-        "type": "clk",
-        "direction": "O",
-        "parameters": {
-          "CLK_DOMAIN": {
-            "value": "design_1_lock_in_amp_0_0_adc_clk",
-            "value_src": "default_prop"
-          },
-          "FREQ_HZ": {
-            "value": "100000000",
-            "value_src": "default"
-          },
-          "FREQ_TOLERANCE_HZ": {
-            "value": "0",
-            "value_src": "default"
-          },
-          "INSERT_VIP": {
-            "value": "0",
-            "value_src": "default"
-          },
-          "PHASE": {
-            "value": "0.0",
-            "value_src": "default"
-          }
-        }
-      },
-      "adc_clk_2_0": {
-        "direction": "O"
-      },
-      "adc_data_0": {
-        "direction": "I",
-        "left": "13",
-        "right": "0"
-      },
-      "adc_data_2_0": {
-        "direction": "I",
-        "left": "13",
-        "right": "0"
-      },
-      "adc_oeb_b_0": {
-        "direction": "O"
-      },
-      "adc_oeb_b_2_0": {
-        "direction": "O"
-      },
-      "adc_otr_0": {
-        "direction": "I"
-      },
-      "adc_otr_2_0": {
-        "direction": "I"
-      },
-      "adc_pdn_0": {
-        "direction": "O"
-      },
-      "adc_pdn_2_0": {
-        "direction": "O"
-      },
       "da_data_0": {
         "direction": "O",
         "left": "13",
@@ -275,23 +218,6 @@
         }
       },
       "dac_pd_0": {
-        "direction": "O"
-      },
-      "ft_d_0": {
-        "direction": "IO",
-        "left": "7",
-        "right": "0"
-      },
-      "ft_rd_n_0": {
-        "direction": "O"
-      },
-      "ft_rxf_n_0": {
-        "direction": "I"
-      },
-      "ft_txe_n_0": {
-        "direction": "I"
-      },
-      "ft_wr_0": {
         "direction": "O"
       },
       "sys_rst_n_0": {
@@ -336,6 +262,85 @@
             "value_src": "default"
           }
         }
+      },
+      "ad_db_0": {
+        "direction": "IO",
+        "left": "15",
+        "right": "0"
+      },
+      "ad_convst_0": {
+        "direction": "O"
+      },
+      "ad_wr_n_0": {
+        "direction": "O"
+      },
+      "ad_rd_n_0": {
+        "direction": "O"
+      },
+      "ad_cs_n_0": {
+        "direction": "O"
+      },
+      "ad_reset_0": {
+        "type": "rst",
+        "direction": "O",
+        "parameters": {
+          "INSERT_VIP": {
+            "value": "0",
+            "value_src": "default"
+          },
+          "POLARITY": {
+            "value": "ACTIVE_LOW",
+            "value_src": "default"
+          }
+        }
+      },
+      "ad_os_0": {
+        "direction": "O",
+        "left": "2",
+        "right": "0"
+      },
+      "ad_busy_0": {
+        "direction": "I"
+      },
+      "ad_frstdata_0": {
+        "direction": "I"
+      },
+      "eth_rxc_0": {
+        "direction": "I"
+      },
+      "eth_rxctl_0": {
+        "direction": "I"
+      },
+      "eth_rxd_0": {
+        "direction": "I",
+        "left": "3",
+        "right": "0"
+      },
+      "eth_txc_0": {
+        "direction": "O"
+      },
+      "eth_txctl_0": {
+        "direction": "O"
+      },
+      "eth_txd_0": {
+        "direction": "O",
+        "left": "3",
+        "right": "0"
+      },
+      "eth_nrst_0": {
+        "direction": "O"
+      },
+      "eth_mdc_0": {
+        "direction": "O"
+      },
+      "eth_mdio_0": {
+        "direction": "IO"
+      },
+      "pl_led1_0": {
+        "direction": "O"
+      },
+      "pl_led2_0": {
+        "direction": "O"
       }
     },
     "components": {
@@ -836,56 +841,73 @@
               }
             }
           },
-          "adc_data": {
-            "direction": "I",
-            "left": "13",
-            "right": "0"
-          },
-          "adc_otr": {
-            "direction": "I"
-          },
-          "adc_pdn": {
-            "direction": "O"
-          },
-          "adc_oeb_b": {
-            "direction": "O"
-          },
-          "adc_clk": {
-            "type": "clk",
-            "direction": "O"
-          },
-          "adc_data_2": {
-            "direction": "I",
-            "left": "13",
-            "right": "0"
-          },
-          "adc_otr_2": {
-            "direction": "I"
-          },
-          "adc_pdn_2": {
-            "direction": "O"
-          },
-          "adc_oeb_b_2": {
-            "direction": "O"
-          },
-          "adc_clk_2": {
-            "direction": "O"
-          },
-          "ft_d": {
+          "ad_db": {
             "direction": "IO",
-            "left": "7",
+            "left": "15",
             "right": "0"
           },
-          "ft_rxf_n": {
-            "direction": "I"
-          },
-          "ft_rd_n": {
+          "ad_convst": {
             "direction": "O"
           },
-          "ft_txe_n": {
+          "ad_wr_n": {
+            "direction": "O"
+          },
+          "ad_rd_n": {
+            "direction": "O"
+          },
+          "ad_cs_n": {
+            "direction": "O"
+          },
+          "ad_reset": {
+            "type": "rst",
+            "direction": "O"
+          },
+          "ad_os": {
+            "direction": "O",
+            "left": "2",
+            "right": "0"
+          },
+          "ad_busy": {
             "direction": "I"
           },
-          "ft_wr": {
+          "ad_frstdata": {
+            "direction": "I"
+          },
+          "eth_rxc": {
+            "direction": "I"
+          },
+          "eth_rxctl": {
+            "direction": "I"
+          },
+          "eth_rxd": {
+            "direction": "I",
+            "left": "3",
+            "right": "0"
+          },
+          "eth_txc": {
+            "direction": "O"
+          },
+          "eth_txctl": {
+            "direction": "O"
+          },
+          "eth_txd": {
+            "direction": "O",
+            "left": "3",
+            "right": "0"
+          },
+          "eth_nrst": {
+            "direction": "O"
+          },
+          "eth_mdc": {
+            "direction": "O"
+          },
+          "eth_mdio": {
+            "direction": "IO"
+          },
+          "pl_led1": {
+            "direction": "O"
+          },
+          "pl_led2": {
             "direction": "O"
           },
           "dac_pd": {
@@ -926,82 +948,82 @@
       }
     },
     "nets": {
-      "Net1": {
+      "Net": {
         "ports": [
-          "ft_d_0",
-          "lock_in_amp_0/ft_d"
+          "ad_db_0",
+          "lock_in_amp_0/ad_db"
         ]
       },
-      "adc_data_0_1": {
+      "Net2": {
         "ports": [
-          "adc_data_0",
-          "lock_in_amp_0/adc_data"
+          "eth_mdio_0",
+          "lock_in_amp_0/eth_mdio"
         ]
       },
-      "adc_data_2_0_1": {
+      "ad_busy_0_1": {
         "ports": [
-          "adc_data_2_0",
-          "lock_in_amp_0/adc_data_2"
+          "ad_busy_0",
+          "lock_in_amp_0/ad_busy"
         ]
       },
-      "adc_otr_0_1": {
+      "ad_frstdata_0_1": {
         "ports": [
-          "adc_otr_0",
-          "lock_in_amp_0/adc_otr"
+          "ad_frstdata_0",
+          "lock_in_amp_0/ad_frstdata"
         ]
       },
-      "adc_otr_2_0_1": {
+      "eth_rxc_0_1": {
         "ports": [
-          "adc_otr_2_0",
-          "lock_in_amp_0/adc_otr_2"
+          "eth_rxc_0",
+          "lock_in_amp_0/eth_rxc"
         ]
       },
-      "ft_rxf_n_0_1": {
+      "eth_rxctl_0_1": {
         "ports": [
-          "ft_rxf_n_0",
-          "lock_in_amp_0/ft_rxf_n"
+          "eth_rxctl_0",
+          "lock_in_amp_0/eth_rxctl"
         ]
       },
-      "ft_txe_n_0_1": {
+      "eth_rxd_0_1": {
         "ports": [
-          "ft_txe_n_0",
-          "lock_in_amp_0/ft_txe_n"
+          "eth_rxd_0",
+          "lock_in_amp_0/eth_rxd"
         ]
       },
-      "lock_in_amp_0_adc_clk": {
+      "lock_in_amp_0_ad_convst": {
         "ports": [
-          "lock_in_amp_0/adc_clk",
-          "adc_clk_0"
+          "lock_in_amp_0/ad_convst",
+          "ad_convst_0"
         ]
       },
-      "lock_in_amp_0_adc_clk_2": {
+      "lock_in_amp_0_ad_cs_n": {
         "ports": [
-          "lock_in_amp_0/adc_clk_2",
-          "adc_clk_2_0"
+          "lock_in_amp_0/ad_cs_n",
+          "ad_cs_n_0"
         ]
       },
-      "lock_in_amp_0_adc_oeb_b": {
+      "lock_in_amp_0_ad_os": {
         "ports": [
-          "lock_in_amp_0/adc_oeb_b",
-          "adc_oeb_b_0"
+          "lock_in_amp_0/ad_os",
+          "ad_os_0"
         ]
       },
-      "lock_in_amp_0_adc_oeb_b_2": {
+      "lock_in_amp_0_ad_rd_n": {
         "ports": [
-          "lock_in_amp_0/adc_oeb_b_2",
-          "adc_oeb_b_2_0"
+          "lock_in_amp_0/ad_rd_n",
+          "ad_rd_n_0"
         ]
       },
-      "lock_in_amp_0_adc_pdn": {
+      "lock_in_amp_0_ad_reset": {
         "ports": [
-          "lock_in_amp_0/adc_pdn",
-          "adc_pdn_0"
+          "lock_in_amp_0/ad_reset",
+          "ad_reset_0"
         ]
       },
-      "lock_in_amp_0_adc_pdn_2": {
+      "lock_in_amp_0_ad_wr_n": {
         "ports": [
-          "lock_in_amp_0/adc_pdn_2",
-          "adc_pdn_2_0"
+          "lock_in_amp_0/ad_wr_n",
+          "ad_wr_n_0"
         ]
       },
       "lock_in_amp_0_da_data": {
@@ -1022,16 +1044,46 @@
           "dac_pd_0"
         ]
       },
-      "lock_in_amp_0_ft_rd_n": {
+      "lock_in_amp_0_eth_mdc": {
         "ports": [
-          "lock_in_amp_0/ft_rd_n",
-          "ft_rd_n_0"
+          "lock_in_amp_0/eth_mdc",
+          "eth_mdc_0"
         ]
       },
-      "lock_in_amp_0_ft_wr": {
+      "lock_in_amp_0_eth_nrst": {
         "ports": [
-          "lock_in_amp_0/ft_wr",
-          "ft_wr_0"
+          "lock_in_amp_0/eth_nrst",
+          "eth_nrst_0"
+        ]
+      },
+      "lock_in_amp_0_eth_txc": {
+        "ports": [
+          "lock_in_amp_0/eth_txc",
+          "eth_txc_0"
+        ]
+      },
+      "lock_in_amp_0_eth_txctl": {
+        "ports": [
+          "lock_in_amp_0/eth_txctl",
+          "eth_txctl_0"
+        ]
+      },
+      "lock_in_amp_0_eth_txd": {
+        "ports": [
+          "lock_in_amp_0/eth_txd",
+          "eth_txd_0"
+        ]
+      },
+      "lock_in_amp_0_pl_led1": {
+        "ports": [
+          "lock_in_amp_0/pl_led1",
+          "pl_led1_0"
+        ]
+      },
+      "lock_in_amp_0_pl_led2": {
+        "ports": [
+          "lock_in_amp_0/pl_led2",
+          "pl_led2_0"
         ]
       },
       "processing_system7_0_FCLK_CLK0": {

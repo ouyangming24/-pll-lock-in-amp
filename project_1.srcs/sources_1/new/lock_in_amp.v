@@ -16,42 +16,38 @@ module lock_in_amp(
     input                 sys_clk     ,
     input                 sys_rst_n   ,
 
-   //AD 芯片接口 (锁定通道1/2)
-   input   wire  [13:0]  adc_data    ,
-   input   wire          adc_otr     ,
-   output  wire          adc_pdn     ,
-   output  wire          adc_oeb_b   ,
-   output  wire          adc_clk     ,
+   // AD7606C-16 并口 (ACM7606C 模块 P3; V1..V4 → adc_ch1..4)
+   inout   wire  [15:0]  ad_db       ,
+   output  wire          ad_convst   ,   // P3-9  CONVSTA
+   output  wire          ad_wr_n     ,   // P3-3  CONVSTB (实为 WR, 拔掉跳线 H5)
+   output  wire          ad_rd_n     ,
+   output  wire          ad_cs_n     ,
+   output  wire          ad_reset    ,   // P3-6  RSET
+   output  wire  [2:0]   ad_os       ,
+   input   wire          ad_busy     ,
+   input   wire          ad_frstdata ,
 
-   //AD_2 芯片接口 (通道3 相敏检测)
-   input   wire  [13:0]  adc_data_2    ,
-   input   wire          adc_otr_2     ,
-   output  wire          adc_pdn_2     ,
-   output  wire          adc_oeb_b_2   ,
-   output  wire          adc_clk_2     ,
+   // FT245BL USB 接口 (已停用: 命令与数据全部改走以太网; 原引脚已被 AD7606C 占用)
+//   inout  wire [7:0] ft_d,
+//   input  wire       ft_rxf_n,
+//   output wire       ft_rd_n,
+//   input  wire       ft_txe_n,
+//   output wire       ft_wr,
 
-   // FT245BL USB 接口 (保留作为下行命令通道; 也可作为上行备份)
-   inout  wire [7:0] ft_d,
-   input  wire       ft_rxf_n,
-   output wire       ft_rd_n,
-   input  wire       ft_txe_n,
-   output wire       ft_wr,
+   // 千兆以太网 (RTL8211E, RGMII 接 PL 端), 50 MHz 基准时钟复用 sys_clk
+   input  wire       eth_rxc,
+   input  wire       eth_rxctl,
+   input  wire [3:0] eth_rxd,
+   output wire       eth_txc,
+   output wire       eth_txctl,
+   output wire [3:0] eth_txd,
+   output wire       eth_nrst,
+   output wire       eth_mdc,
+   inout  wire       eth_mdio,
 
-   // ★ 新增: 千兆以太网 (RTL8211E, RGMII 接 PL 端)
-   //   注: 50 MHz 基准时钟复用现有 sys_clk (XDC = M19)
-//   input  wire       eth_rxc,
-//   input  wire       eth_rxctl,
-//   input  wire [3:0] eth_rxd,
-//   output wire       eth_txc,
-//   output wire       eth_txctl,
-//   output wire [3:0] eth_txd,
-//   output wire       eth_nrst,
-//   output wire       eth_mdc,
-//   inout  wire       eth_mdio,
-
-//   // ★ 新增: PL LED 状态指示 (可选, 不接也行)
-//   output wire       pl_led1,    // 链路状态: 长亮=1G 已链上
-//   output wire       pl_led2,    // 帧丢失指示: 闪烁=有帧被丢弃
+   // PL LED: led1 慢闪 = 以太网 RX 时序扫描中, 常亮 = 已锁定; led2 闪 = 收命令 / 发 UDP 包
+   output wire       pl_led1,
+   output wire       pl_led2,
 
    // ★ 新增: 信号发生器 DAC904 接口
    output wire        dac_pd,    // DAC 掉电控制 (da_wave_send 内固定为 0)
@@ -119,30 +115,88 @@ wire signed [13:0] dac_ofs_w;         // 偏置 (DAC 有符号码)
 wire               dac_wave_sel_w;    // DWAV: 0=正弦, 1=方波
 
 // =========================================================================
-// ★ AD 数据接收
+// ★ AD 数据接收: AD7606C-16, 1 MSPS (65 拍一次 CONVST), 软件模式 220 kHz 带宽
+//   8 路结果在每次转换读完后同拍更新并保持到下一次, 下游 65 MHz 处理链
+//   (混频 + CIC/65) 不变. 取 16 bit 补码的高 14 bit, ±10 V 量程下
+//   1 LSB = 20 V / 16384, 与原 AD9248 通路的码值/电压关系一致.
 // =========================================================================
-ad_wave_rec u_ad_wave_rec (
-   .CLK_65M   (clk_65M   ),
-   .RST_N     (sys_rst_n ),
-   .ADC_IN    (adc_data  ),
-   .OTR       (adc_otr   ),
-   .PDN       (adc_pdn   ),
-   .OEB_B     (adc_oeb_b ),
-   .ADC_CLK   (adc_clk   ),
-   .ADC_OUTA  (adc_ch1   ),
-   .ADC_OUTB  (adc_ch2   )
+wire [15:0] ad_v1, ad_v2, ad_v3, ad_v4, ad_v5, ad_v6, ad_v7, ad_v8;
+wire        ad_conv_done, ad_cfg_done, ad_cfg_err, ad_frst_err;
+wire [7:0]  ad_flag, ad_dev_id;
+wire [15:0] ad_mult_ch;
+
+ad7606c_drv #(
+    .CLK_HZ      (65_000_000),
+    .SOFT_MODE   (1),
+    .REG_BW      (8'hFF),     // 8 路全部 220 kHz 高带宽
+    .REG_RANGE12 (8'h33),     // CH1/CH2 ±10 V 单端
+    .REG_RANGE34 (8'h33),     // CH3/CH4 ±10 V 单端
+    .REG_RANGE56 (8'h33),
+    .REG_RANGE78 (8'h33)
+) u_ad7606c (
+    .clk          (clk_65M),
+    .rst_n        (rst_n_65m),
+    .go           (1'b1),
+    .speed_set    (16'd64),   // 65 拍 → 1 MSPS
+    .conv_done    (ad_conv_done),
+    .data_flag    (ad_flag),
+    .data_mult_ch (ad_mult_ch),
+    .data1 (ad_v1), .data2 (ad_v2), .data3 (ad_v3), .data4 (ad_v4),
+    .data5 (ad_v5), .data6 (ad_v6), .data7 (ad_v7), .data8 (ad_v8),
+    .cfg_done     (ad_cfg_done),
+    .cfg_err      (ad_cfg_err),
+    .dev_id       (ad_dev_id),
+    .frst_err     (ad_frst_err),
+    .ad_db        (ad_db),
+    .ad_convst    (ad_convst),
+    .ad_wr_n      (ad_wr_n),
+    .ad_rd_n      (ad_rd_n),
+    .ad_cs_n      (ad_cs_n),
+    .ad_reset     (ad_reset),
+    .ad_os        (ad_os),
+    .ad_busy      (ad_busy),
+    .ad_frstdata  (ad_frstdata)
 );
 
-ad_wave_rec u_ad_wave_rec_2 (
-   .CLK_65M   (clk_65M     ),
-   .RST_N     (sys_rst_n   ),
-   .ADC_IN    (adc_data_2  ),
-   .OTR       (adc_otr_2   ),
-   .PDN       (adc_pdn_2   ),
-   .OEB_B     (adc_oeb_b_2 ),
-   .ADC_CLK   (adc_clk_2   ),
-   .ADC_OUTA  (adc_ch3     ),
-   .ADC_OUTB  (adc_ch4     )
+assign adc_ch1 = ad_v1[15:2];
+assign adc_ch2 = ad_v2[15:2];
+assign adc_ch3 = ad_v3[15:2];
+assign adc_ch4 = ad_v4[15:2];
+
+// =========================================================================
+// ★ 示波器: V5/V6 原始 16 bit 样点抓取, 上位机 SCAP 命令触发, 整段经 FT245 上传
+// =========================================================================
+localparam SCOPE_AW  = 10;    // 1024 点
+localparam SCOPE_PRE = 128;   // 预触发点数
+
+wire                scope_arm, scope_clear, scope_done, scope_forced;
+wire [3:0]          scope_mode;
+wire [15:0]         scope_level, scope_decim, scope_cap_decim;
+wire [2:0]          scope_cap_mode;
+wire [SCOPE_AW-1:0] scope_rd_idx;
+wire [31:0]         scope_rd_data;
+
+scope_cap #(
+    .AW  (SCOPE_AW),
+    .PRE (SCOPE_PRE)
+) u_scope_cap (
+    .clk        (clk_65M),
+    .rst_n      (rst_n_65m),
+    .smp_valid  (ad_conv_done),
+    .smp_a      (ad_v5),
+    .smp_b      (ad_v6),
+    .arm        (scope_arm),
+    .trig_mode  (scope_mode[2:0]),
+    .auto_en    (~scope_mode[3]),
+    .trig_level (scope_level),
+    .decim      (scope_decim),
+    .done       (scope_done),
+    .clear      (scope_clear),
+    .forced     (scope_forced),
+    .cap_mode   (scope_cap_mode),
+    .cap_decim  (scope_cap_decim),
+    .rd_idx     (scope_rd_idx),
+    .rd_data    (scope_rd_data)
 );
 
 
@@ -745,64 +799,103 @@ iir_lpf_cascade #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
 
 
 // =========================================================================
-// ★ FT245BL 物理层 + 上层指令收发
+// ★ 上位机通信: 以太网 UDP (命令下行 + 数据/应答/示波器包上行)
+//   FPGA 192.168.99.10, 命令端口 1234; 上行发往最近一次发命令的 PC 地址:端口
 // =========================================================================
 wire [7:0] rec_data;
 wire       rec_done;
 wire       tx_done;
 wire       send_en;
 wire [7:0] send_data;
-
-wire [7:0] ft_d_tx;
-wire       ft_d_oe;
-wire [7:0] ft_d_in;
-
-// ft_d 收发共用, 必须互斥: rx 仅在 tx 未驱动总线且 usb_commend 可接收时读 (读优先);
-// tx 在 rx 读期间 (或 rx 本拍发起读) 不驱动总线
-wire       ft_rx_busy;
-wire       ft_rx_pending;
-wire       ft_tx_busy;
-wire       ft_tx_bus_owned;
 wire       usb_rx_ready;
+wire       link_rx_pending;
+wire       link_tx_busy;
 
-assign ft_d    = ft_d_oe ? ft_d_tx : 8'bz;
-assign ft_d_in = ft_d;
-
-ft245_rx #(
-    .CLK_PERIOD_NS(16),
-    .T_RD_LOW_NS  (80),
-    .T_RD_HIGH_NS (100)
-) u_ft245_rx (
-    .clk      (clk_65M   ),
-    .rst_n    (rst_n_65m ),
-    .ft_rxf_n (ft_rxf_n),
-    .ft_rd_n  (ft_rd_n ),
-    .ft_d_in  (ft_d_in ),
-    .rec_data (rec_data),
-    .rec_done (rec_done),
-    .rd_allow (usb_rx_ready & ~ft_tx_bus_owned),
-    .rx_busy  (ft_rx_busy),
-    .rx_pending(ft_rx_pending)
+eth_udp_link #(
+    .LOCAL_MAC   (48'h02_00_00_00_00_01),
+    // 避开 192.168.1.x (常与路由器/Wi-Fi 子网冲突); PC 网卡配 192.168.99.100/24
+    .LOCAL_IP    ({8'd192, 8'd168, 8'd99, 8'd10}),
+    .GATEWAY_IP  ({8'd192, 8'd168, 8'd99, 8'd1}),
+    .SUBNET_MASK ({8'd255, 8'd255, 8'd255, 8'd0}),
+    .LOCAL_PORT  (16'd1234),
+    .DEST_IP     ({8'd192, 8'd168, 8'd99, 8'd100}),
+    .DEST_PORT   (16'd7777)
+) u_eth_link (
+    .pl_clk_50m (sys_clk),
+    .sys_rst    (sys_rst),
+    .lockin_clk (clk_65M),
+    .lockin_rst (~rst_n_65m),
+    .rec_data   (rec_data),
+    .rec_done   (rec_done),
+    .rx_ready   (usb_rx_ready),
+    .rx_pending (link_rx_pending),
+    .send_en    (send_en),
+    .send_data  (send_data),
+    .tx_done    (tx_done),
+    .tx_busy    (link_tx_busy),
+    .eth_rxc    (eth_rxc),
+    .eth_rxctl  (eth_rxctl),
+    .eth_rxd    (eth_rxd),
+    .eth_txc    (eth_txc),
+    .eth_txctl  (eth_txctl),
+    .eth_txd    (eth_txd),
+    .eth_nrst   (eth_nrst),
+    .eth_mdc    (eth_mdc),
+    .eth_mdio   (eth_mdio),
+    .pl_led1    (pl_led1),
+    .pl_led2    (pl_led2)
 );
 
-ft245_tx #(
-    .CLK_PERIOD_NS(16),
-    .T_WR_HIGH_NS (80),
-    .T_WR_COOL_NS (160)
-) u_ft245_tx (
-    .clk      (clk_65M   ),
-    .rst_n    (rst_n_65m ),
-    .ft_txe_n (ft_txe_n),
-    .ft_wr    (ft_wr   ),
-    .ft_d_out (ft_d_tx ),
-    .ft_d_oe  (ft_d_oe ),
-    .send_en  (send_en ),
-    .send_data(send_data),
-    .tx_done  (tx_done ),
-    .bus_hold (ft_rx_busy),
-    .tx_busy  (ft_tx_busy),
-    .bus_owned(ft_tx_bus_owned)
-);
+// FT245BL 物理层 (已停用, 保留备查)
+// wire [7:0] ft_d_tx;
+// wire       ft_d_oe;
+// wire [7:0] ft_d_in;
+//
+// // ft_d 收发共用, 必须互斥: rx 仅在 tx 未驱动总线且 usb_commend 可接收时读 (读优先);
+// // tx 在 rx 读期间 (或 rx 本拍发起读) 不驱动总线
+// wire       ft_rx_busy;
+// wire       ft_rx_pending;
+// wire       ft_tx_busy;
+// wire       ft_tx_bus_owned;
+//
+// assign ft_d    = ft_d_oe ? ft_d_tx : 8'bz;
+// assign ft_d_in = ft_d;
+//
+// ft245_rx #(
+//     .CLK_PERIOD_NS(16),
+//     .T_RD_LOW_NS  (80),
+//     .T_RD_HIGH_NS (100)
+// ) u_ft245_rx (
+//     .clk      (clk_65M   ),
+//     .rst_n    (rst_n_65m ),
+//     .ft_rxf_n (ft_rxf_n),
+//     .ft_rd_n  (ft_rd_n ),
+//     .ft_d_in  (ft_d_in ),
+//     .rec_data (rec_data),
+//     .rec_done (rec_done),
+//     .rd_allow (usb_rx_ready & ~ft_tx_bus_owned),
+//     .rx_busy  (ft_rx_busy),
+//     .rx_pending(ft_rx_pending)
+// );
+//
+// ft245_tx #(
+//     .CLK_PERIOD_NS(16),
+//     .T_WR_HIGH_NS (80),
+//     .T_WR_COOL_NS (160)
+// ) u_ft245_tx (
+//     .clk      (clk_65M   ),
+//     .rst_n    (rst_n_65m ),
+//     .ft_txe_n (ft_txe_n),
+//     .ft_wr    (ft_wr   ),
+//     .ft_d_out (ft_d_tx ),
+//     .ft_d_oe  (ft_d_oe ),
+//     .send_en  (send_en ),
+//     .send_data(send_data),
+//     .tx_done  (tx_done ),
+//     .bus_hold (ft_rx_busy),
+//     .tx_busy  (ft_tx_busy),
+//     .bus_owned(ft_tx_bus_owned)
+// );
 
 
 // =========================================================================
@@ -863,7 +956,10 @@ wire [63:0] u64_pll_ch1  = {16'd0, pll_freq_ch1};
 wire [63:0] u64_pll_ch2  = {16'd0, pll_freq_ch2};
 
 // 锁定标志位 (位 0 = ch1 锁定, 位 1 = ch2 锁定)
-wire [31:0] s32_lock     = {30'd0, is_locked_ch2, is_locked_ch1};
+//   AD7606C 诊断: 位 2 = 配置完成, 位 3 = 配置回读错误, 位 4 = FRSTDATA 错位,
+//                 位 [15:8] = ID 寄存器回读 (正常 0x31)
+wire [31:0] s32_lock     = {16'd0, ad_dev_id, 3'd0, ad_frst_err, ad_cfg_err, ad_cfg_done,
+                            is_locked_ch2, is_locked_ch1};
 
 // ★ 诊断回读: 七路 PSD 实际生效的参考频率字
 wire [63:0] u64_ref_21   = {16'd0, ref_freq_21_to_psd};
@@ -895,15 +991,18 @@ wire [1375:0] x_y_fir_packed = {
     sample_cnt
 };
 
-usb_commend u_usb_commend (
+usb_commend #(
+    .SCOPE_AW  (SCOPE_AW),
+    .SCOPE_PRE (SCOPE_PRE)
+) u_usb_commend (
     .clk(clk_65M),
     .rst_n(rst_n_65m),
     .rec_data(rec_data),
     .rec_done(rec_done),
     .tx_done(tx_done),
-    .tx_busy(ft_tx_busy),
+    .tx_busy(link_tx_busy),
     .rx_ready(usb_rx_ready),
-    .rx_pending(ft_rx_pending),
+    .rx_pending(link_rx_pending),
     .x_y_fir(x_y_fir_packed),
     // 数据帧触发: 用 PLL ch1 的 dc_valid_x 一拍 → 每帧上传一次
     .m_axis_data_tvalid_fir_x(dc_valid_x_ch1),
@@ -969,6 +1068,17 @@ usb_commend u_usb_commend (
     .dac_amp       (dac_amp_w),
     .dac_ofs       (dac_ofs_w),
     .dac_wave_sel  (dac_wave_sel_w),
+    .scope_arm       (scope_arm),
+    .scope_mode      (scope_mode),
+    .scope_level     (scope_level),
+    .scope_decim     (scope_decim),
+    .scope_done      (scope_done),
+    .scope_clear     (scope_clear),
+    .scope_forced    (scope_forced),
+    .scope_cap_mode  (scope_cap_mode),
+    .scope_cap_decim (scope_cap_decim),
+    .scope_rd_idx    (scope_rd_idx),
+    .scope_rd_data   (scope_rd_data),
     .send_en(send_en),
     .send_data(send_data)
 );

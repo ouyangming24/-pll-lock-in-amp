@@ -2,13 +2,13 @@
 device.py
 ─────────
 设备抽象层:
-  - LockinDevice    : 真实 FPGA 通信 (FT245BL VCP 模式, pyserial), 上下行都走串口
-  - UdpLockinDevice : ★ 新版 ★ 命令走 FT245 串口, 数据走以太网 UDP
-                     (FPGA PL 端千兆 RGMII 直接发 UDP, 见 docs/ethernet_migration_plan.md)
+  - LockinDevice    : FT245BL USB 串口 (旧硬件; 现 FPGA 已去掉 FT245, 仅保留备查)
+  - UdpLockinDevice : ★ 当前 ★ 命令与数据全走以太网 UDP (FPGA eth_udp_link.v)
   - MockDevice      : 离线模拟器, 产生伪锁相数据 (用于无硬件时调试 GUI)
 
 三个类都是 QObject, 发出相同的 Qt 信号供 main_window 订阅:
   - frame_received(dict)
+  - scope_received(dict)   示波器包 (V5/V6 整段波形)
   - log_message(str)
   - connection_changed(bool)
   - cmd_response(str)
@@ -16,6 +16,7 @@ device.py
 
 import binascii
 import math
+import re
 import socket
 import struct
 import threading
@@ -23,6 +24,7 @@ import time
 from collections import deque
 from random import gauss
 
+import numpy as np
 import serial
 import serial.tools.list_ports
 from PyQt5.QtCore import QObject, pyqtSignal, QTimer
@@ -63,6 +65,16 @@ FIELD_NAMES = [
 # struct 格式: 19 int32 + 3 int32 + 2 uint64 + 1 int32 + 7 uint64 + 2 uint32 (大端)
 # 不含同步头与末尾 CRC16
 FRAME_FMT = ">19i3iQQi7QII"
+
+# 示波器包 (usb_commend.v SCAP 命令触发): 16 字节包头 + N×{V5,V6 int16} + CRC16
+#   包头: sync(4) N(H) pre(H) decim(H) flags(B) 0(B) seq(I)
+#   flags = {4'd0, 触发模式[2:0], 强制触发}
+SCOPE_SYNC = b"\xA5\x5A\x5A\xA5"
+SCOPE_HDR_LEN = 16
+SCOPE_HDR_FMT = ">HHHBBI"
+SCOPE_MAX_N = 8192
+SCOPE_ADC_HZ = 1_000_000          # AD7606C 采样率 (65 MHz / 65)
+SCOPE_V_PER_LSB = 10.0 / 32768    # ±10 V 量程, 16 bit 补码
 
 
 # ============================================================================
@@ -116,6 +128,93 @@ def parse_frame(buf: bytes) -> dict:
     data["locked_ch2"] = bool(data["lock_flags"] & 0x2)
     data["timestamp"] = time.time()
     return data
+
+
+def scope_packet_len(buf: bytes) -> int | None:
+    """buf 以 SCOPE_SYNC 开头; 包头未收全返回 None, 包头不合理抛 ValueError"""
+    if len(buf) < SCOPE_HDR_LEN:
+        return None
+    n, pre, _decim, _flags, _rsv, _seq = struct.unpack(SCOPE_HDR_FMT, buf[4:SCOPE_HDR_LEN])
+    if n < 16 or n > SCOPE_MAX_N or (n & (n - 1)) or pre >= n:
+        raise ValueError("示波器包头不合理")
+    return SCOPE_HDR_LEN + 4 * n + 2
+
+
+def parse_scope_packet(buf: bytes) -> dict:
+    """完整示波器包 → {n, pre, decim, mode, forced, seq, dt, a, b} (a/b 为 int16 码值数组)"""
+    n_bytes = scope_packet_len(buf)
+    if n_bytes is None or len(buf) != n_bytes:
+        raise ValueError("示波器包长度错误")
+    body = n_bytes - 2
+    if frame_crc(buf[:body]) != int.from_bytes(buf[body:], "big"):
+        raise ValueError("示波器包 CRC 错误")
+    n, pre, decim, flags, _rsv, seq = struct.unpack(SCOPE_HDR_FMT, buf[4:SCOPE_HDR_LEN])
+    smp = np.frombuffer(buf, dtype=">i2", count=2 * n, offset=SCOPE_HDR_LEN).reshape(n, 2)
+    return {
+        "n": n, "pre": pre, "decim": decim,
+        "mode": (flags >> 1) & 0x7, "forced": bool(flags & 1), "seq": seq,
+        "dt": (decim + 1) / SCOPE_ADC_HZ,
+        "a": smp[:, 0].astype(np.int32),
+        "b": smp[:, 1].astype(np.int32),
+        "timestamp": time.time(),
+    }
+
+
+# ============================================================================
+# 字节流解析: 数据帧与示波器包混在同一字节流里 (串口直接读出 / UDP 各包载荷顺序拼接)
+# ============================================================================
+class StreamParser:
+    """按同步头切分字节流, feed() 返回 [("frame", dict) | ("scope", dict), ...]
+
+    半帧 (被命令打断) / 字节损坏 / 同步头碰撞只跳过该同步头, 不吞掉后面的真帧;
+    命令应答等非包字节直接丢弃.
+    """
+
+    def __init__(self):
+        self._buf = b""
+        self.crc_errors = 0
+        self.scope_errors = 0
+
+    def feed(self, chunk: bytes) -> list:
+        out = []
+        buf = self._buf + chunk
+        while True:
+            idx = buf.find(SYNC_HEADER)
+            sidx = buf.find(SCOPE_SYNC)
+            if sidx >= 0 and (idx < 0 or sidx < idx):
+                try:
+                    need = scope_packet_len(buf[sidx:])
+                except ValueError:
+                    buf = buf[sidx + 1:]
+                    continue
+                if need is None or len(buf) - sidx < need:
+                    break
+                try:
+                    pkt = parse_scope_packet(buf[sidx:sidx + need])
+                except ValueError:
+                    self.scope_errors += 1
+                    buf = buf[sidx + 1:]
+                    continue
+                buf = buf[sidx + need:]
+                out.append(("scope", pkt))
+                continue
+            if idx < 0 or len(buf) - idx < FRAME_LEN:
+                break
+            try:
+                data = parse_frame(buf[idx:idx + FRAME_LEN])
+            except ValueError:
+                self.crc_errors += 1
+                buf = buf[idx + 1:]
+                continue
+            buf = buf[idx + FRAME_LEN:]
+            out.append(("frame", data))
+        # 丢掉第一个同步头之前的无用字节, buf 只留待收全的一包
+        starts = [i for i in (buf.find(SYNC_HEADER), buf.find(SCOPE_SYNC)) if i >= 0]
+        buf = buf[min(starts):] if starts else buf[-3:]
+        if len(buf) > 65536:
+            buf = buf[-32768:]
+        self._buf = buf
+        return out
 
 
 # ============================================================================
@@ -179,6 +278,7 @@ class FrameTracker:
 # ============================================================================
 class LockinDevice(QObject):
     frame_received = pyqtSignal(dict)
+    scope_received = pyqtSignal(dict)
     log_message = pyqtSignal(str)
     connection_changed = pyqtSignal(bool)
     cmd_response = pyqtSignal(str)
@@ -190,12 +290,17 @@ class LockinDevice(QObject):
         self._thread: threading.Thread | None = None
         self._cmd_lock = threading.Lock()
         self._tracker = FrameTracker()
-        self._crc_errors = 0
+        self._parser = StreamParser()
 
     @property
     def bad_frames(self) -> int:
         """CRC 校验失败 (含半帧) 被丢弃的帧数"""
-        return self._crc_errors
+        return self._parser.crc_errors
+
+    @property
+    def bad_scope_packets(self) -> int:
+        """CRC 校验失败被丢弃的示波器包数"""
+        return self._parser.scope_errors
 
     @property
     def lost_frames(self) -> int:
@@ -229,8 +334,10 @@ class LockinDevice(QObject):
         return self.ser is not None and self.ser.is_open
 
     # --- 命令收发 ----------------------------------------------------------
-    def send_command(self, cmd: str) -> str:
+    def send_command(self, cmd: str, quiet: bool = False) -> str:
         """发送一条 ASCII 命令, 返回 FPGA 应答字符串
+
+        quiet: 流模式下不写日志 (示波器连续重触发用, 避免刷屏)
 
         ⚠ 关键:
         - 流模式下 *只能* write, 不能在主线程 read,
@@ -252,7 +359,8 @@ class LockinDevice(QObject):
 
         if self._streaming:
             # 流模式: 不读响应 (响应字节会被 _rx_loop 当作非同步头数据丢弃, 这是 OK 的)
-            self.log_message.emit(f"  >> {cmd}")
+            if not quiet:
+                self.log_message.emit(f"  >> {cmd}")
             return ""
 
         # 非流模式: 安全读取响应
@@ -272,7 +380,7 @@ class LockinDevice(QObject):
             return
         self.send_command("XYOUT")
         self._tracker = FrameTracker()
-        self._crc_errors = 0
+        self._parser = StreamParser()
         self._streaming = True
         self._thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._thread.start()
@@ -292,7 +400,7 @@ class LockinDevice(QObject):
         if self.is_connected:
             self.send_command("stop")
         self.log_message.emit(
-            f"[+] 数据流已停止 (CRC 坏帧 {self._crc_errors}, 丢帧 {self._tracker.lost}, "
+            f"[+] 数据流已停止 (CRC 坏帧 {self._parser.crc_errors}, 丢帧 {self._tracker.lost}, "
             f"重复帧 {self._tracker.duplicates})")
 
     @property
@@ -300,13 +408,12 @@ class LockinDevice(QObject):
         return self._streaming
 
     def _rx_loop(self):
-        """后台线程: 持续从串口读取并解析 FRAME_LEN 字节数据帧.
+        """后台线程: 持续从串口读取并解析数据帧 / 示波器包.
 
         本线程是唯一允许从串口 read 的线程. send_command 在流模式下
         只 write 不 read, 以避免与本线程并发 read 导致 Windows
         overlapped I/O 崩溃.
         """
-        buf = b""
         try:
             while self._streaming and self.ser:
                 try:
@@ -317,155 +424,238 @@ class LockinDevice(QObject):
                     break
                 if not chunk:
                     continue
-                buf += chunk
-                # 搜帧, 一次可能搜到多帧
-                while True:
-                    idx = buf.find(SYNC_HEADER)
-                    if idx < 0 or len(buf) - idx < FRAME_LEN:
-                        break
-                    try:
-                        data = parse_frame(buf[idx:idx + FRAME_LEN])
-                    except ValueError:
-                        # 半帧 (被命令打断) / 字节损坏 / 同步头碰撞:
-                        # 只跳过这个同步头, 从下一字节重新找, 不吞掉后面的真帧
-                        self._crc_errors += 1
-                        buf = buf[idx + 1:]
-                        continue
-                    buf = buf[idx + FRAME_LEN:]
-                    if self._tracker.update(data):
-                        self.frame_received.emit(data)
-                # 防止 buf 无限增长
-                if len(buf) > 4096:
-                    buf = buf[-2048:]
+                for kind, obj in self._parser.feed(chunk):
+                    if kind == "scope":
+                        self.scope_received.emit(obj)
+                    elif self._tracker.update(obj):
+                        self.frame_received.emit(obj)
         finally:
             # 即使被异常打断, 也确保流标志被清掉
             self._streaming = False
 
 
 # ============================================================================
-# 以太网 UDP 设备 (FPGA PL 端 千兆 RGMII 直接发 UDP)
-#   - 数据通道: UDP socket, 监听 7777 端口
-#   - 命令通道: 仍走 FT245 串口 (FPGA 端 usb_commend 模块没有 UDP 输入)
-#   - 一旦 FPGA 端实现 UDP 命令解析, 就可以彻底甩掉 USB
+# 以太网 UDP 设备 (FPGA eth_udp_link.v, 千兆 RGMII)
+#   - 命令: PC → FPGA_IP:FPGA_CMD_PORT, 每个 UDP 包载荷 = "CMD:值\r\n"
+#   - 上行: FPGA 把应答 / 数据帧 / 示波器包按原字节流切成 UDP 包,
+#           发往最近一次发命令的 PC 地址:端口 (即本 socket 绑定的 7777)
+#   - 连接: 向子网广播探测 (stop), 收到应答才算连上. FPGA 上电后 RX 时序扫描
+#           需要 PC 有流量, 广播探测本身就提供流量, 一般 20~40 s 内应答
 # ============================================================================
+FPGA_IP         = "192.168.99.10"
+FPGA_BCAST_IP   = "192.168.99.255"
+FPGA_CMD_PORT   = 1234
 UDP_LISTEN_IP   = "0.0.0.0"     # 监听所有网卡
-UDP_LISTEN_PORT = 7777          # 与 eth_lockin_top.v 的 DEST_PORT 一致
-UDP_RECV_BUFSZ  = 1 << 20       # 1 MiB socket 内核缓冲
+UDP_LISTEN_PORT = 7777          # 命令从此端口发出, FPGA 上行也回到此端口
+UDP_RECV_BUFSZ  = 4 << 20       # 4 MiB socket 内核缓冲
 UDP_SOCK_TIMEOUT = 0.5          # recvfrom 超时 (s), 让 rx 线程能定期检查退出标志
+UDP_CMD_TIMEOUT  = 0.3          # 非流模式下等应答的时间 (s)
+UDP_PROBE_PERIOD = 0.1          # 连接探测间隔 (s)
+UDP_PROBE_TIMEOUT = 90.0        # 连接探测最长等待 (s)
+
+_RESP_RE = re.compile(rb"Command (Success|Error)!")
 
 
 class UdpLockinDevice(QObject):
-    """命令走 FT245 串口, 数据走以太网 UDP (FPGA PL 端千兆 RGMII)"""
+    """命令与数据全走以太网 UDP (FPGA PL 端千兆 RGMII, 无 USB)"""
     frame_received = pyqtSignal(dict)
+    scope_received = pyqtSignal(dict)
     log_message = pyqtSignal(str)
     connection_changed = pyqtSignal(bool)
     cmd_response = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
-        self.ser: serial.Serial | None = None
         self.sock: socket.socket | None = None
+        self._connected = False
+        self._probing = False
+        self._probe_thread: threading.Thread | None = None
         self._streaming = False
         self._thread: threading.Thread | None = None
         self._cmd_lock = threading.Lock()
-        self._stat_total = 0       # 已收帧数
-        self._stat_bad   = 0       # 解析失败帧数 (同步头/CRC)
         self._tracker = FrameTracker()
+        self._parser = StreamParser()
 
     @property
     def bad_frames(self) -> int:
-        return self._stat_bad
+        return self._parser.crc_errors
+
+    @property
+    def bad_scope_packets(self) -> int:
+        return self._parser.scope_errors
 
     @property
     def lost_frames(self) -> int:
         return self._tracker.lost
 
     # --- 连接管理 ----------------------------------------------------------
-    def connect(self, port: str, baud: int = 3_000_000) -> bool:
-        """打开命令串口 + 创建 UDP socket. 任意一步失败都回滚."""
-        # 1) 命令串口
-        try:
-            self.ser = serial.Serial(port, baud, timeout=0.05)
-        except Exception as e:
-            self.log_message.emit(f"[!] 命令串口 {port} 打开失败: {e}")
-            return False
+    def connect(self, port: str = "", baud: int = 0) -> bool:
+        """绑定 UDP socket 并在后台广播探测 FPGA; 应答到达后发 connection_changed(True).
 
-        # 2) UDP socket
+        port / baud 仅为与串口设备接口一致, 不使用.
+        """
+        if self._connected or self._probing:
+            return True
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, UDP_RECV_BUFSZ)
-            # SO_REUSEADDR 让程序异常退出后, 端口能立刻被重新 bind
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            if hasattr(socket, "SIO_UDP_CONNRESET"):
+                # Windows: 收到 ICMP 端口不可达后 recvfrom 会抛 ConnectionResetError, 关掉
+                self.sock.ioctl(socket.SIO_UDP_CONNRESET, False)
             self.sock.bind((UDP_LISTEN_IP, UDP_LISTEN_PORT))
             self.sock.settimeout(UDP_SOCK_TIMEOUT)
         except Exception as e:
-            self.log_message.emit(f"[!] UDP 监听 {UDP_LISTEN_PORT} 失败: {e}")
-            # 回滚串口
-            try: self.ser.close()
-            except Exception: pass
-            self.ser = None
-            self.sock = None
+            self.log_message.emit(f"[!] UDP 端口 {UDP_LISTEN_PORT} 打开失败 (是否已有程序占用?): {e}")
+            self._close_sock()
             return False
 
-        self.connection_changed.emit(True)
+        self._probing = True
+        self._probe_thread = threading.Thread(target=self._probe_loop, daemon=True)
+        self._probe_thread.start()
         self.log_message.emit(
-            f"[+] 命令串口 {port} 已打开; UDP 监听 {UDP_LISTEN_IP}:{UDP_LISTEN_PORT}")
+            f"[+] 正在探测 FPGA {FPGA_IP} (广播 {FPGA_BCAST_IP}:{FPGA_CMD_PORT}) ... "
+            f"FPGA 刚上电时 RX 时序扫描约需 20~40 s, PL_LED1 由慢闪变常亮即就绪")
         return True
+
+    def _probe_loop(self):
+        t0 = time.time()
+        last_err = ""
+        try:
+            while self._probing and self.sock:
+                try:
+                    self.sock.sendto(b"stop\r\n", (FPGA_BCAST_IP, FPGA_CMD_PORT))
+                except OSError as e:
+                    if str(e) != last_err:
+                        last_err = str(e)
+                        self.log_message.emit(
+                            f"[!] 广播发送失败: {e}  (请把连 FPGA 的网卡设为静态 IP 192.168.99.100/24)")
+                deadline = time.time() + UDP_PROBE_PERIOD
+                while self._probing and time.time() < deadline:
+                    try:
+                        self.sock.settimeout(max(0.01, deadline - time.time()))
+                        payload, addr = self.sock.recvfrom(4096)
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    if addr[0] == FPGA_IP and _RESP_RE.search(payload):
+                        self._probing = False
+                        self._connected = True
+                        self._drain()
+                        self.connection_changed.emit(True)
+                        self.log_message.emit(
+                            f"[+] FPGA 已应答 ({time.time() - t0:.1f} s), 以太网已连接 "
+                            f"{FPGA_IP}:{FPGA_CMD_PORT}")
+                        return
+                if time.time() - t0 > UDP_PROBE_TIMEOUT:
+                    self.log_message.emit(
+                        f"[!] {UDP_PROBE_TIMEOUT:.0f} s 内 FPGA 无应答. 请检查: 网线 / PHY 灯, "
+                        f"PC 网卡 IP 192.168.99.100/24, 防火墙放行 UDP {UDP_LISTEN_PORT}, "
+                        f"关闭代理/VPN 虚拟网卡, FPGA 已烧录")
+                    break
+        finally:
+            if self._probing:
+                self._probing = False
+                self._close_sock()
+                self.connection_changed.emit(False)
+
+    def _close_sock(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
 
     def disconnect(self):
         self.stop_streaming()
-        if self.ser:
-            try: self.ser.close()
-            except Exception: pass
-            self.ser = None
-        if self.sock:
-            try: self.sock.close()
-            except Exception: pass
-            self.sock = None
+        if self._probing:
+            self._probing = False
+            if self._probe_thread:
+                self._probe_thread.join(timeout=1.0)
+        self._probe_thread = None
+        self._connected = False
+        self._close_sock()
         self.connection_changed.emit(False)
         self.log_message.emit("[+] 已断开")
 
     @property
     def is_connected(self) -> bool:
-        # UDP 模式下, "连接" 等价于 "命令串口已开 + UDP socket 已绑定"
-        return (self.ser is not None and self.ser.is_open
-                and self.sock is not None)
+        return self._connected and self.sock is not None
 
-    # --- 命令收发 (走 FT245 串口) -----------------------------------------
-    def send_command(self, cmd: str) -> str:
-        """UDP 模式下命令走串口, 数据走 UDP, 没有 read 冲突,
-        所以可以直接 write + 读响应 (不用像 LockinDevice 那样区分流模式).
+    @property
+    def is_connecting(self) -> bool:
+        return self._probing
+
+    # --- 命令收发 ----------------------------------------------------------
+    def _drain(self):
+        """丢弃 socket 里积压的上行包 (非流模式下读应答前调用)"""
+        self.sock.settimeout(0.0)
+        try:
+            while True:
+                self.sock.recvfrom(65536)
+        except (BlockingIOError, socket.timeout, OSError):
+            pass
+        finally:
+            self.sock.settimeout(UDP_SOCK_TIMEOUT)
+
+    def send_command(self, cmd: str, quiet: bool = False) -> str:
+        """发一条命令. 流模式下应答混在上行字节流里由 rx 线程丢弃, 这里只发不收;
+        非流模式下在 UDP_CMD_TIMEOUT 内等应答包.
         """
         if not self.is_connected:
             self.log_message.emit(f"[!] 未连接, 无法发送: {cmd}")
             return ""
         with self._cmd_lock:
+            if not self._streaming:
+                self._drain()
             try:
-                self.ser.write((cmd + "\r\n").encode("ascii"))
-                time.sleep(0.05)
-                resp = self.ser.read(256).decode("ascii", errors="replace").strip()
-                self.log_message.emit(f"  >> {cmd:18s} ← {resp}")
-                self.cmd_response.emit(resp)
-                return resp
+                self.sock.sendto((cmd + "\r\n").encode("ascii"), (FPGA_IP, FPGA_CMD_PORT))
             except Exception as e:
-                self.log_message.emit(f"[!] 命令异常: {e}")
+                self.log_message.emit(f"[!] 发送异常: {e}")
+                return ""
+            if self._streaming:
+                if not quiet:
+                    self.log_message.emit(f"  >> {cmd}")
                 return ""
 
-    # --- 数据流 (走 UDP socket) -------------------------------------------
+            resp = ""
+            deadline = time.time() + UDP_CMD_TIMEOUT
+            while time.time() < deadline:
+                try:
+                    self.sock.settimeout(max(0.01, deadline - time.time()))
+                    payload, addr = self.sock.recvfrom(65536)
+                except socket.timeout:
+                    break
+                except OSError as e:
+                    self.log_message.emit(f"[!] 读应答异常: {e}")
+                    break
+                if addr[0] != FPGA_IP:
+                    continue
+                m = _RESP_RE.search(payload)
+                if m:
+                    resp = m.group(0).decode("ascii")
+                    break
+            self.sock.settimeout(UDP_SOCK_TIMEOUT)
+            if not resp:
+                resp = "(无应答)"
+            if not quiet:
+                self.log_message.emit(f"  >> {cmd:18s} ← {resp}")
+            self.cmd_response.emit(resp)
+            return resp
+
+    # --- 数据流 ------------------------------------------------------------
     def start_streaming(self):
-        """UDP 端不需要发 XYOUT — FPGA 端 udp_lockin_tx 是被
-        dc_valid 自动触发的, 上电后就一直在发包. 我们只要打开
-        socket 接收就行.
-        """
-        if self._streaming or not self.sock:
+        if self._streaming or not self.is_connected:
             return
-        self._streaming = True
-        self._stat_total = 0
-        self._stat_bad   = 0
+        self.send_command("XYOUT")
         self._tracker = FrameTracker()
+        self._parser = StreamParser()
+        self._streaming = True
         self._thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._thread.start()
-        self.log_message.emit("[+] UDP 数据流已启动")
+        self.log_message.emit("[+] 以太网数据流已启动")
 
     def stop_streaming(self):
         if not self._streaming:
@@ -474,38 +664,37 @@ class UdpLockinDevice(QObject):
         if self._thread:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self.is_connected:
+            self.send_command("stop")
         self.log_message.emit(
-            f"[+] UDP 数据流已停止 (共收 {self._stat_total} 帧, "
-            f"解析失败 {self._stat_bad}, 丢帧 {self._tracker.lost})")
+            f"[+] 以太网数据流已停止 (CRC 坏帧 {self._parser.crc_errors}, "
+            f"丢帧 {self._tracker.lost}, 重复帧 {self._tracker.duplicates})")
 
     @property
     def is_streaming(self) -> bool:
         return self._streaming
 
     def _rx_loop(self):
-        """后台线程: 持续 recvfrom UDP, 每个 datagram 必为 FRAME_LEN 字节一帧."""
+        """后台线程: 按到达顺序拼接 FPGA 各 UDP 包载荷, 交给 StreamParser 切包."""
         try:
             while self._streaming and self.sock:
                 try:
-                    payload, _addr = self.sock.recvfrom(2048)
+                    payload, addr = self.sock.recvfrom(65536)
                 except socket.timeout:
                     continue
                 except OSError:
-                    # socket 被 close 时这里会抛, 直接退出
                     break
                 except Exception as e:
                     if self._streaming:
                         self.log_message.emit(f"[!] UDP 接收异常: {e}")
                     break
-
-                self._stat_total += 1
-                try:
-                    data = parse_frame(payload)
-                except ValueError:
-                    self._stat_bad += 1
+                if addr[0] != FPGA_IP:
                     continue
-                if self._tracker.update(data):
-                    self.frame_received.emit(data)
+                for kind, obj in self._parser.feed(payload):
+                    if kind == "scope":
+                        self.scope_received.emit(obj)
+                    elif self._tracker.update(obj):
+                        self.frame_received.emit(obj)
         finally:
             self._streaming = False
 
@@ -515,6 +704,7 @@ class UdpLockinDevice(QObject):
 # ============================================================================
 class MockDevice(QObject):
     frame_received = pyqtSignal(dict)
+    scope_received = pyqtSignal(dict)
     log_message = pyqtSignal(str)
     connection_changed = pyqtSignal(bool)
     cmd_response = pyqtSignal(str)
@@ -586,7 +776,7 @@ class MockDevice(QObject):
     def is_connected(self) -> bool:
         return self._connected
 
-    def send_command(self, cmd: str) -> str:
+    def send_command(self, cmd: str, quiet: bool = False) -> str:
         # 模拟命令解析 (不对参数做严格校验)
         if cmd in ("XYOUT", "stop"):
             ok = "Command Success!"
@@ -595,11 +785,53 @@ class MockDevice(QObject):
                 key, val = cmd.split(":")
                 self.params[key] = int(val)
                 ok = "Command Success!"
+                if key == "SCAP":
+                    QTimer.singleShot(15, self._gen_scope)
             except Exception:
                 ok = "Command Error!"
-        self.log_message.emit(f"  >> {cmd:18s} ← {ok}  (mock)")
+        if not quiet:
+            self.log_message.emit(f"  >> {cmd:18s} ← {ok}  (mock)")
         self.cmd_response.emit(ok)
         return ok
+
+    def _gen_scope(self, n: int = 1024, pre: int = 128):
+        """模拟一包示波器数据: V5 = 50 kHz 正弦, V6 = 60 kHz 正弦 + 2 次谐波, 按 SCAP 触发"""
+        if not self._streaming:
+            return
+        mode_word = self.params.get("SCAP", 0)
+        mode, normal = mode_word & 0x7, bool(mode_word & 0x8)
+        decim = self.params.get("SDEC", 0)
+        level = self.params.get("STLV", 32768) - 32768
+        dt = (decim + 1) / SCOPE_ADC_HZ
+        t = (np.arange(4 * n) + np.random.uniform(0, 1e5)) * dt
+        lsb = 1 / SCOPE_V_PER_LSB
+        a = 3.0 * np.sin(2 * np.pi * 50e3 * t) * lsb
+        b = (2.0 * np.sin(2 * np.pi * 60e3 * t + 0.7)
+             + 0.5 * np.sin(2 * np.pi * 120e3 * t)) * lsb
+        a = np.clip(a + np.random.normal(0, 30, a.size), -32768, 32767).astype(np.int32)
+        b = np.clip(b + np.random.normal(0, 30, b.size), -32768, 32767).astype(np.int32)
+
+        start, forced = 0, False
+        if mode in (1, 2, 3, 4):
+            src = a if mode in (1, 2) else b
+            if mode in (1, 3):
+                hit = (src[pre:-1] < level) & (src[pre + 1:] >= level)
+            else:
+                hit = (src[pre:-1] > level) & (src[pre + 1:] <= level)
+            idx = np.flatnonzero(hit[:2 * n])
+            if idx.size:
+                start = int(idx[0]) + 1
+            elif normal:
+                return
+            else:
+                forced = True
+        self._scope_seq = getattr(self, "_scope_seq", 0) + 1
+        self.scope_received.emit({
+            "n": n, "pre": pre, "decim": decim, "mode": mode, "forced": forced,
+            "seq": self._scope_seq, "dt": dt,
+            "a": a[start:start + n], "b": b[start:start + n],
+            "timestamp": time.time(),
+        })
 
     def start_streaming(self):
         if self._streaming or not self._connected:

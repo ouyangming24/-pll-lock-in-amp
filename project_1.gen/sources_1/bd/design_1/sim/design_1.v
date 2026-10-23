@@ -2,7 +2,7 @@
 //Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
 //--------------------------------------------------------------------------------
 //Tool Version: Vivado v.2025.1 (win64) Build 6140274 Thu May 22 00:12:29 MDT 2025
-//Date        : Fri Oct 16 11:50:49 2026
+//Date        : Fri Oct 23 10:49:48 2026
 //Host        : DESKTOP-PEDBCMF running 64-bit major release  (build 9200)
 //Command     : generate_target design_1.bd
 //Design      : design_1
@@ -33,24 +33,29 @@ module design_1
     FIXED_IO_ps_clk,
     FIXED_IO_ps_porb,
     FIXED_IO_ps_srstb,
-    adc_clk_0,
-    adc_clk_2_0,
-    adc_data_0,
-    adc_data_2_0,
-    adc_oeb_b_0,
-    adc_oeb_b_2_0,
-    adc_otr_0,
-    adc_otr_2_0,
-    adc_pdn_0,
-    adc_pdn_2_0,
+    ad_busy_0,
+    ad_convst_0,
+    ad_cs_n_0,
+    ad_db_0,
+    ad_frstdata_0,
+    ad_os_0,
+    ad_rd_n_0,
+    ad_reset_0,
+    ad_wr_n_0,
     da_data_0,
     dac_clk_0,
     dac_pd_0,
-    ft_d_0,
-    ft_rd_n_0,
-    ft_rxf_n_0,
-    ft_txe_n_0,
-    ft_wr_0,
+    eth_mdc_0,
+    eth_mdio_0,
+    eth_nrst_0,
+    eth_rxc_0,
+    eth_rxctl_0,
+    eth_rxd_0,
+    eth_txc_0,
+    eth_txctl_0,
+    eth_txd_0,
+    pl_led1_0,
+    pl_led2_0,
     sys_clk_0,
     sys_rst_n_0);
   (* X_INTERFACE_INFO = "xilinx.com:interface:ddrx:1.0 DDR ADDR" *) (* X_INTERFACE_MODE = "Master" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME DDR, AXI_ARBITRATION_SCHEME TDM, BURST_LENGTH 8, CAN_DEBUG false, CAS_LATENCY 11, CAS_WRITE_LATENCY 11, CS_ENABLED true, DATA_MASK_ENABLED true, DATA_WIDTH 8, MEMORY_TYPE COMPONENTS, MEM_ADDR_MAP ROW_COLUMN_BANK, SLOT Single, TIMEPERIOD_PS 1250" *) inout [14:0]DDR_addr;
@@ -74,24 +79,29 @@ module design_1
   (* X_INTERFACE_INFO = "xilinx.com:display_processing_system7:fixedio:1.0 FIXED_IO PS_CLK" *) inout FIXED_IO_ps_clk;
   (* X_INTERFACE_INFO = "xilinx.com:display_processing_system7:fixedio:1.0 FIXED_IO PS_PORB" *) inout FIXED_IO_ps_porb;
   (* X_INTERFACE_INFO = "xilinx.com:display_processing_system7:fixedio:1.0 FIXED_IO PS_SRSTB" *) inout FIXED_IO_ps_srstb;
-  (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK.ADC_CLK_0 CLK" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME CLK.ADC_CLK_0, CLK_DOMAIN design_1_lock_in_amp_0_0_adc_clk, FREQ_HZ 100000000, FREQ_TOLERANCE_HZ 0, INSERT_VIP 0, PHASE 0.0" *) output adc_clk_0;
-  output adc_clk_2_0;
-  input [13:0]adc_data_0;
-  input [13:0]adc_data_2_0;
-  output adc_oeb_b_0;
-  output adc_oeb_b_2_0;
-  input adc_otr_0;
-  input adc_otr_2_0;
-  output adc_pdn_0;
-  output adc_pdn_2_0;
+  input ad_busy_0;
+  output ad_convst_0;
+  output ad_cs_n_0;
+  inout [15:0]ad_db_0;
+  input ad_frstdata_0;
+  output [2:0]ad_os_0;
+  output ad_rd_n_0;
+  (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 RST.AD_RESET_0 RST" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME RST.AD_RESET_0, INSERT_VIP 0, POLARITY ACTIVE_LOW" *) output ad_reset_0;
+  output ad_wr_n_0;
   output [13:0]da_data_0;
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK.DAC_CLK_0 CLK" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME CLK.DAC_CLK_0, CLK_DOMAIN design_1_lock_in_amp_0_0_dac_clk, FREQ_HZ 100000000, FREQ_TOLERANCE_HZ 0, INSERT_VIP 0, PHASE 0.0" *) output dac_clk_0;
   output dac_pd_0;
-  inout [7:0]ft_d_0;
-  output ft_rd_n_0;
-  input ft_rxf_n_0;
-  input ft_txe_n_0;
-  output ft_wr_0;
+  output eth_mdc_0;
+  inout eth_mdio_0;
+  output eth_nrst_0;
+  input eth_rxc_0;
+  input eth_rxctl_0;
+  input [3:0]eth_rxd_0;
+  output eth_txc_0;
+  output eth_txctl_0;
+  output [3:0]eth_txd_0;
+  output pl_led1_0;
+  output pl_led2_0;
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK.SYS_CLK_0 CLK" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME CLK.SYS_CLK_0, ASSOCIATED_RESET sys_rst_n_0, CLK_DOMAIN design_1_sys_clk_0, FREQ_HZ 50000000, FREQ_TOLERANCE_HZ 0, INSERT_VIP 0, PHASE 0.0" *) input sys_clk_0;
   (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 RST.SYS_RST_N_0 RST" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME RST.SYS_RST_N_0, INSERT_VIP 0, POLARITY ACTIVE_LOW" *) input sys_rst_n_0;
 
@@ -116,48 +126,58 @@ module design_1
   wire FIXED_IO_ps_clk;
   wire FIXED_IO_ps_porb;
   wire FIXED_IO_ps_srstb;
-  wire adc_clk_0;
-  wire adc_clk_2_0;
-  wire [13:0]adc_data_0;
-  wire [13:0]adc_data_2_0;
-  wire adc_oeb_b_0;
-  wire adc_oeb_b_2_0;
-  wire adc_otr_0;
-  wire adc_otr_2_0;
-  wire adc_pdn_0;
-  wire adc_pdn_2_0;
+  wire ad_busy_0;
+  wire ad_convst_0;
+  wire ad_cs_n_0;
+  wire [15:0]ad_db_0;
+  wire ad_frstdata_0;
+  wire [2:0]ad_os_0;
+  wire ad_rd_n_0;
+  wire ad_reset_0;
+  wire ad_wr_n_0;
   wire [13:0]da_data_0;
   wire dac_clk_0;
   wire dac_pd_0;
-  wire [7:0]ft_d_0;
-  wire ft_rd_n_0;
-  wire ft_rxf_n_0;
-  wire ft_txe_n_0;
-  wire ft_wr_0;
+  wire eth_mdc_0;
+  wire eth_mdio_0;
+  wire eth_nrst_0;
+  wire eth_rxc_0;
+  wire eth_rxctl_0;
+  wire [3:0]eth_rxd_0;
+  wire eth_txc_0;
+  wire eth_txctl_0;
+  wire [3:0]eth_txd_0;
+  wire pl_led1_0;
+  wire pl_led2_0;
   wire processing_system7_0_FCLK_CLK0;
   wire processing_system7_0_FCLK_RESET0_N;
   wire sys_clk_0;
   wire sys_rst_n_0;
 
   design_1_lock_in_amp_0_0 lock_in_amp_0
-       (.adc_clk(adc_clk_0),
-        .adc_clk_2(adc_clk_2_0),
-        .adc_data(adc_data_0),
-        .adc_data_2(adc_data_2_0),
-        .adc_oeb_b(adc_oeb_b_0),
-        .adc_oeb_b_2(adc_oeb_b_2_0),
-        .adc_otr(adc_otr_0),
-        .adc_otr_2(adc_otr_2_0),
-        .adc_pdn(adc_pdn_0),
-        .adc_pdn_2(adc_pdn_2_0),
+       (.ad_busy(ad_busy_0),
+        .ad_convst(ad_convst_0),
+        .ad_cs_n(ad_cs_n_0),
+        .ad_db(ad_db_0),
+        .ad_frstdata(ad_frstdata_0),
+        .ad_os(ad_os_0),
+        .ad_rd_n(ad_rd_n_0),
+        .ad_reset(ad_reset_0),
+        .ad_wr_n(ad_wr_n_0),
         .da_data(da_data_0),
         .dac_clk(dac_clk_0),
         .dac_pd(dac_pd_0),
-        .ft_d(ft_d_0),
-        .ft_rd_n(ft_rd_n_0),
-        .ft_rxf_n(ft_rxf_n_0),
-        .ft_txe_n(ft_txe_n_0),
-        .ft_wr(ft_wr_0),
+        .eth_mdc(eth_mdc_0),
+        .eth_mdio(eth_mdio_0),
+        .eth_nrst(eth_nrst_0),
+        .eth_rxc(eth_rxc_0),
+        .eth_rxctl(eth_rxctl_0),
+        .eth_rxd(eth_rxd_0),
+        .eth_txc(eth_txc_0),
+        .eth_txctl(eth_txctl_0),
+        .eth_txd(eth_txd_0),
+        .pl_led1(pl_led1_0),
+        .pl_led2(pl_led2_0),
         .sys_clk(sys_clk_0),
         .sys_rst_n(sys_rst_n_0));
   design_1_processing_system7_0_0 processing_system7_0
