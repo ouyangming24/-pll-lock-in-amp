@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Fri Oct 23 10:49:48 2026" VIVADOVERSION="2025.1">
+<EDKSYSTEM EDWVERSION="1.2" TIMESTAMP="Fri Oct 23 16:58:10 2026" VIVADOVERSION="2025.1">
 
   <SYSTEMINFO ARCH="zynq" DEVICE="7z020" NAME="design_1" PACKAGE="clg484" SPEEDGRADE="-2"/>
 
@@ -169,51 +169,6 @@
         <CONNECTION INSTANCE="lock_in_amp_0" PORT="dac_pd"/>
       </CONNECTIONS>
     </PORT>
-    <PORT DIR="O" NAME="eth_mdc_0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_mdc">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_mdc"/>
-      </CONNECTIONS>
-    </PORT>
-    <PORT DIR="IO" NAME="eth_mdio_0" SIGIS="undef" SIGNAME="External_Ports_eth_mdio_0">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_mdio"/>
-      </CONNECTIONS>
-    </PORT>
-    <PORT DIR="O" NAME="eth_nrst_0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_nrst">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_nrst"/>
-      </CONNECTIONS>
-    </PORT>
-    <PORT DIR="I" NAME="eth_rxc_0" SIGIS="undef" SIGNAME="External_Ports_eth_rxc_0">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_rxc"/>
-      </CONNECTIONS>
-    </PORT>
-    <PORT DIR="I" NAME="eth_rxctl_0" SIGIS="undef" SIGNAME="External_Ports_eth_rxctl_0">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_rxctl"/>
-      </CONNECTIONS>
-    </PORT>
-    <PORT DIR="I" LEFT="3" NAME="eth_rxd_0" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_eth_rxd_0">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_rxd"/>
-      </CONNECTIONS>
-    </PORT>
-    <PORT DIR="O" NAME="eth_txc_0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txc">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_txc"/>
-      </CONNECTIONS>
-    </PORT>
-    <PORT DIR="O" NAME="eth_txctl_0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txctl">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_txctl"/>
-      </CONNECTIONS>
-    </PORT>
-    <PORT DIR="O" LEFT="3" NAME="eth_txd_0" RIGHT="0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txd">
-      <CONNECTIONS>
-        <CONNECTION INSTANCE="lock_in_amp_0" PORT="eth_txd"/>
-      </CONNECTIONS>
-    </PORT>
     <PORT DIR="O" NAME="pl_led1_0" SIGIS="undef" SIGNAME="lock_in_amp_0_pl_led1">
       <CONNECTIONS>
         <CONNECTION INSTANCE="lock_in_amp_0" PORT="pl_led1"/>
@@ -232,6 +187,16 @@
     <PORT DIR="I" NAME="sys_rst_n_0" POLARITY="ACTIVE_LOW" SIGIS="rst" SIGNAME="External_Ports_sys_rst_n_0">
       <CONNECTIONS>
         <CONNECTION INSTANCE="lock_in_amp_0" PORT="sys_rst_n"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="I" NAME="uart_rxd_0" SIGIS="undef" SIGNAME="External_Ports_uart_rxd_0">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="uart_rxd"/>
+      </CONNECTIONS>
+    </PORT>
+    <PORT DIR="O" NAME="uart_txd_0" SIGIS="undef" SIGNAME="lock_in_amp_0_uart_txd">
+      <CONNECTIONS>
+        <CONNECTION INSTANCE="lock_in_amp_0" PORT="uart_txd"/>
       </CONNECTIONS>
     </PORT>
   </EXTERNALPORTS>
@@ -351,51 +316,6 @@
             <CONNECTION INSTANCE="External_Ports" PORT="dac_pd_0"/>
           </CONNECTIONS>
         </PORT>
-        <PORT DIR="O" NAME="eth_mdc" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_mdc">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="eth_mdc_0"/>
-          </CONNECTIONS>
-        </PORT>
-        <PORT DIR="IO" NAME="eth_mdio" SIGIS="undef" SIGNAME="External_Ports_eth_mdio_0">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="eth_mdio_0"/>
-          </CONNECTIONS>
-        </PORT>
-        <PORT DIR="O" NAME="eth_nrst" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_nrst">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="eth_nrst_0"/>
-          </CONNECTIONS>
-        </PORT>
-        <PORT DIR="I" NAME="eth_rxc" SIGIS="undef" SIGNAME="External_Ports_eth_rxc_0">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="eth_rxc_0"/>
-          </CONNECTIONS>
-        </PORT>
-        <PORT DIR="I" NAME="eth_rxctl" SIGIS="undef" SIGNAME="External_Ports_eth_rxctl_0">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="eth_rxctl_0"/>
-          </CONNECTIONS>
-        </PORT>
-        <PORT DIR="I" LEFT="3" NAME="eth_rxd" RIGHT="0" SIGIS="undef" SIGNAME="External_Ports_eth_rxd_0">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="eth_rxd_0"/>
-          </CONNECTIONS>
-        </PORT>
-        <PORT DIR="O" NAME="eth_txc" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txc">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="eth_txc_0"/>
-          </CONNECTIONS>
-        </PORT>
-        <PORT DIR="O" NAME="eth_txctl" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txctl">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="eth_txctl_0"/>
-          </CONNECTIONS>
-        </PORT>
-        <PORT DIR="O" LEFT="3" NAME="eth_txd" RIGHT="0" SIGIS="undef" SIGNAME="lock_in_amp_0_eth_txd">
-          <CONNECTIONS>
-            <CONNECTION INSTANCE="External_Ports" PORT="eth_txd_0"/>
-          </CONNECTIONS>
-        </PORT>
         <PORT DIR="O" NAME="pl_led1" SIGIS="undef" SIGNAME="lock_in_amp_0_pl_led1">
           <CONNECTIONS>
             <CONNECTION INSTANCE="External_Ports" PORT="pl_led1_0"/>
@@ -414,6 +334,16 @@
         <PORT DIR="I" NAME="sys_rst_n" POLARITY="ACTIVE_LOW" SIGIS="rst" SIGNAME="External_Ports_sys_rst_n_0">
           <CONNECTIONS>
             <CONNECTION INSTANCE="External_Ports" PORT="sys_rst_n_0"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="I" NAME="uart_rxd" SIGIS="undef" SIGNAME="External_Ports_uart_rxd_0">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="uart_rxd_0"/>
+          </CONNECTIONS>
+        </PORT>
+        <PORT DIR="O" NAME="uart_txd" SIGIS="undef" SIGNAME="lock_in_amp_0_uart_txd">
+          <CONNECTIONS>
+            <CONNECTION INSTANCE="External_Ports" PORT="uart_txd_0"/>
           </CONNECTIONS>
         </PORT>
       </PORTS>

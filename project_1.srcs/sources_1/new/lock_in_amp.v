@@ -27,25 +27,29 @@ module lock_in_amp(
    input   wire          ad_busy     ,
    input   wire          ad_frstdata ,
 
-   // FT245BL USB 接口 (已停用: 命令与数据全部改走以太网; 原引脚已被 AD7606C 占用)
+   // FT245BL USB 接口 (已停用: 命令与数据全部改走板载 CH340 串口; 原引脚已被 AD7606C 占用)
 //   inout  wire [7:0] ft_d,
 //   input  wire       ft_rxf_n,
 //   output wire       ft_rd_n,
 //   input  wire       ft_txe_n,
 //   output wire       ft_wr,
 
-   // 千兆以太网 (RTL8211E, RGMII 接 PL 端), 50 MHz 基准时钟复用 sys_clk
-   input  wire       eth_rxc,
-   input  wire       eth_rxctl,
-   input  wire [3:0] eth_rxd,
-   output wire       eth_txc,
-   output wire       eth_txctl,
-   output wire [3:0] eth_txd,
-   output wire       eth_nrst,
-   output wire       eth_mdc,
-   inout  wire       eth_mdio,
+   // 千兆以太网 (已停用: 命令与数据全部改走板载 CH340 串口)
+//   input  wire       eth_rxc,
+//   input  wire       eth_rxctl,
+//   input  wire [3:0] eth_rxd,
+//   output wire       eth_txc,
+//   output wire       eth_txctl,
+//   output wire [3:0] eth_txd,
+//   output wire       eth_nrst,
+//   output wire       eth_mdc,
+//   inout  wire       eth_mdio,
 
-   // PL LED: led1 慢闪 = 以太网 RX 时序扫描中, 常亮 = 已锁定; led2 闪 = 收命令 / 发 UDP 包
+   // 板载 CH340 USB 串口 (PL 端, 921600 8N1): 命令 + 数据帧 + 示波器包
+   input  wire       uart_rxd,
+   output wire       uart_txd,
+
+   // PL LED: led1 约 1 Hz 闪烁 = 逻辑在跑; led2 闪 = 串口收 / 发字节
    output wire       pl_led1,
    output wire       pl_led2,
 
@@ -799,8 +803,8 @@ iir_lpf_cascade #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
 
 
 // =========================================================================
-// ★ 上位机通信: 以太网 UDP (命令下行 + 数据/应答/示波器包上行)
-//   FPGA 192.168.99.10, 命令端口 1234; 上行发往最近一次发命令的 PC 地址:端口
+// ★ 上位机通信: 板载 CH340 USB 串口 (命令下行 + 数据/应答/示波器包上行)
+//   921600 8N1 无流控; 上位机 lockin_gui 的 UART_BAUD 必须与 BAUD_RATE 一致
 // =========================================================================
 wire [7:0] rec_data;
 wire       rec_done;
@@ -811,20 +815,14 @@ wire       usb_rx_ready;
 wire       link_rx_pending;
 wire       link_tx_busy;
 
-eth_udp_link #(
-    .LOCAL_MAC   (48'h02_00_00_00_00_01),
-    // 避开 192.168.1.x (常与路由器/Wi-Fi 子网冲突); PC 网卡配 192.168.99.100/24
-    .LOCAL_IP    ({8'd192, 8'd168, 8'd99, 8'd10}),
-    .GATEWAY_IP  ({8'd192, 8'd168, 8'd99, 8'd1}),
-    .SUBNET_MASK ({8'd255, 8'd255, 8'd255, 8'd0}),
-    .LOCAL_PORT  (16'd1234),
-    .DEST_IP     ({8'd192, 8'd168, 8'd99, 8'd100}),
-    .DEST_PORT   (16'd7777)
-) u_eth_link (
-    .pl_clk_50m (sys_clk),
-    .sys_rst    (sys_rst),
-    .lockin_clk (clk_65M),
-    .lockin_rst (~rst_n_65m),
+uart_link #(
+    .CLK_FREQ   (65_000_000),
+    .BAUD_RATE  (921_600)
+) u_uart_link (
+    .clk        (clk_65M),
+    .rst_n      (rst_n_65m),
+    .uart_rxd   (uart_rxd),
+    .uart_txd   (uart_txd),
     .rec_data   (rec_data),
     .rec_done   (rec_done),
     .rx_ready   (usb_rx_ready),
@@ -833,18 +831,44 @@ eth_udp_link #(
     .send_data  (send_data),
     .tx_done    (tx_done),
     .tx_busy    (link_tx_busy),
-    .eth_rxc    (eth_rxc),
-    .eth_rxctl  (eth_rxctl),
-    .eth_rxd    (eth_rxd),
-    .eth_txc    (eth_txc),
-    .eth_txctl  (eth_txctl),
-    .eth_txd    (eth_txd),
-    .eth_nrst   (eth_nrst),
-    .eth_mdc    (eth_mdc),
-    .eth_mdio   (eth_mdio),
     .pl_led1    (pl_led1),
     .pl_led2    (pl_led2)
 );
+
+// 千兆以太网 UDP 链路 (已停用, 保留备查; 恢复时同时恢复顶层 eth_* 端口与 xdc)
+// eth_udp_link #(
+//     .LOCAL_MAC   (48'h02_00_00_00_00_01),
+//     .LOCAL_IP    ({8'd192, 8'd168, 8'd99, 8'd10}),
+//     .GATEWAY_IP  ({8'd192, 8'd168, 8'd99, 8'd1}),
+//     .SUBNET_MASK ({8'd255, 8'd255, 8'd255, 8'd0}),
+//     .LOCAL_PORT  (16'd1234),
+//     .DEST_IP     ({8'd192, 8'd168, 8'd99, 8'd100}),
+//     .DEST_PORT   (16'd7777)
+// ) u_eth_link (
+//     .pl_clk_50m (sys_clk),
+//     .sys_rst    (sys_rst),
+//     .lockin_clk (clk_65M),
+//     .lockin_rst (~rst_n_65m),
+//     .rec_data   (rec_data),
+//     .rec_done   (rec_done),
+//     .rx_ready   (usb_rx_ready),
+//     .rx_pending (link_rx_pending),
+//     .send_en    (send_en),
+//     .send_data  (send_data),
+//     .tx_done    (tx_done),
+//     .tx_busy    (link_tx_busy),
+//     .eth_rxc    (eth_rxc),
+//     .eth_rxctl  (eth_rxctl),
+//     .eth_rxd    (eth_rxd),
+//     .eth_txc    (eth_txc),
+//     .eth_txctl  (eth_txctl),
+//     .eth_txd    (eth_txd),
+//     .eth_nrst   (eth_nrst),
+//     .eth_mdc    (eth_mdc),
+//     .eth_mdio   (eth_mdio),
+//     .pl_led1    (pl_led1),
+//     .pl_led2    (pl_led2)
+// );
 
 // FT245BL 物理层 (已停用, 保留备查)
 // wire [7:0] ft_d_tx;

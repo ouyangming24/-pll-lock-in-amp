@@ -36,8 +36,8 @@ from PyQt5.QtWidgets import (
 )
 
 from device import (
-    LockinDevice, UdpLockinDevice, MockDevice, list_serial_ports,
-    hz_to_freq_word, FIELD_NAMES, F_CLK, FRAME_LEN, SAMPLE_TICK_S, FPGA_IP,
+    LockinDevice, UdpLockinDevice, MockDevice, list_serial_ports_detail,
+    hz_to_freq_word, FIELD_NAMES, F_CLK, FRAME_LEN, SAMPLE_TICK_S, FPGA_IP, UART_BAUD,
 )
 from stress_calc import (
     StressInputs, ChannelVoltages, StressCalib, StressResult,
@@ -517,7 +517,8 @@ class MainWindow(QMainWindow):
             self.on_log(f"[+] 通信模式: 以太网 UDP (命令 + 数据), FPGA {FPGA_IP}, "
                         "PC 网卡需设 192.168.99.100/24")
         else:
-            self.on_log("[+] 通信模式: 串口 (FT245 USB, 命令+数据; 需点「开始数据流」发 XYOUT)")
+            self.on_log(f"[+] 通信模式: 串口 (板载 CH340, {UART_BAUD} 8N1, 命令 + 数据; "
+                        "连接后点「开始数据流」发 XYOUT)")
 
     # ============================================================ UI 构造
     def _build_ui(self):
@@ -574,7 +575,7 @@ class MainWindow(QMainWindow):
         elif isinstance(self.dev, UdpLockinDevice):
             mode_text, mode_color = "以太网 UDP 模式", "#5df"
         else:
-            mode_text, mode_color = "串口模式 (FT245)", "#ff9"
+            mode_text, mode_color = f"串口模式 (CH340 {UART_BAUD})", "#5df"
         self.lbl_mode = QLabel(mode_text)
         self.lbl_mode.setStyleSheet(f"color: {mode_color}; font-weight: bold;")
         top_bar.addWidget(self.lbl_mode)
@@ -2519,19 +2520,30 @@ class MainWindow(QMainWindow):
             self.port_combo.clear()
             self.port_combo.addItem(f"以太网 {FPGA_IP}")
             return
-        ports = list_serial_ports()
-        cur = self.port_combo.currentText()
+        cur = self.port_combo.currentData()
         self.port_combo.clear()
-        self.port_combo.addItems(ports if ports else ["(无可用端口)"])
-        if cur in ports:
-            self.port_combo.setCurrentText(cur)
+        ports = list_serial_ports_detail()
+        if not ports:
+            self.port_combo.addItem("(无可用端口)", None)
+            return
+        for dev, desc, _is_ch340 in ports:
+            self.port_combo.addItem(f"{dev}  {desc}" if desc != dev else dev, dev)
+        # 保持之前的选择; 否则默认选 CH340 (已排在最前)
+        idx = self.port_combo.findData(cur) if cur else -1
+        self.port_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
     def on_connect_clicked(self):
         if self.dev.is_connected or getattr(self.dev, "is_connecting", False):
             self.dev.disconnect()
         else:
-            port = self.port_combo.currentText()
-            self.dev.connect(port)
+            port = self.port_combo.currentData()
+            if isinstance(self.dev, LockinDevice):
+                if not port:
+                    self.on_log("[!] 没有可用串口: 请插上板子的 USB 串口线并装好 CH340 驱动, 再点 ⟳")
+                    return
+                self.dev.connect(port, UART_BAUD)
+                return
+            self.dev.connect(port or self.port_combo.currentText())
             if getattr(self.dev, "is_connecting", False):
                 self.btn_connect.setText("取消连接")
 

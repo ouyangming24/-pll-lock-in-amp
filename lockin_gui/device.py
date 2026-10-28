@@ -2,8 +2,8 @@
 device.py
 ─────────
 设备抽象层:
-  - LockinDevice    : FT245BL USB 串口 (旧硬件; 现 FPGA 已去掉 FT245, 仅保留备查)
-  - UdpLockinDevice : ★ 当前 ★ 命令与数据全走以太网 UDP (FPGA eth_udp_link.v)
+  - LockinDevice    : ★ 当前 ★ 板载 CH340 USB 串口, 命令与数据全走串口 (FPGA uart_link.v)
+  - UdpLockinDevice : 以太网 UDP (FPGA eth_udp_link.v; 现 FPGA 已改回串口, 仅旧版 bit 可用)
   - MockDevice      : 离线模拟器, 产生伪锁相数据 (用于无硬件时调试 GUI)
 
 三个类都是 QObject, 发出相同的 Qt 信号供 main_window 订阅:
@@ -76,6 +76,9 @@ SCOPE_MAX_N = 8192
 SCOPE_ADC_HZ = 1_000_000          # AD7606C 采样率 (65 MHz / 65)
 SCOPE_V_PER_LSB = 10.0 / 32768    # ±10 V 量程, 16 bit 补码
 
+# usb_commend.v 应答 "Command Success!" / "Command Error!" (后接换行)
+_RESP_RE = re.compile(rb"Command (Success|Error)!")
+
 
 # ============================================================================
 # 工具函数
@@ -93,6 +96,16 @@ def freq_word_to_hz(word: int) -> float:
 def list_serial_ports() -> list:
     """枚举系统所有可用串口"""
     return [p.device for p in serial.tools.list_ports.comports()]
+
+
+def list_serial_ports_detail() -> list:
+    """枚举串口 → [(device, description, is_ch340)], CH340 排在最前"""
+    out = []
+    for p in serial.tools.list_ports.comports():
+        is_ch340 = p.vid == CH340_VID or "CH340" in (p.description or "").upper()
+        out.append((p.device, p.description or p.device, is_ch340))
+    out.sort(key=lambda t: not t[2])
+    return out
 
 
 def frame_crc(buf: bytes) -> int:
@@ -274,8 +287,17 @@ class FrameTracker:
 
 
 # ============================================================================
-# 真实设备 (FT245BL VCP 模式)
+# 真实设备: 板载 CH340 USB 串口 (FPGA uart_link.v, PL 端 L17/M17)
+#   8N1 无流控, 波特率必须与 lock_in_amp.v 里 uart_link 的 BAUD_RATE 一致.
+#   921600 下约 450 帧/s, 一个示波器包 (4114 B) 约 45 ms.
 # ============================================================================
+UART_BAUD          = 921_600
+CH340_VID          = 0x1A86
+UART_READ_TIMEOUT  = 0.05     # 单次 read 超时 (s)
+UART_CMD_TIMEOUT   = 0.3      # 非流模式下等应答的时间 (s)
+UART_PROBE_TRIES   = 3        # 连接时发 stop 握手的次数
+
+
 class LockinDevice(QObject):
     frame_received = pyqtSignal(dict)
     scope_received = pyqtSignal(dict)
@@ -308,15 +330,35 @@ class LockinDevice(QObject):
         return self._tracker.lost
 
     # --- 连接管理 ----------------------------------------------------------
-    def connect(self, port: str, baud: int = 3_000_000) -> bool:
+    def connect(self, port: str, baud: int = UART_BAUD) -> bool:
+        """打开串口并发 stop 握手 (同时停掉上次遗留的数据流), 收到应答才算连上."""
         try:
-            self.ser = serial.Serial(port, baud, timeout=0.05)
-            self.connection_changed.emit(True)
-            self.log_message.emit(f"[+] 已连接 {port} @ {baud}")
-            return True
+            self.ser = serial.Serial(port, baud, timeout=UART_READ_TIMEOUT)
         except Exception as e:
-            self.log_message.emit(f"[!] 连接失败: {e}")
+            self.log_message.emit(f"[!] 打开 {port} 失败 (是否被其它程序占用?): {e}")
+            self.ser = None
             return False
+
+        resp = ""
+        for _ in range(UART_PROBE_TRIES):
+            resp = self._transact("stop")
+            if resp:
+                break
+        if not resp:
+            self.log_message.emit(
+                f"[!] {port} @ {baud} 发 stop 无应答. 请检查: 端口是否为板载 CH340, "
+                f"FPGA 是否已烧录串口版 bit (PL_LED1 约 1 Hz 闪烁), "
+                f"FPGA 波特率是否为 {baud}, xdc 里 L17/M17 收发是否接反")
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+            self.ser = None
+            return False
+
+        self.connection_changed.emit(True)
+        self.log_message.emit(f"[+] 已连接 {port} @ {baud}, FPGA 应答: {resp}")
+        return True
 
     def disconnect(self):
         self.stop_streaming()
@@ -334,6 +376,22 @@ class LockinDevice(QObject):
         return self.ser is not None and self.ser.is_open
 
     # --- 命令收发 ----------------------------------------------------------
+    def _transact(self, cmd: str) -> str:
+        """非流模式: 清掉积压字节 → 发命令 → 读到应答或超时. 返回应答文本 (超时为空串).
+
+        停流后 FPGA 可能还在发半帧, 应答前面可能夹着数据字节, 所以按正则找应答.
+        """
+        self.ser.reset_input_buffer()
+        self.ser.write((cmd + "\r\n").encode("ascii"))
+        buf = b""
+        deadline = time.time() + UART_CMD_TIMEOUT
+        while time.time() < deadline:
+            buf += self.ser.read(max(1, self.ser.in_waiting))
+            m = _RESP_RE.search(buf)
+            if m:
+                return m.group(0).decode("ascii")
+        return ""
+
     def send_command(self, cmd: str, quiet: bool = False) -> str:
         """发送一条 ASCII 命令, 返回 FPGA 应答字符串
 
@@ -351,28 +409,26 @@ class LockinDevice(QObject):
         # 写串口本身是线程安全的 (pyserial 允许 1 写 + 1 读),
         # 用锁只是为了序列化多个 send_command 调用 (例如"一键下发").
         with self._cmd_lock:
-            try:
-                self.ser.write((cmd + "\r\n").encode("ascii"))
-            except Exception as e:
-                self.log_message.emit(f"[!] 发送异常: {e}")
+            if self._streaming:
+                # 流模式: 不读响应 (响应字节会被 _rx_loop 当作非同步头数据丢弃, 这是 OK 的)
+                try:
+                    self.ser.write((cmd + "\r\n").encode("ascii"))
+                except Exception as e:
+                    self.log_message.emit(f"[!] 发送异常: {e}")
+                    return ""
+                if not quiet:
+                    self.log_message.emit(f"  >> {cmd}")
                 return ""
 
-        if self._streaming:
-            # 流模式: 不读响应 (响应字节会被 _rx_loop 当作非同步头数据丢弃, 这是 OK 的)
-            if not quiet:
-                self.log_message.emit(f"  >> {cmd}")
-            return ""
-
-        # 非流模式: 安全读取响应
-        try:
-            time.sleep(0.05)
-            resp = self.ser.read(256).decode("ascii", errors="replace").strip()
+            try:
+                resp = self._transact(cmd) or "(无应答)"
+            except Exception as e:
+                self.log_message.emit(f"[!] 串口收发异常: {e}")
+                return ""
+        if not quiet:
             self.log_message.emit(f"  >> {cmd:18s} ← {resp}")
-            self.cmd_response.emit(resp)
-            return resp
-        except Exception as e:
-            self.log_message.emit(f"[!] 读响应异常: {e}")
-            return ""
+        self.cmd_response.emit(resp)
+        return resp
 
     # --- 数据流 ------------------------------------------------------------
     def start_streaming(self):
@@ -435,7 +491,7 @@ class LockinDevice(QObject):
 
 
 # ============================================================================
-# 以太网 UDP 设备 (FPGA eth_udp_link.v, 千兆 RGMII)
+# 以太网 UDP 设备 (FPGA eth_udp_link.v, 千兆 RGMII; 现 FPGA 已改回串口, 仅旧版 bit 可用)
 #   - 命令: PC → FPGA_IP:FPGA_CMD_PORT, 每个 UDP 包载荷 = "CMD:值\r\n"
 #   - 上行: FPGA 把应答 / 数据帧 / 示波器包按原字节流切成 UDP 包,
 #           发往最近一次发命令的 PC 地址:端口 (即本 socket 绑定的 7777)
@@ -452,8 +508,6 @@ UDP_SOCK_TIMEOUT = 0.5          # recvfrom 超时 (s), 让 rx 线程能定期检
 UDP_CMD_TIMEOUT  = 0.3          # 非流模式下等应答的时间 (s)
 UDP_PROBE_PERIOD = 0.1          # 连接探测间隔 (s)
 UDP_PROBE_TIMEOUT = 90.0        # 连接探测最长等待 (s)
-
-_RESP_RE = re.compile(rb"Command (Success|Error)!")
 
 
 class UdpLockinDevice(QObject):

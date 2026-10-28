@@ -1,0 +1,4 @@
+build/
+build_mingw/
+*.csv
+fake_fpga_cmds.txt

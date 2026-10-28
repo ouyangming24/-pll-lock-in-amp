@@ -2,7 +2,7 @@
 //Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
 //--------------------------------------------------------------------------------
 //Tool Version: Vivado v.2025.1 (win64) Build 6140274 Thu May 22 00:12:29 MDT 2025
-//Date        : Fri Oct 23 10:49:48 2026
+//Date        : Fri Oct 23 16:58:10 2026
 //Host        : DESKTOP-PEDBCMF running 64-bit major release  (build 9200)
 //Command     : generate_target design_1.bd
 //Design      : design_1
@@ -45,19 +45,12 @@ module design_1
     da_data_0,
     dac_clk_0,
     dac_pd_0,
-    eth_mdc_0,
-    eth_mdio_0,
-    eth_nrst_0,
-    eth_rxc_0,
-    eth_rxctl_0,
-    eth_rxd_0,
-    eth_txc_0,
-    eth_txctl_0,
-    eth_txd_0,
     pl_led1_0,
     pl_led2_0,
     sys_clk_0,
-    sys_rst_n_0);
+    sys_rst_n_0,
+    uart_rxd_0,
+    uart_txd_0);
   (* X_INTERFACE_INFO = "xilinx.com:interface:ddrx:1.0 DDR ADDR" *) (* X_INTERFACE_MODE = "Master" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME DDR, AXI_ARBITRATION_SCHEME TDM, BURST_LENGTH 8, CAN_DEBUG false, CAS_LATENCY 11, CAS_WRITE_LATENCY 11, CS_ENABLED true, DATA_MASK_ENABLED true, DATA_WIDTH 8, MEMORY_TYPE COMPONENTS, MEM_ADDR_MAP ROW_COLUMN_BANK, SLOT Single, TIMEPERIOD_PS 1250" *) inout [14:0]DDR_addr;
   (* X_INTERFACE_INFO = "xilinx.com:interface:ddrx:1.0 DDR BA" *) inout [2:0]DDR_ba;
   (* X_INTERFACE_INFO = "xilinx.com:interface:ddrx:1.0 DDR CAS_N" *) inout DDR_cas_n;
@@ -91,19 +84,12 @@ module design_1
   output [13:0]da_data_0;
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK.DAC_CLK_0 CLK" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME CLK.DAC_CLK_0, CLK_DOMAIN design_1_lock_in_amp_0_0_dac_clk, FREQ_HZ 100000000, FREQ_TOLERANCE_HZ 0, INSERT_VIP 0, PHASE 0.0" *) output dac_clk_0;
   output dac_pd_0;
-  output eth_mdc_0;
-  inout eth_mdio_0;
-  output eth_nrst_0;
-  input eth_rxc_0;
-  input eth_rxctl_0;
-  input [3:0]eth_rxd_0;
-  output eth_txc_0;
-  output eth_txctl_0;
-  output [3:0]eth_txd_0;
   output pl_led1_0;
   output pl_led2_0;
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 CLK.SYS_CLK_0 CLK" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME CLK.SYS_CLK_0, ASSOCIATED_RESET sys_rst_n_0, CLK_DOMAIN design_1_sys_clk_0, FREQ_HZ 50000000, FREQ_TOLERANCE_HZ 0, INSERT_VIP 0, PHASE 0.0" *) input sys_clk_0;
   (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 RST.SYS_RST_N_0 RST" *) (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME RST.SYS_RST_N_0, INSERT_VIP 0, POLARITY ACTIVE_LOW" *) input sys_rst_n_0;
+  input uart_rxd_0;
+  output uart_txd_0;
 
   wire [14:0]DDR_addr;
   wire [2:0]DDR_ba;
@@ -138,21 +124,14 @@ module design_1
   wire [13:0]da_data_0;
   wire dac_clk_0;
   wire dac_pd_0;
-  wire eth_mdc_0;
-  wire eth_mdio_0;
-  wire eth_nrst_0;
-  wire eth_rxc_0;
-  wire eth_rxctl_0;
-  wire [3:0]eth_rxd_0;
-  wire eth_txc_0;
-  wire eth_txctl_0;
-  wire [3:0]eth_txd_0;
   wire pl_led1_0;
   wire pl_led2_0;
   wire processing_system7_0_FCLK_CLK0;
   wire processing_system7_0_FCLK_RESET0_N;
   wire sys_clk_0;
   wire sys_rst_n_0;
+  wire uart_rxd_0;
+  wire uart_txd_0;
 
   design_1_lock_in_amp_0_0 lock_in_amp_0
        (.ad_busy(ad_busy_0),
@@ -167,19 +146,12 @@ module design_1
         .da_data(da_data_0),
         .dac_clk(dac_clk_0),
         .dac_pd(dac_pd_0),
-        .eth_mdc(eth_mdc_0),
-        .eth_mdio(eth_mdio_0),
-        .eth_nrst(eth_nrst_0),
-        .eth_rxc(eth_rxc_0),
-        .eth_rxctl(eth_rxctl_0),
-        .eth_rxd(eth_rxd_0),
-        .eth_txc(eth_txc_0),
-        .eth_txctl(eth_txctl_0),
-        .eth_txd(eth_txd_0),
         .pl_led1(pl_led1_0),
         .pl_led2(pl_led2_0),
         .sys_clk(sys_clk_0),
-        .sys_rst_n(sys_rst_n_0));
+        .sys_rst_n(sys_rst_n_0),
+        .uart_rxd(uart_rxd_0),
+        .uart_txd(uart_txd_0));
   design_1_processing_system7_0_0 processing_system7_0
        (.DDR_Addr(DDR_addr),
         .DDR_BankAddr(DDR_ba),
