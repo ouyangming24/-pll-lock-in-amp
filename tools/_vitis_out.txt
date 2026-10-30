@@ -1,0 +1,14 @@
+
+****** Xilinx Vitis Development Environment
+****** Vitis v2025.1 (64-bit)
+****** SW Build 6137779 on 2025-05-21-18:10:19
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+
+==== vitis_rebuild_platform ====
+workspace: E:\company\Aunion\Lock_In_Amp\FPGA-2\solidify_lock
+xsa      : E:\company\Aunion\Lock_In_Amp\FPGA-2\git_pll\design_1_wrapper.xsa
+platform : platform
+Vitis Server started on port '49847'.
+Vitis Server for Embedded Edition. Only embedded component related functions are supported.
+Shutting down Vitis server running on port '49847'

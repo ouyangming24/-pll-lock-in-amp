@@ -1,5 +1,5 @@
 ﻿// =============================================================================
-// Lock-In Amplifier C++ SDK  (板载 CH340 串口, 921600 8N1)
+// Lock-In Amplifier C++ SDK  (板载 CH340 串口, 默认 115200 8N1, BAUD: 可调)
 //
 // 功能:
 //   - 振荡器 1..7 (通道3 PSD 参考) 频率 / 谐波 / 系数 / 输入源 / 滤波
@@ -41,7 +41,7 @@ namespace lockin {
 constexpr double   kClockHz        = 65e6;           // DDS 时钟
 constexpr int      kPhaseBits      = 48;             // DDS 相位累加器位宽
 constexpr int      kNumOsc         = 7;              // 振荡器个数 (1..7)
-constexpr uint32_t kDefaultBaud    = 921600;
+constexpr uint32_t kDefaultBaud    = 115200;
 constexpr double   kDacVPeak       = 3.0;            // DAC904 峰值满量程 (V)
 constexpr double   kScopeAdcHz     = 1e6;            // 示波器原始采样率 (AD7606C)
 constexpr double   kScopeVPerLsb   = 10.0 / 32768.0; // 示波器码值 → V (±10 V 量程)
@@ -64,6 +64,15 @@ enum class OscInput : int {
 enum class DacWave : int {
     Sine   = 0,
     Square = 1,
+};
+
+// AD7606C V3/V4 软件量程码 (RNG3/RNG4)
+enum class AdcRange : int {
+    Bipolar2V5  = 0,
+    Bipolar5V   = 1,
+    Bipolar6V25 = 2,
+    Bipolar10V  = 3,
+    Bipolar12V5 = 4,
 };
 
 enum class ScopeTrigger : int {
@@ -181,6 +190,15 @@ public:
 
     // 原始命令, 如 "FRQ21:4331753328", 不带换行; FPGA 回 "Command Success!" 返回 true
     bool sendCommand(const std::string& cmd);
+
+    // 切换 FPGA + 本端波特率 (预设档). 会停流并重开串口.
+    bool setBaudRate(uint32_t baud);
+
+    // AD7606C V3/V4 量程 (RNG3/RNG4), 上电默认 ±10 V
+    bool setAdcRangeV3(AdcRange range);
+    bool setAdcRangeV4(AdcRange range);
+    AdcRange adcRangeV3() const;
+    AdcRange adcRangeV4() const;
 
     // 时基标定系数 k = 实测频率 / 设定频率 (板上晶振偏差), 默认 1.0;
     // setOscFrequency 下发时按 hz / k 换算, 使物理输出等于设定值

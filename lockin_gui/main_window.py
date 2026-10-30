@@ -20,6 +20,7 @@ PyQt5 主窗口 ── 商用锁相放大器风格 GUI
 import csv
 import math
 import queue
+import sys
 import threading
 import time
 from collections import deque
@@ -37,7 +38,8 @@ from PyQt5.QtWidgets import (
 
 from device import (
     LockinDevice, UdpLockinDevice, MockDevice, list_serial_ports_detail,
-    hz_to_freq_word, FIELD_NAMES, F_CLK, FRAME_LEN, SAMPLE_TICK_S, FPGA_IP, UART_BAUD,
+    hz_to_freq_word, FIELD_NAMES, F_CLK, FRAME_LEN, SAMPLE_TICK_S, FPGA_IP,
+    UART_BAUD, UART_BAUD_CHOICES,
 )
 from stress_calc import (
     StressInputs, ChannelVoltages, StressCalib, StressResult,
@@ -77,6 +79,16 @@ DC_LBL   = "直流"
 
 # 振荡器 ADC 输入源 (与硬件 OSRC1/2/3 一致)
 OSC_ADC_SRC_ITEMS = [("CH3", 0), ("CH4", 1), ("CH3-CH4", 2)]
+
+# AD7606C V3/V4 软件量程码 (RNG3/RNG4 → 寄存器 0x04), 默认 ±10 V
+ADC_RANGE_ITEMS = [
+    (0, "±2.5 V"),
+    (1, "±5 V"),
+    (2, "±6.25 V"),
+    (3, "±10 V"),
+    (4, "±12.5 V"),
+]
+ADC_RANGE_PEAK_V = {0: 2.5, 1: 5.0, 2: 6.25, 3: 10.0, 4: 12.5}
 
 # 通道3 解调多曲线绘图调色板 (循环使用, 8 色覆盖所有 4×4 组合都足够区分)
 HAR_PALETTE = [
@@ -295,14 +307,20 @@ pg.setConfigOption("background", "#1e1e1e")
 pg.setConfigOption("foreground", "#dddddd")
 pg.setConfigOption("antialias", False)        # ★ 关闭抗锯齿: 单帧绘制成本降到 1/3
 
-# 尝试启用 OpenGL 硬件加速; 若未安装 PyOpenGL 则回退为 CPU 软渲染
-try:
-    import OpenGL  # noqa: F401  仅检测包是否可用
-    pg.setConfigOption("useOpenGL", True)
-    pg.setConfigOption("enableExperimental", True)
-    _USE_OPENGL = True
-except ImportError:
-    _USE_OPENGL = False
+# PyInstaller 绿色包里 OpenGL/freeglut 常缺 MSVCR90, 会导致曲线区空白;
+# 冻结运行一律走 CPU Raster. 源码/PyCharm 仍可尝试 OpenGL.
+_FROZEN = getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")
+_USE_OPENGL = False
+if not _FROZEN:
+    try:
+        import OpenGL  # noqa: F401  仅检测包是否可用
+        pg.setConfigOption("useOpenGL", True)
+        pg.setConfigOption("enableExperimental", True)
+        _USE_OPENGL = True
+    except ImportError:
+        pass
+if not _USE_OPENGL:
+    pg.setConfigOption("useOpenGL", False)
 
 
 # ============================================================================
@@ -534,6 +552,22 @@ class MainWindow(QMainWindow):
         self.btn_refresh_ports.setMaximumWidth(30)
         self.btn_refresh_ports.clicked.connect(self._refresh_ports)
         top_bar.addWidget(self.btn_refresh_ports)
+        top_bar.addWidget(QLabel("波特率"))
+        self.baud_combo = QComboBox()
+        for b in UART_BAUD_CHOICES:
+            self.baud_combo.addItem(str(b), b)
+        bi = self.baud_combo.findData(UART_BAUD)
+        self.baud_combo.setCurrentIndex(bi if bi >= 0 else UART_BAUD_CHOICES.index(115200))
+        self.baud_combo.setFixedWidth(90)
+        self.baud_combo.setToolTip(
+            "须与 FPGA 当前波特率一致 (上电默认 115200).\n"
+            "连上后若要改速: 先选新波特率再点「应用波特率」。")
+        top_bar.addWidget(self.baud_combo)
+        self.btn_apply_baud = QPushButton("应用波特率")
+        self.btn_apply_baud.setEnabled(False)
+        self.btn_apply_baud.setToolTip("向 FPGA 发 BAUD:n, 再按新波特率重开串口")
+        self.btn_apply_baud.clicked.connect(self._on_apply_baud)
+        top_bar.addWidget(self.btn_apply_baud)
         self.btn_connect = QPushButton("连接")
         self.btn_connect.clicked.connect(self.on_connect_clicked)
         top_bar.addWidget(self.btn_connect)
@@ -564,8 +598,11 @@ class MainWindow(QMainWindow):
         self.cb_csv_rate.currentIndexChanged.connect(self._on_csv_rate_changed)
         top_bar.addWidget(self.cb_csv_rate)
         top_bar.addSpacing(20)
-        self.btn_scope = QPushButton("示波器 V5/V6")
-        self.btn_scope.setToolTip("打开示波器窗口: AD7606C 通道 V5 / V6 的真实波形 (1 MSa/s, 1024 点)")
+        self.btn_scope = QPushButton("示波器")
+        self.btn_scope.setToolTip(
+            "示波器窗口:\n"
+            "· V5+V6: 硬件抓取 (1 MSa/s, 1024 点)\n"
+            "· V3+V4+V5: SDKOUT 软画 (约 kHz, 会暂停主窗口 XYOUT)")
         self.btn_scope.clicked.connect(self._on_scope_clicked)
         top_bar.addWidget(self.btn_scope)
         self._scope_win: ScopeWindow | None = None
@@ -722,6 +759,37 @@ class MainWindow(QMainWindow):
         v_pll.addWidget(self._build_clk_cal_group())
         v_pll.addWidget(self._build_freq_smooth_group())
         v.addWidget(gb_pll)
+
+        # ── ADC V3/V4 量程 ───────────────────────────────────────
+        gb_rng = QGroupBox("ADC 量程 (V3 / V4)")
+        gb_rng.setToolTip(
+            "AD7606C 软件量程 (命令 RNG3 / RNG4).\n"
+            "只改 V3、V4; V1/V2/V5.. 仍为上电 ±10 V.\n"
+            "切换后约 100 µs 生效; 解调电压换算按所选量程缩放."
+        )
+        g_rng = QGridLayout(gb_rng)
+        g_rng.addWidget(QLabel("V3"), 0, 0)
+        self.cb_rng_v3 = QComboBox()
+        for code, text in ADC_RANGE_ITEMS:
+            self.cb_rng_v3.addItem(text, code)
+        self.cb_rng_v3.setCurrentIndex(3)  # ±10 V
+        g_rng.addWidget(self.cb_rng_v3, 0, 1)
+        btn_rng3 = QPushButton("应用")
+        btn_rng3.clicked.connect(lambda: self._apply_adc_range(3))
+        g_rng.addWidget(btn_rng3, 0, 2)
+        g_rng.addWidget(QLabel("V4"), 1, 0)
+        self.cb_rng_v4 = QComboBox()
+        for code, text in ADC_RANGE_ITEMS:
+            self.cb_rng_v4.addItem(text, code)
+        self.cb_rng_v4.setCurrentIndex(3)
+        g_rng.addWidget(self.cb_rng_v4, 1, 1)
+        btn_rng4 = QPushButton("应用")
+        btn_rng4.clicked.connect(lambda: self._apply_adc_range(4))
+        g_rng.addWidget(btn_rng4, 1, 2)
+        btn_rng_both = QPushButton("V3+V4 同时应用")
+        btn_rng_both.clicked.connect(self._apply_adc_range_both)
+        g_rng.addWidget(btn_rng_both, 2, 0, 1, 3)
+        v.addWidget(gb_rng)
 
         # ── 绿色: 振荡器设置 ─────────────────────────────────────
         gb_osc = QGroupBox("振荡器设置")
@@ -1176,6 +1244,30 @@ class MainWindow(QMainWindow):
         self._update_osc_hz_display()
         if self.dev.is_connected:
             self._send_ref_mode()
+
+    def _adc_range_peak(self, ch: int) -> float:
+        cb = self.cb_rng_v3 if ch == 3 else self.cb_rng_v4
+        code = int(cb.currentData())
+        return float(ADC_RANGE_PEAK_V.get(code, 10.0))
+
+    def _apply_adc_range(self, ch: int, quiet: bool = False):
+        """下发 RNG3 / RNG4."""
+        if not self.dev.is_connected:
+            if not quiet:
+                self.on_log("[!] 未连接")
+            return
+        cb = self.cb_rng_v3 if ch == 3 else self.cb_rng_v4
+        code = int(cb.currentData())
+        cmd = f"RNG{ch}:{code}"
+        resp = self.dev.send_command(cmd)
+        if not quiet:
+            peak = self._adc_range_peak(ch)
+            ok = "Success" in (resp or "")
+            self.on_log(f"[{'+' if ok else '!'}] {cmd} → ±{peak} V  ({resp or 'no resp'})")
+
+    def _apply_adc_range_both(self, quiet: bool = False):
+        self._apply_adc_range(3, quiet=quiet)
+        self._apply_adc_range(4, quiet=quiet)
 
     def _send_ref_mode(self, quiet: bool = False):
         """下发 REFMODE: 自动=1 (硬件 n·F1+m·F2), 手动=0 (FRQ21/12/11)."""
@@ -2541,16 +2633,49 @@ class MainWindow(QMainWindow):
                 if not port:
                     self.on_log("[!] 没有可用串口: 请插上板子的 USB 串口线并装好 CH340 驱动, 再点 ⟳")
                     return
-                self.dev.connect(port, UART_BAUD)
+                baud = self.baud_combo.currentData() or UART_BAUD
+                self.dev.connect(port, int(baud))
                 return
             self.dev.connect(port or self.port_combo.currentText())
             if getattr(self.dev, "is_connecting", False):
                 self.btn_connect.setText("取消连接")
 
+    def _on_apply_baud(self):
+        """发 BAUD:n → 关串口 → 按新波特率重连 (仅 LockinDevice)."""
+        if not isinstance(self.dev, LockinDevice) or not self.dev.is_connected:
+            return
+        new_baud = int(self.baud_combo.currentData() or UART_BAUD)
+        port = self.port_combo.currentData()
+        if not port:
+            self.on_log("[!] 无端口")
+            return
+        was_streaming = bool(getattr(self.dev, "is_streaming", False))
+        if was_streaming:
+            self.dev.stop_streaming()
+        resp = self.dev.send_command(f"BAUD:{new_baud}")
+        if "Success" not in (resp or ""):
+            self.on_log(f"[!] 切换波特率失败: {resp!r} (FPGA 仍在原波特率)")
+            return
+        self.on_log(f"[+] FPGA 将切到 {new_baud}, 正在重开串口…")
+        self.dev.disconnect()
+        import time
+        time.sleep(0.05)
+        if self.dev.connect(port, new_baud):
+            self.lbl_mode.setText(f"串口模式 (CH340 {new_baud})")
+            if was_streaming:
+                self.dev.start_streaming()
+                self.btn_stream.setText("停止数据流")
+        else:
+            self.on_log("[!] 新波特率重连失败, 请确认 FPGA 已切换并手动连接")
+
     def on_conn_changed(self, connected: bool):
         if connected:
             self.btn_connect.setText("断开")
             self.btn_stream.setEnabled(True)
+            self.btn_apply_baud.setEnabled(isinstance(self.dev, LockinDevice))
+            baud = self.baud_combo.currentData() or UART_BAUD
+            if isinstance(self.dev, LockinDevice):
+                self.lbl_mode.setText(f"串口模式 (CH340 {baud})")
             self.lbl_status_conn.setText("● 已连接")
             self.lbl_status_conn.setStyleSheet("color: #5d5;")
             self._send_ref_mode(quiet=True)
@@ -2563,9 +2688,11 @@ class MainWindow(QMainWindow):
             self._send_dac_wave()
             self._send_dac_amp(self.ed_dac_amp.text())
             self._send_dac_ofs(self.ed_dac_ofs.text())
+            self._apply_adc_range_both(quiet=True)
         else:
             self.btn_connect.setText("连接")
             self.btn_stream.setEnabled(False)
+            self.btn_apply_baud.setEnabled(False)
             self.btn_record.setEnabled(False)
             self.btn_stream.setText("开始数据流")
             self.lbl_status_conn.setText("● 未连接")

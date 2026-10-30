@@ -8,7 +8,7 @@
 Zynq-7020 PL 端实现的数字锁相放大器：AD7606C 采 8 路信号（1 MSPS），
 通道 1/2 用 PLL 锁定外部信号频率 F1/F2，通道 3 用 7 个振荡器（参考频率可手动设定，
 或由 n·F1+m·F2 自动生成）做相敏解调，DAC904 输出任一振荡器的参考信号，
-V5/V6 两路可做示波器抓波形。上位机有 Python GUI 和 C++ SDK 两种，通过 CH340 串口控制。
+V5/V6 两路可做示波器抓波形。上位机有 Python GUI、经典 C++ SDK（`XYOUT`）以及精简 Osc1 SDK（`SDKOUT`），通过 CH340 串口控制。
 
 ## 文档列表
 
@@ -21,6 +21,8 @@ V5/V6 两路可做示波器抓波形。上位机有 Python GUI 和 C++ SDK 两�
 | [05_已知问题与排障.md](05_已知问题与排障.md) | 东西不正常时 |
 | [06_速查表.md](06_速查表.md) | 日常查引脚、命令、常数（一页纸） |
 | [07_掌握自测题.md](07_掌握自测题.md) | 检验自己是否吃透，附答案 |
+| [08_数据采集与传输详解.md](08_数据采集与传输详解.md) | AD7606C 配置 / 采样时序、跳线、SPI 方案、串口发送、GUI 与 SDK 接收、各层速度对比 |
+| [09_AD7606C读数错位与修复.md](09_AD7606C读数错位与修复.md) | 示波器偶发 ~1.9 V：原因 B（并口错位）、RTL 修改说明、验证与回退 |
 
 ## 推荐阅读顺序
 
@@ -48,7 +50,8 @@ V5/V6 两路可做示波器抓波形。上位机有 Python GUI 和 C++ SDK 两�
 | 修改前备份 | `agent-tools/backup_before_uart_only_10231638/` |
 | Python GUI 源码 | `lockin_gui/`（入口 `main.py`） |
 | GUI 绿色包 | `lockin_gui/dist/LockinGUI/` |
-| C++ SDK | `lockin_sdk_cpp/`（见其 `README.md`） |
+| C++ SDK（经典，全通道 + 示波器） | `lockin_sdk_cpp/`（`XYOUT` 178 B） |
+| C++ SDK（Osc1 精简流） | `lockin_sdk_osc1/`（`SDKOUT` 28 B：osc1 + V3/V4/V5） |
 | 问题日志（按时间） | `docs/issue_log.md` |
 
 ## 历史文档（已过时，仅供参考）

@@ -22,9 +22,11 @@
 //    tD_BSY >= 25 ns (最后一个 RD 下降沿 → 下一个 BUSY 下降沿)
 //    tLP_WR >= 35 ns, tCYC_WR >= 180 ns, tS_DB_WR / tH_WR_DB >= 5 ns
 //
-//  65 MHz 下 1 MSPS 的读数窗口 (RD_LOW_CYC=4, RD_HIGH_CYC=2):
-//    BUSY 下降沿约在 CONVST 后 33~44 拍; 同步 3 拍 + CS 建立 1 拍 + 8×6 拍 RD,
-//    最后一个 RD 下降沿 <= 第 90 拍, 早于下一次 BUSY 下降沿 (>= 第 98 拍).
+//  65 MHz 下 1 MSPS 的读数窗口 (RD_LOW_CYC=5, RD_HIGH_CYC=1 → 仍 8×6 拍):
+//    BUSY 下降沿约在 CONVST 后 33~44 拍; 同步 3 拍 + 毛刺滤波 1 拍 + CS 1 拍 + 8×6 拍 RD,
+//    最坏约第 97 拍结束, 早于下一次 BUSY 下降沿 (>= 第 98 拍).
+//    2026-10-29: 示波器偶发 ~1.9 V (悬空通道偏置) → 加大 RD 低电平余量 + BUSY 滤波,
+//    FRSTDATA 错位的当次采样不发布 (见 docs/handbook/09_AD7606C读数错位与修复.md).
 // =============================================================================
 
 module ad7606c_drv #(
@@ -35,8 +37,10 @@ module ad7606c_drv #(
     parameter [7:0]   REG_RANGE34 = 8'h33,   // 0x04
     parameter [7:0]   REG_RANGE56 = 8'h33,   // 0x05
     parameter [7:0]   REG_RANGE78 = 8'h33,   // 0x06
-    parameter integer RD_LOW_CYC  = 4,       // RD 低电平拍数 (>= tD_RD_DB + IO 延迟)
-    parameter integer RD_HIGH_CYC = 2,       // RD 高电平拍数
+    // RD 低加长、高缩短: 总周期仍 6 拍, 不挤占下一轮 BUSY↓; 低电平给飞线更多建立时间
+    parameter integer RD_LOW_CYC  = 5,       // RD 低电平拍数 (>= tD_RD_DB + IO 延迟), 原 4
+    parameter integer RD_HIGH_CYC = 1,       // RD 高电平拍数 (>= tHP_RD=10 ns → 1 拍够), 原 2
+    parameter integer BUSY_LOW_STABLE = 2,   // 同步后连续低这么多拍才认 BUSY↓ (抑制毛刺)
     parameter integer PWRUP_US    = 10_000,  // 上电等待 (tPOWER-UP 10 ms)
     parameter integer RESET_US    = 4,       // 完全复位脉宽 (>= 3.2 us)
     parameter integer SETUP_US    = 300      // 复位释放后等待 (tDEVICE_SETUP >= 274 us)
@@ -47,6 +51,11 @@ module ad7606c_drv #(
     // ---- 用户控制 ----
     input  wire        go,           // 1: 连续采样; 0: 停发 CONVST
     input  wire [15:0] speed_set,    // CONVST 周期 = speed_set + 1 拍 (不足 1 us 时按 1 us)
+    // 运行时改 CH3/CH4 (V3/V4) 量程: 寄存器 0x04 = {CH4[7:4], CH3[3:0]}
+    //   码: 0=±2.5 1=±5 2=±6.25 3=±10 4=±12.5 V 单端; 详见 AD7606C 手册
+    input  wire        range34_we,   // 一拍: 装载 range34_wdata 并触发重配
+    input  wire [7:0]  range34_wdata,
+    output reg  [7:0]  range34_r,    // 当前已生效的 RANGE34
 
     // ---- 结果输出 ----
     output reg         conv_done,    // 8 路读完, data1..8 已更新 (单拍)
@@ -80,6 +89,8 @@ localparam integer SETUP_CYC  = SETUP_US * CYC_PER_US;
 localparam integer MIN_PERIOD = (CLK_HZ + 999_999) / 1_000_000;   // tCYCLE >= 1 us
 localparam integer RD_PERIOD  = RD_LOW_CYC + RD_HIGH_CYC;
 localparam integer CONVST_HI  = 8;
+localparam integer BUSY_LOW_NEED = (BUSY_LOW_STABLE > 0) ? (BUSY_LOW_STABLE - 1) : 0;
+localparam integer RANGE_SETTLE_CYC = 100 * CYC_PER_US;  // 量程切换后约 100 us 再恢复 CONVST
 
 assign ad_os = (SOFT_MODE != 0) ? 3'b111 : 3'b000;
 
@@ -91,12 +102,32 @@ assign ad_db = db_oe ? db_out : 16'bz;
 (* IOB = "TRUE" *) reg [15:0] db_in_r;
 (* IOB = "TRUE" *) reg        frst_in_r;
 reg [2:0] busy_s;
+reg       busy_seen_high;                 // 同步域里见过 BUSY=1
+reg [2:0] busy_low_cnt;                   // 见过后连续为低的拍数
+reg       busy_fall;                      // 单拍: 干净的 BUSY 下降
 always @(posedge clk) begin
     db_in_r   <= ad_db;
     frst_in_r <= ad_frstdata;
     busy_s    <= {busy_s[1:0], ad_busy};
+
+    // BUSY 毛刺滤波: 必须先见高, 再连续 BUSY_LOW_STABLE 拍为低, 才启动读数.
+    // 飞线上的窄毛刺不会同时满足“曾为高 + 连续稳定为低”.
+    busy_fall <= 1'b0;
+    if (!rst_n) begin
+        busy_seen_high <= 1'b0;
+        busy_low_cnt   <= 3'd0;
+    end else if (busy_s[2]) begin
+        busy_seen_high <= 1'b1;
+        busy_low_cnt   <= 3'd0;
+    end else if (busy_seen_high) begin
+        if (busy_low_cnt >= BUSY_LOW_NEED) begin
+            busy_fall      <= 1'b1;
+            busy_seen_high <= 1'b0;
+            busy_low_cnt   <= 3'd0;
+        end else
+            busy_low_cnt <= busy_low_cnt + 3'd1;
+    end
 end
-wire busy_fall = busy_s[2] & ~busy_s[1];
 
 // ---- 上电配置命令表 (并口寄存器读写, DB15=R/W, DB14:8=地址, DB7:0=数据) ----
 localparam integer N_OPS = 10;
@@ -110,7 +141,7 @@ always @(*) begin
         4'd1: begin op_word = 16'h0000; op_is_rd = 1'b1; end
         4'd2: op_word = {1'b0, 7'h07, REG_BW};
         4'd3: op_word = {1'b0, 7'h03, REG_RANGE12};
-        4'd4: op_word = {1'b0, 7'h04, REG_RANGE34};
+        4'd4: op_word = {1'b0, 7'h04, range34_r};     // 可被 RNG3/RNG4 运行时更新
         4'd5: op_word = {1'b0, 7'h05, REG_RANGE56};
         4'd6: op_word = {1'b0, 7'h06, REG_RANGE78};
         4'd7: op_word = {1'b1, 7'h07, 8'h00};         // 读命令 BANDWIDTH
@@ -120,15 +151,20 @@ always @(*) begin
 end
 
 // ---- 主状态机 ----
-localparam [2:0] ST_PWRUP = 3'd0,
-                 ST_RESET = 3'd1,
-                 ST_SETUP = 3'd2,
-                 ST_CFG   = 3'd3,
-                 ST_RUN   = 3'd4;
+localparam [2:0] ST_PWRUP  = 3'd0,
+                 ST_RESET  = 3'd1,
+                 ST_SETUP  = 3'd2,
+                 ST_CFG    = 3'd3,
+                 ST_RUN    = 3'd4,
+                 ST_RECFG  = 3'd5,   // 运行中改写 RANGE34
+                 ST_RSETTLE= 3'd6;   // 量程切换后等待稳定
 
 reg [2:0]  state;
 reg [31:0] wait_cnt;
 reg [3:0]  op_ph;          // 每条配置命令 16 拍
+reg        range_pend;     // 有待处理的量程更新
+reg [15:0] recfg_word;     // ST_RECFG 当前写总线字
+reg        recfg_last;     // 1 = 本条是退出寄存器模式的全 0 写
 
 reg [15:0] cnv_cnt;
 wire [15:0] period = ({1'b0, speed_set} + 17'd1 < MIN_PERIOD) ? MIN_PERIOD[15:0]
@@ -138,6 +174,7 @@ reg        rd_pend, rd_act, done_pend;
 reg [2:0]  rd_ch;
 reg [3:0]  rd_ph;
 reg [15:0] sh0, sh1, sh2, sh3, sh4, sh5, sh6, sh7;
+reg        frst_bad_shot;   // 本轮 8 通道读数中出现过 FRSTDATA 错位
 
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -158,6 +195,7 @@ always @(posedge clk or negedge rst_n) begin
         done_pend  <= 1'b0;
         rd_ch      <= 3'd0;
         rd_ph      <= 4'd0;
+        frst_bad_shot <= 1'b0;
         conv_done  <= 1'b0;
         data_flag  <= 8'd0;
         data_mult_ch <= 16'd0;
@@ -169,9 +207,19 @@ always @(posedge clk or negedge rst_n) begin
         cfg_err    <= 1'b0;
         dev_id     <= 8'd0;
         frst_err   <= 1'b0;
+        range34_r  <= REG_RANGE34;
+        range_pend <= 1'b0;
+        recfg_word <= 16'd0;
+        recfg_last <= 1'b0;
     end else begin
         conv_done <= 1'b0;
         data_flag <= 8'd0;
+
+        // 任意状态都可锁存量程请求 (在 ST_RUN 空闲时执行)
+        if (range34_we) begin
+            range34_r  <= range34_wdata;
+            range_pend <= 1'b1;
+        end
 
         case (state)
         // ---------------------------------------------------------------
@@ -255,29 +303,41 @@ always @(posedge clk or negedge rst_n) begin
         end
         // ---------------------------------------------------------------
         ST_RUN: begin
+            // 量程更新: 等本轮读数结束再进寄存器写, 并暂停新 CONVST
+            if (range_pend && !rd_act && !rd_pend && !done_pend) begin
+                range_pend <= 1'b0;
+                ad_convst  <= 1'b0;
+                cnv_cnt    <= 16'd0;
+                op_ph      <= 4'd0;
+                recfg_last <= 1'b0;
+                recfg_word <= {1'b0, 7'h04, (range34_we ? range34_wdata : range34_r)};
+                state      <= ST_RECFG;
+            end else begin
+
             // CONVST: 每 period 拍一个上升沿, 高 CONVST_HI 拍
             if (cnv_cnt >= period - 16'd1)
                 cnv_cnt <= 16'd0;
             else
                 cnv_cnt <= cnv_cnt + 16'd1;
 
-            if (cnv_cnt == 16'd0 && go)
+            if (cnv_cnt == 16'd0 && go && !range_pend)
                 ad_convst <= 1'b1;
             else if (cnv_cnt == CONVST_HI)
                 ad_convst <= 1'b0;
 
-            // BUSY↓ → CS↓, 下一拍开始 8 次 RD
-            if (busy_fall && !rd_act && !rd_pend) begin
+            // 干净的 BUSY↓ → CS↓, 下一拍开始 8 次 RD
+            if (busy_fall && !rd_act && !rd_pend && !range_pend) begin
                 ad_cs_n <= 1'b0;
                 rd_pend <= 1'b1;
             end
 
             if (rd_pend) begin
-                rd_pend <= 1'b0;
-                rd_act  <= 1'b1;
-                rd_ch   <= 3'd0;
-                rd_ph   <= 4'd0;
-                ad_rd_n <= 1'b0;
+                rd_pend       <= 1'b0;
+                rd_act        <= 1'b1;
+                rd_ch         <= 3'd0;
+                rd_ph         <= 4'd0;
+                frst_bad_shot <= 1'b0;
+                ad_rd_n       <= 1'b0;
             end
 
             if (rd_act) begin
@@ -288,8 +348,11 @@ always @(posedge clk or negedge rst_n) begin
                 if (rd_ph == RD_LOW_CYC) begin
                     data_mult_ch <= db_in_r;
                     data_flag    <= 8'd1 << rd_ch;
-                    if (frst_in_r != (rd_ch == 3'd0))
-                        frst_err <= 1'b1;
+                    // FRSTDATA 仅在读 V1 时为高; 错位则粘滞告警, 本轮不发布
+                    if (frst_in_r != (rd_ch == 3'd0)) begin
+                        frst_err      <= 1'b1;
+                        frst_bad_shot <= 1'b1;
+                    end
                     case (rd_ch)
                         3'd0: sh0 <= db_in_r;
                         3'd1: sh1 <= db_in_r;
@@ -318,10 +381,53 @@ always @(posedge clk or negedge rst_n) begin
 
             if (done_pend) begin
                 done_pend <= 1'b0;
-                conv_done <= 1'b1;
-                data1 <= sh0;  data2 <= sh1;  data3 <= sh2;  data4 <= sh3;
-                data5 <= sh4;  data6 <= sh5;  data7 <= sh6;  data8 <= sh7;
+                // 本轮 FRSTDATA 异常: 保持上一组 data1..8, 不拉 conv_done,
+                // 避免示波器 / 锁相链吃进错位的悬空通道码 (~1.9 V)
+                if (!frst_bad_shot) begin
+                    conv_done <= 1'b1;
+                    data1 <= sh0;  data2 <= sh1;  data3 <= sh2;  data4 <= sh3;
+                    data5 <= sh4;  data6 <= sh5;  data7 <= sh6;  data8 <= sh7;
+                end
             end
+            end // !range_pend entry
+        end
+        // ---------------------------------------------------------------
+        // 运行中写 RANGE34: 写 0x04 → 写 0x0000 退出寄存器模式
+        ST_RECFG: begin
+            op_ph <= op_ph + 4'd1;
+            case (op_ph)
+                4'd0: begin
+                    ad_cs_n <= 1'b0;
+                    db_oe   <= 1'b1;
+                    db_out  <= recfg_word;
+                end
+                4'd1: ad_wr_n <= 1'b0;
+                4'd6: ad_wr_n <= 1'b1;
+                4'd7: begin
+                    ad_cs_n <= 1'b1;
+                    db_oe   <= 1'b0;
+                end
+                4'd15: begin
+                    if (!recfg_last) begin
+                        recfg_last <= 1'b1;
+                        recfg_word <= 16'h0000;
+                        op_ph      <= 4'd0;
+                    end else begin
+                        wait_cnt <= 32'd0;
+                        state    <= ST_RSETTLE;
+                    end
+                end
+                default: ;
+            endcase
+        end
+        // ---------------------------------------------------------------
+        ST_RSETTLE: begin
+            if (wait_cnt >= RANGE_SETTLE_CYC - 1) begin
+                wait_cnt <= 32'd0;
+                cnv_cnt  <= 16'd0;
+                state    <= ST_RUN;
+            end else
+                wait_cnt <= wait_cnt + 32'd1;
         end
         default: state <= ST_PWRUP;
         endcase

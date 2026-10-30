@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "E:\company\Aunion\Lock_In_Amp\FPGA-2\git_pll\tools\vitis_rebuild_platform.py", line 40, in <module>
+    client.set_workspace(path=ws)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "D:\software\xilinx\2025.1\Vitis\cli\vitis\cli_client.py", line 149, in set_workspace
+    raise exc_type(f"{exc_value}") from None
+Exception: [31m[31mCannot set workspace, status = StatusCode.FAILED_PRECONDITION,
+                                details = 'The workspace 'E:\company\Aunion\Lock_In_Amp\FPGA-2\solidify_lock' is already in use.'[0m'[0m

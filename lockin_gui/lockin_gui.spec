@@ -22,8 +22,9 @@ a = Analysis(
         'serial.tools.list_ports',
         'device',
         'main_window',
+        'scope_window',
         'stress_calc',
-        # OpenGL 可选; 未安装时 GUI 自动回退 CPU 渲染
+        # OpenGL: 冻结包内强制 CPU 渲染 (见 main_window._FROZEN), 不打包 OpenGL
     ],
     hookspath=[],
     hooksconfig={},
@@ -36,6 +37,8 @@ a = Analysis(
         'jupyter',
         'pandas',
         'scipy',
+        'OpenGL',
+        'OpenGL_accelerate',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

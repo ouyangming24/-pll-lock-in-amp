@@ -45,7 +45,7 @@ module lock_in_amp(
 //   output wire       eth_mdc,
 //   inout  wire       eth_mdio,
 
-   // 板载 CH340 USB 串口 (PL 端, 921600 8N1): 命令 + 数据帧 + 示波器包
+   // 板载 CH340 USB 串口 (PL 端, 默认 115200 8N1, BAUD: 可调): 命令 + 数据帧 + 示波器包
    input  wire       uart_rxd,
    output wire       uart_txd,
 
@@ -129,12 +129,15 @@ wire        ad_conv_done, ad_cfg_done, ad_cfg_err, ad_frst_err;
 wire [7:0]  ad_flag, ad_dev_id;
 wire [15:0] ad_mult_ch;
 
+wire        adc_range34_we;
+wire [7:0]  adc_range34;
+
 ad7606c_drv #(
     .CLK_HZ      (65_000_000),
     .SOFT_MODE   (1),
     .REG_BW      (8'hFF),     // 8 路全部 220 kHz 高带宽
     .REG_RANGE12 (8'h33),     // CH1/CH2 ±10 V 单端
-    .REG_RANGE34 (8'h33),     // CH3/CH4 ±10 V 单端
+    .REG_RANGE34 (8'h33),     // CH3/CH4 ±10 V 单端 (可被 RNG3/RNG4 改)
     .REG_RANGE56 (8'h33),
     .REG_RANGE78 (8'h33)
 ) u_ad7606c (
@@ -142,6 +145,9 @@ ad7606c_drv #(
     .rst_n        (rst_n_65m),
     .go           (1'b1),
     .speed_set    (16'd64),   // 65 拍 → 1 MSPS
+    .range34_we   (adc_range34_we),
+    .range34_wdata(adc_range34),
+    .range34_r    (),
     .conv_done    (ad_conv_done),
     .data_flag    (ad_flag),
     .data_mult_ch (ad_mult_ch),
@@ -804,25 +810,27 @@ iir_lpf_cascade #(.IN_WIDTH(28), .FRAC_WIDTH(32)) u_iir_dc_ch3 (
 
 // =========================================================================
 // ★ 上位机通信: 板载 CH340 USB 串口 (命令下行 + 数据/应答/示波器包上行)
-//   921600 8N1 无流控; 上位机 lockin_gui 的 UART_BAUD 必须与 BAUD_RATE 一致
+//   默认 115200 8N1 无流控; 可用 BAUD:<n> 切换; 上位机波特率必须与当前一致
 // =========================================================================
-wire [7:0] rec_data;
-wire       rec_done;
-wire       tx_done;
-wire       send_en;
-wire [7:0] send_data;
-wire       usb_rx_ready;
-wire       link_rx_pending;
-wire       link_tx_busy;
+wire [7:0]  rec_data;
+wire        rec_done;
+wire        tx_done;
+wire        send_en;
+wire [7:0]  send_data;
+wire        usb_rx_ready;
+wire        link_rx_pending;
+wire        link_tx_busy;
+wire [15:0] uart_baud_div;
 
 uart_link #(
     .CLK_FREQ   (65_000_000),
-    .BAUD_RATE  (921_600)
+    .BAUD_RATE  (115_200)
 ) u_uart_link (
     .clk        (clk_65M),
     .rst_n      (rst_n_65m),
     .uart_rxd   (uart_rxd),
     .uart_txd   (uart_txd),
+    .baud_div   (uart_baud_div),
     .rec_data   (rec_data),
     .rec_done   (rec_done),
     .rx_ready   (usb_rx_ready),
@@ -1015,6 +1023,18 @@ wire [1375:0] x_y_fir_packed = {
     sample_cnt
 };
 
+// SDKOUT 精简帧载荷 22 字节 (usb_commend 再追加 frame_seq → 26B + CRC → 28B)
+//   sync A55AC301 | osc1_x | osc1_y | V3 | V4 | V5 | sample_cnt
+wire [175:0] sdk_fir_packed = {
+    32'hA5_5A_C3_01,
+    s32_x_ch3_21,
+    s32_y_ch3_21,
+    ad_v3,
+    ad_v4,
+    ad_v5,
+    sample_cnt
+};
+
 usb_commend #(
     .SCOPE_AW  (SCOPE_AW),
     .SCOPE_PRE (SCOPE_PRE)
@@ -1028,7 +1048,12 @@ usb_commend #(
     .rx_ready(usb_rx_ready),
     .rx_pending(link_rx_pending),
     .x_y_fir(x_y_fir_packed),
-    // 数据帧触发: 用 PLL ch1 的 dc_valid_x 一拍 → 每帧上传一次
+    .sdk_fir(sdk_fir_packed),
+    .sdk_smp_valid(ad_conv_done),
+    .uart_baud_div(uart_baud_div),
+    .adc_range34(adc_range34),
+    .adc_range34_we(adc_range34_we),
+    // 经典数据帧触发: 用 PLL ch1 的 dc_valid_x 一拍 → 每帧上传一次
     .m_axis_data_tvalid_fir_x(dc_valid_x_ch1),
     // 配置与信号处理同在 clk_65M, 直连无 CDC
     .center_freq(center_freq_w),

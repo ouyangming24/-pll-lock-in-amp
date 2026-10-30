@@ -7,8 +7,9 @@ device.py
   - MockDevice      : 离线模拟器, 产生伪锁相数据 (用于无硬件时调试 GUI)
 
 三个类都是 QObject, 发出相同的 Qt 信号供 main_window 订阅:
-  - frame_received(dict)
+  - frame_received(dict)   XYOUT 178 B 经典帧
   - scope_received(dict)   示波器包 (V5/V6 整段波形)
+  - sdk_received(dict)     SDKOUT 28 B 精简帧 (osc1 + V3/V4/V5)
   - log_message(str)
   - connection_changed(bool)
   - cmd_response(str)
@@ -75,6 +76,12 @@ SCOPE_HDR_FMT = ">HHHBBI"
 SCOPE_MAX_N = 8192
 SCOPE_ADC_HZ = 1_000_000          # AD7606C 采样率 (65 MHz / 65)
 SCOPE_V_PER_LSB = 10.0 / 32768    # ±10 V 量程, 16 bit 补码
+
+# SDKOUT 精简帧 (usb_commend.v): sync A5 5A C3 01 + osc1 + V3/V4/V5 + cnt/seq + CRC
+SDK_SYNC = b"\xA5\x5A\xC3\x01"
+SDK_FRAME_LEN = 28
+SDK_DATA_LEN = SDK_FRAME_LEN - 2
+SDK_FMT = ">iihhhII"              # osc1_x/y, v3/v4/v5, sample_cnt, frame_seq
 
 # usb_commend.v 应答 "Command Success!" / "Command Error!" (后接换行)
 _RESP_RE = re.compile(rb"Command (Success|Error)!")
@@ -173,13 +180,30 @@ def parse_scope_packet(buf: bytes) -> dict:
     }
 
 
+def parse_sdk_frame(buf: bytes) -> dict:
+    """SDKOUT 28 B → {osc1_x, osc1_y, v3, v4, v5, sample_cnt, frame_seq, ...}"""
+    if len(buf) != SDK_FRAME_LEN:
+        raise ValueError("SDK 帧长度错误")
+    if buf[:4] != SDK_SYNC:
+        raise ValueError("SDK 同步头不匹配")
+    if frame_crc(buf[:SDK_DATA_LEN]) != int.from_bytes(buf[SDK_DATA_LEN:], "big"):
+        raise ValueError("SDK CRC 错误")
+    ox, oy, v3, v4, v5, cnt, seq = struct.unpack(SDK_FMT, buf[4:SDK_DATA_LEN])
+    return {
+        "osc1_x": ox, "osc1_y": oy,
+        "v3": v3, "v4": v4, "v5": v5,
+        "sample_cnt": cnt, "frame_seq": seq,
+        "timestamp": time.time(),
+    }
+
+
 # ============================================================================
-# 字节流解析: 数据帧与示波器包混在同一字节流里 (串口直接读出 / UDP 各包载荷顺序拼接)
+# 字节流解析: 经典帧 / 示波器包 / SDK 精简帧混在同一字节流
 # ============================================================================
 class StreamParser:
-    """按同步头切分字节流, feed() 返回 [("frame", dict) | ("scope", dict), ...]
+    """按同步头切分字节流, feed() → [("frame"|"scope"|"sdk", dict), ...]
 
-    半帧 (被命令打断) / 字节损坏 / 同步头碰撞只跳过该同步头, 不吞掉后面的真帧;
+    半帧 / 字节损坏 / 同步头碰撞只跳过该同步头, 不吞掉后面的真帧;
     命令应答等非包字节直接丢弃.
     """
 
@@ -187,6 +211,7 @@ class StreamParser:
         self._buf = b""
         self.crc_errors = 0
         self.scope_errors = 0
+        self.sdk_errors = 0
 
     def feed(self, chunk: bytes) -> list:
         out = []
@@ -194,35 +219,52 @@ class StreamParser:
         while True:
             idx = buf.find(SYNC_HEADER)
             sidx = buf.find(SCOPE_SYNC)
-            if sidx >= 0 and (idx < 0 or sidx < idx):
+            kidx = buf.find(SDK_SYNC)
+            cands = [(i, k) for i, k in ((idx, "frame"), (sidx, "scope"), (kidx, "sdk")) if i >= 0]
+            if not cands:
+                break
+            pos, kind = min(cands, key=lambda t: t[0])
+            if kind == "scope":
                 try:
-                    need = scope_packet_len(buf[sidx:])
+                    need = scope_packet_len(buf[pos:])
                 except ValueError:
-                    buf = buf[sidx + 1:]
+                    buf = buf[pos + 1:]
                     continue
-                if need is None or len(buf) - sidx < need:
+                if need is None or len(buf) - pos < need:
                     break
                 try:
-                    pkt = parse_scope_packet(buf[sidx:sidx + need])
+                    pkt = parse_scope_packet(buf[pos:pos + need])
                 except ValueError:
                     self.scope_errors += 1
-                    buf = buf[sidx + 1:]
+                    buf = buf[pos + 1:]
                     continue
-                buf = buf[sidx + need:]
+                buf = buf[pos + need:]
                 out.append(("scope", pkt))
                 continue
-            if idx < 0 or len(buf) - idx < FRAME_LEN:
+            if kind == "sdk":
+                if len(buf) - pos < SDK_FRAME_LEN:
+                    break
+                try:
+                    data = parse_sdk_frame(buf[pos:pos + SDK_FRAME_LEN])
+                except ValueError:
+                    self.sdk_errors += 1
+                    buf = buf[pos + 1:]
+                    continue
+                buf = buf[pos + SDK_FRAME_LEN:]
+                out.append(("sdk", data))
+                continue
+            # classic XYOUT frame
+            if len(buf) - pos < FRAME_LEN:
                 break
             try:
-                data = parse_frame(buf[idx:idx + FRAME_LEN])
+                data = parse_frame(buf[pos:pos + FRAME_LEN])
             except ValueError:
                 self.crc_errors += 1
-                buf = buf[idx + 1:]
+                buf = buf[pos + 1:]
                 continue
-            buf = buf[idx + FRAME_LEN:]
+            buf = buf[pos + FRAME_LEN:]
             out.append(("frame", data))
-        # 丢掉第一个同步头之前的无用字节, buf 只留待收全的一包
-        starts = [i for i in (buf.find(SYNC_HEADER), buf.find(SCOPE_SYNC)) if i >= 0]
+        starts = [i for i in (buf.find(SYNC_HEADER), buf.find(SCOPE_SYNC), buf.find(SDK_SYNC)) if i >= 0]
         buf = buf[min(starts):] if starts else buf[-3:]
         if len(buf) > 65536:
             buf = buf[-32768:]
@@ -288,10 +330,11 @@ class FrameTracker:
 
 # ============================================================================
 # 真实设备: 板载 CH340 USB 串口 (FPGA uart_link.v, PL 端 L17/M17)
-#   8N1 无流控, 波特率必须与 lock_in_amp.v 里 uart_link 的 BAUD_RATE 一致.
-#   921600 下约 450 帧/s, 一个示波器包 (4114 B) 约 45 ms.
+#   8N1 无流控; 上电默认 115200, 可用 BAUD:<n> 切换 (见 handbook 02).
+#   115200 ≈ 60 帧/s; 921600 ≈ 450 帧/s; 示波器包在低波特率下更慢.
 # ============================================================================
-UART_BAUD          = 921_600
+UART_BAUD          = 115_200
+UART_BAUD_CHOICES  = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
 CH340_VID          = 0x1A86
 UART_READ_TIMEOUT  = 0.05     # 单次 read 超时 (s)
 UART_CMD_TIMEOUT   = 0.3      # 非流模式下等应答的时间 (s)
@@ -301,6 +344,7 @@ UART_PROBE_TRIES   = 3        # 连接时发 stop 握手的次数
 class LockinDevice(QObject):
     frame_received = pyqtSignal(dict)
     scope_received = pyqtSignal(dict)
+    sdk_received = pyqtSignal(dict)
     log_message = pyqtSignal(str)
     connection_changed = pyqtSignal(bool)
     cmd_response = pyqtSignal(str)
@@ -309,6 +353,7 @@ class LockinDevice(QObject):
         super().__init__()
         self.ser: serial.Serial | None = None
         self._streaming = False
+        self._stream_kind = "xy"  # "xy" | "sdk"
         self._thread: threading.Thread | None = None
         self._cmd_lock = threading.Lock()
         self._tracker = FrameTracker()
@@ -435,12 +480,32 @@ class LockinDevice(QObject):
         if self._streaming:
             return
         self.send_command("XYOUT")
+        self._stream_kind = "xy"
         self._tracker = FrameTracker()
         self._parser = StreamParser()
         self._streaming = True
         self._thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._thread.start()
-        self.log_message.emit("[+] 数据流已启动")
+        self.log_message.emit("[+] 数据流已启动 (XYOUT)")
+
+    def set_stream_kind(self, kind: str, quiet: bool = False) -> bool:
+        """流已开时切换 XYOUT / SDKOUT. kind: 'xy' | 'sdk'."""
+        if kind not in ("xy", "sdk"):
+            return False
+        if not self._streaming:
+            return False
+        if self._stream_kind == kind:
+            return True
+        cmd = "SDKOUT" if kind == "sdk" else "XYOUT"
+        self.send_command(cmd, quiet=quiet)
+        self._stream_kind = kind
+        if not quiet:
+            self.log_message.emit(f"[i] 数据流切换为 {cmd}")
+        return True
+
+    @property
+    def stream_kind(self) -> str:
+        return self._stream_kind
 
     def stop_streaming(self):
         if not self._streaming:
@@ -455,16 +520,17 @@ class LockinDevice(QObject):
         # 3) 现在 rx 线程已退出, 主线程独占串口, 安全地发 stop 并读取响应
         if self.is_connected:
             self.send_command("stop")
+        self._stream_kind = "xy"
         self.log_message.emit(
             f"[+] 数据流已停止 (CRC 坏帧 {self._parser.crc_errors}, 丢帧 {self._tracker.lost}, "
-            f"重复帧 {self._tracker.duplicates})")
+            f"重复帧 {self._tracker.duplicates}, SDK 坏帧 {self._parser.sdk_errors})")
 
     @property
     def is_streaming(self) -> bool:
         return self._streaming
 
     def _rx_loop(self):
-        """后台线程: 持续从串口读取并解析数据帧 / 示波器包.
+        """后台线程: 持续从串口读取并解析数据帧 / 示波器包 / SDK 帧.
 
         本线程是唯一允许从串口 read 的线程. send_command 在流模式下
         只 write 不 read, 以避免与本线程并发 read 导致 Windows
@@ -483,6 +549,8 @@ class LockinDevice(QObject):
                 for kind, obj in self._parser.feed(chunk):
                     if kind == "scope":
                         self.scope_received.emit(obj)
+                    elif kind == "sdk":
+                        self.sdk_received.emit(obj)
                     elif self._tracker.update(obj):
                         self.frame_received.emit(obj)
         finally:
@@ -514,6 +582,7 @@ class UdpLockinDevice(QObject):
     """命令与数据全走以太网 UDP (FPGA PL 端千兆 RGMII, 无 USB)"""
     frame_received = pyqtSignal(dict)
     scope_received = pyqtSignal(dict)
+    sdk_received = pyqtSignal(dict)
     log_message = pyqtSignal(str)
     connection_changed = pyqtSignal(bool)
     cmd_response = pyqtSignal(str)
@@ -525,6 +594,7 @@ class UdpLockinDevice(QObject):
         self._probing = False
         self._probe_thread: threading.Thread | None = None
         self._streaming = False
+        self._stream_kind = "xy"
         self._thread: threading.Thread | None = None
         self._cmd_lock = threading.Lock()
         self._tracker = FrameTracker()
@@ -537,6 +607,10 @@ class UdpLockinDevice(QObject):
     @property
     def bad_scope_packets(self) -> int:
         return self._parser.scope_errors
+
+    @property
+    def stream_kind(self) -> str:
+        return self._stream_kind
 
     @property
     def lost_frames(self) -> int:
@@ -704,12 +778,27 @@ class UdpLockinDevice(QObject):
         if self._streaming or not self.is_connected:
             return
         self.send_command("XYOUT")
+        self._stream_kind = "xy"
         self._tracker = FrameTracker()
         self._parser = StreamParser()
         self._streaming = True
         self._thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._thread.start()
-        self.log_message.emit("[+] 以太网数据流已启动")
+        self.log_message.emit("[+] 以太网数据流已启动 (XYOUT)")
+
+    def set_stream_kind(self, kind: str, quiet: bool = False) -> bool:
+        if kind not in ("xy", "sdk"):
+            return False
+        if not self._streaming:
+            return False
+        if self._stream_kind == kind:
+            return True
+        cmd = "SDKOUT" if kind == "sdk" else "XYOUT"
+        self.send_command(cmd, quiet=quiet)
+        self._stream_kind = kind
+        if not quiet:
+            self.log_message.emit(f"[i] 以太网数据流切换为 {cmd}")
+        return True
 
     def stop_streaming(self):
         if not self._streaming:
@@ -720,9 +809,11 @@ class UdpLockinDevice(QObject):
             self._thread = None
         if self.is_connected:
             self.send_command("stop")
+        self._stream_kind = "xy"
         self.log_message.emit(
             f"[+] 以太网数据流已停止 (CRC 坏帧 {self._parser.crc_errors}, "
-            f"丢帧 {self._tracker.lost}, 重复帧 {self._tracker.duplicates})")
+            f"丢帧 {self._tracker.lost}, 重复帧 {self._tracker.duplicates}, "
+            f"SDK 坏帧 {self._parser.sdk_errors})")
 
     @property
     def is_streaming(self) -> bool:
@@ -747,6 +838,8 @@ class UdpLockinDevice(QObject):
                 for kind, obj in self._parser.feed(payload):
                     if kind == "scope":
                         self.scope_received.emit(obj)
+                    elif kind == "sdk":
+                        self.sdk_received.emit(obj)
                     elif self._tracker.update(obj):
                         self.frame_received.emit(obj)
         finally:
@@ -759,6 +852,7 @@ class UdpLockinDevice(QObject):
 class MockDevice(QObject):
     frame_received = pyqtSignal(dict)
     scope_received = pyqtSignal(dict)
+    sdk_received = pyqtSignal(dict)
     log_message = pyqtSignal(str)
     connection_changed = pyqtSignal(bool)
     cmd_response = pyqtSignal(str)
@@ -767,6 +861,7 @@ class MockDevice(QObject):
         super().__init__()
         self._connected = False
         self._streaming = False
+        self._stream_kind = "xy"
         self._t0 = time.time()
         self._frame_id = 0
         # 内部状态(被命令修改)
@@ -832,7 +927,11 @@ class MockDevice(QObject):
 
     def send_command(self, cmd: str, quiet: bool = False) -> str:
         # 模拟命令解析 (不对参数做严格校验)
-        if cmd in ("XYOUT", "stop"):
+        if cmd in ("XYOUT", "SDKOUT", "stop"):
+            if cmd == "XYOUT":
+                self._stream_kind = "xy"
+            elif cmd == "SDKOUT":
+                self._stream_kind = "sdk"
             ok = "Command Success!"
         else:
             try:
@@ -891,14 +990,31 @@ class MockDevice(QObject):
         if self._streaming or not self._connected:
             return
         self._streaming = True
+        self._stream_kind = "xy"
         self._t0 = time.time()
         self._timer.start()
-        self.log_message.emit("[+] 模拟数据流已启动")
+        self.log_message.emit("[+] 模拟数据流已启动 (XYOUT)")
+
+    def set_stream_kind(self, kind: str, quiet: bool = False) -> bool:
+        if kind not in ("xy", "sdk") or not self._streaming:
+            return False
+        if self._stream_kind == kind:
+            return True
+        self._stream_kind = kind
+        cmd = "SDKOUT" if kind == "sdk" else "XYOUT"
+        if not quiet:
+            self.log_message.emit(f"[i] 模拟数据流切换为 {cmd}")
+        return True
+
+    @property
+    def stream_kind(self) -> str:
+        return self._stream_kind
 
     def stop_streaming(self):
         if not self._streaming:
             return
         self._streaming = False
+        self._stream_kind = "xy"
         self._timer.stop()
         self.log_message.emit("[+] 模拟数据流已停止")
 
@@ -907,10 +1023,28 @@ class MockDevice(QObject):
         return self._streaming
 
     def _gen_frame(self):
-        """生成一帧伪数据 (与硬件帧字段一致)"""
+        """生成一帧伪数据 (XYOUT 或 SDKOUT)"""
         t = time.time() - self._t0
         amp_drift = 1.0 + 0.05 * math.sin(2 * math.pi * 0.05 * t)
         noise = lambda s: int(gauss(0, s))
+
+        if self._stream_kind == "sdk":
+            # ~1 kHz 量级慢正弦 (mock 定时器约 50 Hz, 仅看动效)
+            lsb = 1.0 / SCOPE_V_PER_LSB
+            v3 = int(2.0 * math.sin(2 * math.pi * 37 * t) * lsb) + noise(40)
+            v4 = int(1.5 * math.sin(2 * math.pi * 41 * t + 0.4) * lsb) + noise(40)
+            v5 = int(2.5 * math.sin(2 * math.pi * 29 * t + 1.0) * lsb) + noise(40)
+            clip16 = lambda v: max(-32768, min(32767, v))
+            self.sdk_received.emit({
+                "osc1_x": int(2e6 * math.cos(t * 0.8)) + noise(30_000),
+                "osc1_y": int(2e6 * math.sin(t * 0.8)) + noise(30_000),
+                "v3": clip16(v3), "v4": clip16(v4), "v5": clip16(v5),
+                "sample_cnt": int(t / SAMPLE_TICK_S) & 0xFFFFFFFF,
+                "frame_seq": self._frame_id & 0xFFFFFFFF,
+                "timestamp": time.time(),
+            })
+            self._frame_id += 1
+            return
 
         ch1_amp = 8e6 * amp_drift
         ch2_amp = 5e6 * amp_drift

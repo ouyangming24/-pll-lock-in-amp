@@ -21,31 +21,39 @@
 //      FRQ3:<??????     tx2 ???????(48bit)
 //      LOCKSWY:<??????  ???PLL ?????: Y ???????????????(28bit, ??LOCK ?????)
 //      LOCKTHX:<??????  ???PLL ?????: X ???????????????(28bit, ??????LOCK ?????)
-//      XYOUT             ??????????????????????
-//      stop              ????????????????
+//      XYOUT             经典数据流 (GUI, 178 字节全量帧)
+//      SDKOUT            SDK 精简流: 振荡器1 + V3/V4/V5 每帧一包 (28 字节), 不攒 1024 点
+//      stop              停止任一数据流
+//      BAUD:<n>          切换串口波特率 (应答仍用旧波特率发出, 随后切换)
+//                        允许: 9600/19200/38400/57600/115200/230400/460800/921600
+//                        上电默认 115200; 同时停流
+//      RNG3:<c> / RNG4:<c>  AD7606C V3/V4 量程码 (写寄存器 0x04)
+//                        c: 0=±2.5 1=±5 2=±6.25 3=±10 4=±12.5 V 单端;
+//                           5..7 单极 0~5/10/12.5; 8..11 差分 ±5/10/12.5/20
+//                        上电默认 3 (±10 V)
 //
-//  数据帧 (v2, 178 字节, 大端):
+//  数据帧 (v2, 178 字节, 大端) — XYOUT:
 //      [0..171]   x_y_fir 快照 (同步头 + 测量字段 + sample_cnt, 见 lock_in_amp.v)
 //      [172..175] frame_seq  uint32  锁存一帧快照 +1
 //      [176..177] CRC16      CRC-16/CCITT-FALSE, 覆盖 [0..175]
 //  详见 docs/帧协议v2_时间戳与CRC.md
 //
-//  示波器 (scope_cap, AD7606C V5/V6):
-//      SDEC:<n>          抽取: 每 n+1 个 ADC 样点存 1 点 (0 = 1 MSPS)
-//      STLV:<v>          触发电平, 偏移码: v = 补码电平 + 32768
-//      SCAP:<m>          启动一次抓取, [2:0] 0=立即 1=V5↑ 2=V5↓ 3=V6↑ 4=V6↓,
-//                        [3] 1=正常模式 (不超时强制触发)
-//  抓完后插在数据帧之间上传一包 (大端), 抓取期间数据帧照常:
-//      [0..3]   0xA5_5A_5A_A5  同步头 (与数据帧 0xA55AA55A 区分)
-//      [4..5]   点数 N          [6..7]  预触发点数 (触发样点下标)
-//      [8..9]   抽取 n          [10]    {4'd0, 触发模式[2:0], 强制触发}
-//      [11]     0               [12..15] 包序号 uint32
-//      [16..]   N × {V5 int16, V6 int16}
-//      末尾 2 字节 CRC16 (覆盖前面全部字节, 算法同数据帧)
+//  SDK 精简帧 (28 字节, 大端) — SDKOUT:
+//      [0..3]   0xA5_5A_C3_01  同步头 (与经典帧 / 示波器包区分)
+//      [4..7]   osc1_x int32   [8..11] osc1_y int32
+//      [12..13] V3 int16       [14..15] V4 int16  [16..17] V5 int16  (AD7606C 原始码)
+//      [18..21] sample_cnt uint32
+//      [22..25] frame_seq  uint32
+//      [26..27] CRC16 (覆盖 [0..25])
+//  锁存节拍: ADC conv_done (约 1 MHz 刷新快照); 串口实际发出约 2 k 帧/s (带宽受限)
+//
+//  示波器 (scope_cap, AD7606C V5/V6) — 仅 XYOUT/空闲时上传; SDKOUT 模式下丢弃抓取结果:
+//      SDEC / STLV / SCAP … 1024 点整包 (同步头 A5 5A 5A A5), 详见 handbook
 // =============================================================================
 module usb_commend #(
     parameter SCOPE_AW  = 10,          // 与 scope_cap.AW 一致
-    parameter SCOPE_PRE = 128          // 与 scope_cap.PRE 一致
+    parameter SCOPE_PRE = 128,         // 与 scope_cap.PRE 一致
+    parameter [15:0] BAUD_DIV_DEFAULT = 16'd564  // 65e6/115200 ≈ 564
 )(
     input wire clk,
     input wire rst_n,
@@ -56,7 +64,13 @@ module usb_commend #(
     output wire rx_ready,          // 本模块能处理 rec_done 的状态; 为 0 时 ft245_rx 暂不读, 字节留在 FT245 FIFO
     input wire rx_pending,         // FT245 有待读命令字节: IDLE 时先收命令, 不开新帧
     input wire [1375:0] x_y_fir,   // 172 字节快照 (含 sample_cnt); 本模块追加 frame_seq + CRC16 → 178 字节
+    input wire [175:0]  sdk_fir,   // 22 字节: sync+osc1_x/y+V3/V4/V5+sample_cnt; 再追加 seq → 26B +CRC
+    input wire          sdk_smp_valid, // ADC 转换完成脉冲 (SDKOUT 锁存用)
     input wire m_axis_data_tvalid_fir_x,
+    output reg [15:0] uart_baud_div, // → uart_link: 每比特时钟数
+    // AD7606C V3/V4 量程 → 寄存器 0x04 {V4[7:4], V3[3:0]}, we 一拍
+    output reg [7:0]  adc_range34,
+    output reg        adc_range34_we,
     output reg [47:0] center_freq,
     output reg [15:0] pll_kp,
     output reg [15:0] pll_ki,
@@ -144,6 +158,24 @@ module usb_commend #(
     output reg [7:0] send_data
 );
 
+    // 波特率 → 分频 (65 MHz); 非法返回 0
+    function automatic [15:0] baud_to_div;
+        input [23:0] b;
+        begin
+            case (b)
+                24'd9600:   baud_to_div = 16'd6771;
+                24'd19200:  baud_to_div = 16'd3385;
+                24'd38400:  baud_to_div = 16'd1693;
+                24'd57600:  baud_to_div = 16'd1128;
+                24'd115200: baud_to_div = 16'd564;
+                24'd230400: baud_to_div = 16'd282;
+                24'd460800: baud_to_div = 16'd141;
+                24'd921600: baud_to_div = 16'd70;
+                default:    baud_to_div = 16'd0;
+            endcase
+        end
+    endfunction
+
     parameter IDLE = 4'd0;
     parameter REC_CMD = 4'd1;
     parameter REC_DATA = 4'd2;
@@ -225,6 +257,14 @@ module usb_commend #(
     parameter CMD_SCAP    = 7'd68;   // 示波器: 启动一次抓取
     parameter CMD_STLV    = 7'd69;   // 示波器: 触发电平 (偏移码)
     parameter CMD_SDEC    = 7'd70;   // 示波器: 抽取
+    parameter CMD_SDKOUT  = 7'd71;   // SDK 精简数据流
+    parameter CMD_BAUD    = 7'd72;   // 串口波特率
+    parameter CMD_RNG3    = 7'd73;   // V3 量程码
+    parameter CMD_RNG4    = 7'd74;   // V4 量程码
+
+    localparam [1:0] STREAM_OFF = 2'd0,
+                     STREAM_XY  = 2'd1,   // XYOUT 经典帧
+                     STREAM_SDK = 2'd2;   // SDKOUT 精简帧
 
     reg [3:0] curr_state;
     wire scope_tx = (curr_state == SEND_SCOPE) || (curr_state == WAIT_SCOPE)
@@ -240,17 +280,26 @@ module usb_commend #(
     reg [3:0] cmd_cnt;
     reg [47:0] value_buffer;
 
-    reg xy_data_enable;
+    reg [1:0] stream_mode;         // STREAM_OFF / STREAM_XY / STREAM_SDK
+    reg [1:0] send_mode;           // 进入发送时锁存, 避免发到一半被命令改模式
     reg [7:0] byte_cnt;
     reg [1407:0] xy_data_reg;      // {x_y_fir 快照, frame_seq} = 176 字节
+    reg [207:0]  sdk_data_reg;     // {sdk_fir, frame_seq} = 26 字节
     reg new_data_ready;
     reg data_sending;
     reg [31:0] frame_seq;          // 每锁存一帧快照 +1, 上位机据此检测丢帧
     reg [15:0] tx_crc;             // CRC-16/CCITT-FALSE, 随发送逐字节累加
+    reg        baud_pending;       // 应答发完后再切换 uart_baud_div
+    reg [15:0] baud_div_next;
 
-    // 帧 = 176 字节数据 (含同步头) + 2 字节 CRC (高字节在前)
+    // 经典帧 = 176 字节数据 (含同步头) + 2 字节 CRC
     localparam [7:0] DATA_BYTES  = 8'd176;
     localparam [7:0] FRAME_BYTES = 8'd178;
+    // SDK 精简帧 = 26 字节数据 + 2 字节 CRC
+    localparam [7:0] SDK_DATA_BYTES  = 8'd26;
+    localparam [7:0] SDK_FRAME_BYTES = 8'd28;
+    localparam [31:0] DELAY_XY  = 32'd19500;  // ~0.3 ms @ 65 MHz
+    localparam [31:0] DELAY_SDK = 32'd6500;   // ~0.1 ms, 提高精简帧吞吐
 
     // 示波器包 = 16 字节包头 + N×4 字节样点 + 2 字节 CRC
     localparam [15:0] SC_N        = 16'd1 << SCOPE_AW;
@@ -282,7 +331,7 @@ module usb_commend #(
     endfunction
 
     reg [31:0] delay_cnt;
-    parameter DELAY_1S = 32'd19500;
+    parameter DELAY_1S = 32'd19500; // 保留旧名, 经典帧仍用 DELAY_XY
 
     reg [7:0] success_msg[0:17];
     reg [7:0] error_msg[0:15];
@@ -320,12 +369,18 @@ module usb_commend #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            xy_data_reg <= 1408'd0;
+            xy_data_reg    <= 1408'd0;
+            sdk_data_reg   <= 208'd0;
             new_data_ready <= 1'b0;
-            frame_seq <= 32'd0;
-        end else if (m_axis_data_tvalid_fir_x_posedge && xy_data_enable && !data_sending) begin
-            xy_data_reg <= {x_y_fir, frame_seq};
-            frame_seq <= frame_seq + 32'd1;
+            frame_seq      <= 32'd0;
+        end else if (stream_mode == STREAM_SDK && sdk_smp_valid && !data_sending) begin
+            // SDKOUT: 每个 ADC 样点刷新快照 (发出速率仍受串口限制)
+            sdk_data_reg   <= {sdk_fir, frame_seq};
+            frame_seq      <= frame_seq + 32'd1;
+            new_data_ready <= 1'b1;
+        end else if (stream_mode == STREAM_XY && m_axis_data_tvalid_fir_x_posedge && !data_sending) begin
+            xy_data_reg    <= {x_y_fir, frame_seq};
+            frame_seq      <= frame_seq + 32'd1;
             new_data_ready <= 1'b1;
         end else if (curr_state == SEND_XYDATA && new_data_ready) begin
             new_data_ready <= 1'b0;
@@ -416,14 +471,21 @@ module usb_commend #(
 
             send_en <= 1'b0;
             send_data <= 8'd0;
-            xy_data_enable <= 1'b0;
+            stream_mode <= STREAM_OFF;
+            send_mode <= STREAM_OFF;
             byte_cnt <= 8'd0;
             data_sending <= 1'b0;
             delay_cnt <= 32'd0;
+            uart_baud_div <= BAUD_DIV_DEFAULT;
+            baud_pending  <= 1'b0;
+            baud_div_next <= BAUD_DIV_DEFAULT;
+            adc_range34   <= 8'h33;  // V3/V4 均 ±10 V
+            adc_range34_we<= 1'b0;
         end
         else begin
             scope_arm   <= 1'b0;
             scope_clear <= 1'b0;
+            adc_range34_we <= 1'b0;
             case (curr_state)
                 IDLE: begin
                     data_sending <= 1'b0;
@@ -441,17 +503,21 @@ module usb_commend #(
                         end
                     end
                     else if (scope_done && !rx_pending) begin
-                        curr_state <= SEND_SCOPE;
-                        sc_cnt <= 16'd0;
-                        tx_crc <= 16'hFFFF;
-                        // 上传期间冻结数据帧快照, 不让 frame_seq 空跳
-                        data_sending <= 1'b1;
+                        if (stream_mode == STREAM_SDK) begin
+                            // SDKOUT 模式不上传 1024 点包, 直接清掉抓取结果
+                            scope_clear <= 1'b1;
+                        end else begin
+                            curr_state <= SEND_SCOPE;
+                            sc_cnt <= 16'd0;
+                            tx_crc <= 16'hFFFF;
+                            data_sending <= 1'b1;
+                        end
                     end
-                    else if (xy_data_enable && new_data_ready && !rx_pending) begin
+                    else if ((stream_mode != STREAM_OFF) && new_data_ready && !rx_pending) begin
                         curr_state <= SEND_XYDATA;
+                        send_mode  <= stream_mode;
                         byte_cnt <= 8'd0;
                         tx_crc <= 16'hFFFF;
-                        // 进入发送即冻结快照, 防止本拍恰逢 valid 上升沿时重复锁存
                         data_sending <= 1'b1;
                     end
                 end
@@ -478,7 +544,7 @@ module usb_commend #(
                         else if (cmd_cnt == 4'd3) begin 
                             if (cmd_buffer[0] == "s" && cmd_buffer[1] == "t" && cmd_buffer[2] == "o" && rec_data == "p") begin
                                 cmd_type <= CMD_STOP;
-                                xy_data_enable <= 1'b0;
+                                stream_mode <= STREAM_OFF;
                                 curr_state <= SEND_RESPONSE;
                                 msg_cnt <= 5'd0;
                                 msg_len <= 5'd18; 
@@ -511,12 +577,27 @@ module usb_commend #(
                             end
                             else if (cmd_buffer[0] == "X" && cmd_buffer[1] == "Y" && cmd_buffer[2] == "O" && cmd_buffer[3] == "U" && rec_data == "T") begin
                                 cmd_type <= CMD_XYOUT;
-                                xy_data_enable <= 1'b1;
+                                stream_mode <= STREAM_XY;
                                 curr_state <= SEND_RESPONSE;
                                 msg_cnt <= 5'd0;
                                 msg_len <= 5'd18; 
                             end
                             //  ? 信号发生 ? (DAC904): DMOD / DFRQ / DPHS (均为 4 字符命令)
+                            else if (cmd_buffer[0] == "B" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "D" && rec_data == ":") begin
+                                cmd_type <= CMD_BAUD;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "R" && cmd_buffer[1] == "N" && cmd_buffer[2] == "G" && cmd_buffer[3] == "3" && rec_data == ":") begin
+                                cmd_type <= CMD_RNG3;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
+                            else if (cmd_buffer[0] == "R" && cmd_buffer[1] == "N" && cmd_buffer[2] == "G" && cmd_buffer[3] == "4" && rec_data == ":") begin
+                                cmd_type <= CMD_RNG4;
+                                value_buffer <= 48'd0;
+                                curr_state <= REC_DATA;
+                            end
                             else if (cmd_buffer[0] == "D" && cmd_buffer[1] == "M" && cmd_buffer[2] == "O" && cmd_buffer[3] == "D" && rec_data == ":") begin
                                 cmd_type <= CMD_DMOD;
                                 value_buffer <= 48'd0;
@@ -653,8 +734,16 @@ module usb_commend #(
                             end
                         end
                         else if (cmd_cnt == 4'd5) begin
-                            // 6 ????: TAU1X: TAU1Y: TAU2X: TAU2Y: TAUDC: FRQ21: FRQ12: FRQ11:
-                            if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "1" && cmd_buffer[4] == "X" && rec_data == ":") begin
+                            // 6 字符: SDKOUT / TAU1X: ...
+                            if (cmd_buffer[0] == "S" && cmd_buffer[1] == "D" && cmd_buffer[2] == "K"
+                             && cmd_buffer[3] == "O" && cmd_buffer[4] == "U" && rec_data == "T") begin
+                                cmd_type <= CMD_SDKOUT;
+                                stream_mode <= STREAM_SDK;
+                                curr_state <= SEND_RESPONSE;
+                                msg_cnt <= 5'd0;
+                                msg_len <= 5'd18;
+                            end
+                            else if (cmd_buffer[0] == "T" && cmd_buffer[1] == "A" && cmd_buffer[2] == "U" && cmd_buffer[3] == "1" && cmd_buffer[4] == "X" && rec_data == ":") begin
                                 cmd_type <= CMD_TAU1X;
                                 value_buffer <= 48'd0;
                                 curr_state <= REC_DATA;
@@ -933,6 +1022,29 @@ module usb_commend #(
                             else if (cmd_type == CMD_SDEC) begin
                                 scope_decim <= value_buffer[15:0];
                             end
+                            else if (cmd_type == CMD_BAUD) begin
+                                if (baud_to_div(value_buffer[23:0]) != 16'd0) begin
+                                    baud_div_next <= baud_to_div(value_buffer[23:0]);
+                                    baud_pending  <= 1'b1;
+                                    stream_mode   <= STREAM_OFF;
+                                end else begin
+                                    cmd_type <= 7'd0;  // Command Error!
+                                end
+                            end
+                            else if (cmd_type == CMD_RNG3) begin
+                                if (value_buffer[3:0] <= 4'd11) begin
+                                    adc_range34    <= {adc_range34[7:4], value_buffer[3:0]};
+                                    adc_range34_we <= 1'b1;
+                                end else
+                                    cmd_type <= 7'd0;
+                            end
+                            else if (cmd_type == CMD_RNG4) begin
+                                if (value_buffer[3:0] <= 4'd11) begin
+                                    adc_range34    <= {value_buffer[3:0], adc_range34[3:0]};
+                                    adc_range34_we <= 1'b1;
+                                end else
+                                    cmd_type <= 7'd0;
+                            end
                             //  ? 振荡器谐波系 ? (n,m  ? 0..255)
                             else if (cmd_type == CMD_OSC1) begin
                                 osc1_n <= value_buffer[15:8];
@@ -1001,7 +1113,12 @@ module usb_commend #(
                             end
                             curr_state <= SEND_RESPONSE;
                             msg_cnt <= 5'd0;
-                            msg_len <= 5'd18;  
+                            // BAUD/RNG 非法时上面把 cmd_type 置 0; 组合条件决定应答长度
+                            if ((cmd_type == CMD_BAUD && baud_to_div(value_buffer[23:0]) == 16'd0) ||
+                                ((cmd_type == CMD_RNG3 || cmd_type == CMD_RNG4) && value_buffer[3:0] > 4'd11))
+                                msg_len <= 5'd16;
+                            else
+                                msg_len <= 5'd18;
                         end
                     end
                 end
@@ -1030,7 +1147,12 @@ module usb_commend #(
                             curr_state <= IDLE;
                             cmd_cnt <= 4'd0;
                             cmd_type <= 7'd0;
-                            value_buffer <= 48'd0;    
+                            value_buffer <= 48'd0;
+                            // 应答发完后再切波特率, 保证 Success 走旧速率
+                            if (baud_pending) begin
+                                uart_baud_div <= baud_div_next;
+                                baud_pending  <= 1'b0;
+                            end
                         end
                     end
                 end
@@ -1044,7 +1166,7 @@ module usb_commend #(
                         byte_cnt <= 8'd0;
                         send_en <= 1'b0;
                     end
-                    else if (!xy_data_enable) begin
+                    else if (stream_mode == STREAM_OFF) begin
                         curr_state <= IDLE;
                         data_sending <= 1'b0;
                         byte_cnt <= 8'd0;
@@ -1052,13 +1174,22 @@ module usb_commend #(
                     else if (!send_en && !tx_done && !tx_busy) begin
                         send_en <= 1'b1;
                         data_sending <= 1'b1;
-                        // byte_cnt = 0 -> 最高字节 (同步头 0xA5) 先发; 数据之后发 CRC 高/低字节
-                        if (byte_cnt < DATA_BYTES)
-                            send_data <= xy_data_reg[1407-byte_cnt*8 -: 8];
-                        else if (byte_cnt == DATA_BYTES)
-                            send_data <= tx_crc[15:8];
-                        else
-                            send_data <= tx_crc[7:0];
+                        // byte_cnt = 0 -> 最高字节先发; 数据之后发 CRC 高/低字节
+                        if (send_mode == STREAM_SDK) begin
+                            if (byte_cnt < SDK_DATA_BYTES)
+                                send_data <= sdk_data_reg[207-byte_cnt*8 -: 8];
+                            else if (byte_cnt == SDK_DATA_BYTES)
+                                send_data <= tx_crc[15:8];
+                            else
+                                send_data <= tx_crc[7:0];
+                        end else begin
+                            if (byte_cnt < DATA_BYTES)
+                                send_data <= xy_data_reg[1407-byte_cnt*8 -: 8];
+                            else if (byte_cnt == DATA_BYTES)
+                                send_data <= tx_crc[15:8];
+                            else
+                                send_data <= tx_crc[7:0];
+                        end
                         curr_state <= WAIT_XYDATA;
                     end
                 end
@@ -1072,7 +1203,7 @@ module usb_commend #(
                         byte_cnt <= 8'd0;
                         send_en <= 1'b0;
                     end
-                    else if (!xy_data_enable) begin
+                    else if (stream_mode == STREAM_OFF) begin
                         curr_state <= IDLE;
                         data_sending <= 1'b0;
                         byte_cnt <= 8'd0;
@@ -1080,17 +1211,30 @@ module usb_commend #(
                     end
                     else if (tx_done) begin
                         send_en <= 1'b0;
-                        if (byte_cnt < DATA_BYTES)
-                            tx_crc <= crc16_ccitt_byte(tx_crc, send_data);
-                        if (byte_cnt < FRAME_BYTES - 1) begin  
-                            byte_cnt <= byte_cnt + 1'b1;
-                            curr_state <= SEND_XYDATA;
-                        end
-                        else begin
-                            byte_cnt <= 8'd0;
-                            curr_state <= WAIT_DELAY; 
-                            delay_cnt <= 32'd0;      
-                            data_sending <= 1'b0;    
+                        if (send_mode == STREAM_SDK) begin
+                            if (byte_cnt < SDK_DATA_BYTES)
+                                tx_crc <= crc16_ccitt_byte(tx_crc, send_data);
+                            if (byte_cnt < SDK_FRAME_BYTES - 1) begin
+                                byte_cnt <= byte_cnt + 1'b1;
+                                curr_state <= SEND_XYDATA;
+                            end else begin
+                                byte_cnt <= 8'd0;
+                                curr_state <= WAIT_DELAY;
+                                delay_cnt <= 32'd0;
+                                data_sending <= 1'b0;
+                            end
+                        end else begin
+                            if (byte_cnt < DATA_BYTES)
+                                tx_crc <= crc16_ccitt_byte(tx_crc, send_data);
+                            if (byte_cnt < FRAME_BYTES - 1) begin
+                                byte_cnt <= byte_cnt + 1'b1;
+                                curr_state <= SEND_XYDATA;
+                            end else begin
+                                byte_cnt <= 8'd0;
+                                curr_state <= WAIT_DELAY;
+                                delay_cnt <= 32'd0;
+                                data_sending <= 1'b0;
+                            end
                         end
                     end
                 end
@@ -1102,11 +1246,11 @@ module usb_commend #(
                         curr_state <= REC_CMD;
                         delay_cnt <= 32'd0;
                     end
-                    else if (!xy_data_enable) begin
+                    else if (stream_mode == STREAM_OFF) begin
                         curr_state <= IDLE;
                         delay_cnt <= 32'd0;
                     end
-                    else if (delay_cnt >= DELAY_1S) begin
+                    else if (delay_cnt >= ((send_mode == STREAM_SDK) ? DELAY_SDK : DELAY_XY)) begin
                         curr_state <= IDLE;         
                     end else begin
                         delay_cnt <= delay_cnt + 1'b1;

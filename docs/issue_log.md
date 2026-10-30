@@ -43,6 +43,67 @@ PCB / IO 物理层、上位机 GUI、网络通信、协议、综合工具链等�
 
 ---
 
+## 2026-10-30 · V3/V4 ADC 量程可调 (RNG3/RNG4)
+
+- **发现日期**: 2026-10-30
+- **关联模块/层**: RTL（`ad7606c_drv` / `usb_commend`） / GUI / SDK
+- **现象**: 需求：锁相输入 V3、V4 量程希望软件可调（原固定 ±10 V）。
+- **修复**: 命令 `RNG3:`/`RNG4:` 写 AD7606C 寄存器 0x04；驱动在采样间隙重配并等待 ~100 µs。GUI 增加量程下拉；SDK `setAdcRangeV3/V4`。
+- **状态**: ⚠ 待出 bit 上板验证
+- **关联文件**: `ad7606c_drv.v`、`usb_commend.v`、`lock_in_amp.v`、`lockin_gui/main_window.py`、`lockin_sdk_*`
+
+---
+
+## 2026-10-30 · 串口默认改 115200 + BAUD 可调（缓解 CH340 崩溃）
+
+- **发现日期**: 2026-10-30
+- **关联模块/层**: RTL（uart_* / usb_commend） / GUI / SDK / 驱动
+- **现象**: 可连接，但 CH340 驱动仍偶发崩溃；怀疑与高速连续上传有关。
+- **修复**:
+  1. 上电默认波特率 **115200**（原 921600）。
+  2. 新增 `BAUD:<n>`（预设档），应答用旧速率发出后再切换分频，并停流。
+  3. GUI 增加波特率下拉 +「应用波特率」；两套 SDK 默认 115200，提供 `setBaudRate`。
+- **状态**: ⚠ 待出 bit 上板验证是否减轻驱动崩溃
+- **关联文件**: `uart_rec.v` / `uart_send.v` / `uart_link.v` / `usb_commend.v` / `lock_in_amp.v` / `lockin_gui/` / `lockin_sdk_*`
+
+---
+
+## 2026-10-29 · SDKOUT 精简数据流 + lockin_sdk_osc1
+
+- **发现日期**: 2026-10-29
+- **关联模块/层**: RTL（`usb_commend.v` / `lock_in_amp.v`） / 协议 / SDK
+- **现象**: 新上位机只需振荡器1 解调结果 + V3/V4/V5 瞬时样点；经典 178 B 帧与 1024 点示波器包过重，且不宜改 GUI。
+- **排查过程**: 确认 GUI 继续 `XYOUT`；SDK 侧另开流模式，避免改解析器兼容层。
+- **根因**: 需求变更（传数方式），非缺陷。
+- **修复**:
+  1. FPGA 增加 `SDKOUT`：28 B 帧（sync `A55AC301` + osc1 X/Y + V3/V4/V5 + sample_cnt + frame_seq + CRC）；`SDKOUT` 下丢弃 `SCAP` 结果。
+  2. 新建 `lockin_sdk_osc1`（控制仍含 osc1/DAC；`startStream`→`SDKOUT`；无 1024 点 API）。
+- **状态**: ✅ 代码已就绪（待出 bit 上板验证 SDKOUT）
+- **关联文件**: `usb_commend.v`、`lock_in_amp.v`、`lockin_sdk_osc1/`、`docs/handbook/02_通信协议_串口版.md`
+- **备注**: GUI / `lockin_sdk_cpp` 不变；同一 COM 口同一时间只能开一个上位机。
+
+---
+
+## 2026-10-29 · 示波器偶发 ~1.9 V（AD7606C 并口读数错位）
+
+- **发现日期**: 2026-10-28（讨论） / 2026-10-29（改 RTL）
+- **关联模块/层**: RTL（`ad7606c_drv.v`） / 示波器 / 飞线 IO
+- **现象**: 示波器某通道时不时出现约 1.9 V 的异常低点；用户确认非本通道接触不良。
+- **排查过程**:
+  1. 1.9 V ≈ AD7606C 悬空输入偏置 → 像读到了未接的邻居通道。
+  2. 排除串口整包 CRC/打包方式（坏包整包丢，不会单独出 1.9 V 点）。
+  3. 排除“改成逐点上传”（治不了读错位，且加重串口负担）。
+- **根因**: 倾向 BUSY/RD 飞线毛刺或建立时间不足导致并口通道错位（FRSTDATA 可检出）。
+- **修复**:
+  1. `RD_LOW_CYC` 4→5，`RD_HIGH_CYC` 2→1（总 RD 周期仍 6 拍）。
+  2. BUSY 下降沿需连续稳定为低才启动读数（`BUSY_LOW_STABLE=2`）。
+  3. 本轮 FRSTDATA 异常则不发布 `data1..8` / `conv_done`；`frst_err` 仍粘滞上报。
+- **状态**: ⚠ 部分解决（已改代码，待出 bit 上板验证）
+- **关联文件**: [完整记录](./handbook/09_AD7606C读数错位与修复.md)、`ad7606c_drv.v`
+- **备注**: SDK/GUI 不用改；建议闲置通道接地；若仍有 `frst_err` 优先改飞线。
+
+---
+
 ## 2026-09-23 · BD OOC 双 IOBUF 导致 wrapper 串口全 Command Error
 
 - **发现日期**: 2026-09-23

@@ -5,8 +5,8 @@
    "ExpandedHierarchyInLayout":"",
    "guistr":"# # String gsaved with Nlview 7.8.0 2024-04-26 e1825d835c VDI=44 GEI=38 GUI=JA:21.0
 #  -string -flagsOSRD
-preplace port DDR -pg 1 -lvl 4 -x 1390 -y -260 -defaultsOSRD
-preplace port FIXED_IO -pg 1 -lvl 4 -x 1390 -y -280 -defaultsOSRD
+preplace port DDR -pg 1 -lvl 4 -x 1390 -y -280 -defaultsOSRD
+preplace port FIXED_IO -pg 1 -lvl 4 -x 1390 -y -300 -defaultsOSRD
 preplace port port-id_dac_clk_0 -pg 1 -lvl 4 -x 1390 -y 190 -defaultsOSRD
 preplace port port-id_dac_pd_0 -pg 1 -lvl 4 -x 1390 -y 170 -defaultsOSRD
 preplace port port-id_sys_rst_n_0 -pg 1 -lvl 0 -x -70 -y -30 -defaultsOSRD
@@ -18,54 +18,40 @@ preplace port port-id_ad_cs_n_0 -pg 1 -lvl 4 -x 1390 -y -180 -defaultsOSRD
 preplace port port-id_ad_reset_0 -pg 1 -lvl 4 -x 1390 -y -120 -defaultsOSRD
 preplace port port-id_ad_busy_0 -pg 1 -lvl 0 -x -70 -y 0 -defaultsOSRD
 preplace port port-id_ad_frstdata_0 -pg 1 -lvl 0 -x -70 -y 20 -defaultsOSRD
-preplace port port-id_eth_rxc_0 -pg 1 -lvl 0 -x -70 -y 40 -defaultsOSRD
-preplace port port-id_eth_rxctl_0 -pg 1 -lvl 0 -x -70 -y 60 -defaultsOSRD
-preplace port port-id_eth_txc_0 -pg 1 -lvl 4 -x 1390 -y 90 -defaultsOSRD
-preplace port port-id_eth_txctl_0 -pg 1 -lvl 4 -x 1390 -y 30 -defaultsOSRD
-preplace port port-id_eth_nrst_0 -pg 1 -lvl 4 -x 1390 -y 50 -defaultsOSRD
-preplace port port-id_eth_mdc_0 -pg 1 -lvl 4 -x 1390 -y 70 -defaultsOSRD
-preplace port port-id_eth_mdio_0 -pg 1 -lvl 4 -x 1390 -y -200 -defaultsOSRD
 preplace port port-id_pl_led1_0 -pg 1 -lvl 4 -x 1390 -y 130 -defaultsOSRD
 preplace port port-id_pl_led2_0 -pg 1 -lvl 4 -x 1390 -y 150 -defaultsOSRD
+preplace port port-id_uart_rxd_0 -pg 1 -lvl 0 -x -70 -y 60 -defaultsOSRD
+preplace port port-id_uart_txd_0 -pg 1 -lvl 4 -x 1390 -y -260 -defaultsOSRD
 preplace portBus da_data_0 -pg 1 -lvl 4 -x 1390 -y 210 -defaultsOSRD
 preplace portBus ad_db_0 -pg 1 -lvl 4 -x 1390 -y -240 -defaultsOSRD
 preplace portBus ad_os_0 -pg 1 -lvl 4 -x 1390 -y -160 -defaultsOSRD
-preplace portBus eth_rxd_0 -pg 1 -lvl 0 -x -70 -y 80 -defaultsOSRD
-preplace portBus eth_txd_0 -pg 1 -lvl 4 -x 1390 -y 110 -defaultsOSRD
 preplace inst processing_system7_0 -pg 1 -lvl 2 -x 640 -y -110 -defaultsOSRD
 preplace inst lock_in_amp_0 -pg 1 -lvl 1 -x 170 -y 20 -defaultsOSRD
 preplace inst rst_ps7_0_50M -pg 1 -lvl 3 -x 1110 -y -50 -defaultsOSRD
-preplace netloc Net 1 1 3 310J -280 NJ -280 1300J
-preplace netloc ad_busy_0_1 1 0 1 NJ 0
-preplace netloc ad_frstdata_0_1 1 0 1 NJ 20
-preplace netloc lock_in_amp_0_ad_convst 1 1 3 320J -250 890J -220 NJ
-preplace netloc lock_in_amp_0_ad_cs_n 1 1 3 330J -260 NJ -260 1330J
-preplace netloc lock_in_amp_0_ad_os 1 1 3 370J -240 880J -210 1320J
-preplace netloc lock_in_amp_0_ad_rd_n 1 1 3 350J -230 840J -200 1300J
-preplace netloc lock_in_amp_0_ad_reset 1 1 3 380J -220 870J -190 1290J
-preplace netloc lock_in_amp_0_ad_wr_n 1 1 3 360J -210 850J -180 1280J
-preplace netloc lock_in_amp_0_da_data 1 1 3 310J 210 NJ 210 NJ
-preplace netloc lock_in_amp_0_dac_clk 1 1 3 320J 190 NJ 190 NJ
-preplace netloc lock_in_amp_0_dac_pd 1 1 3 340J 170 NJ 170 NJ
-preplace netloc processing_system7_0_FCLK_CLK0 1 1 2 440 -10 850
+preplace netloc Net 1 1 3 370J 60 NJ 60 1300J
+preplace netloc ad_busy_0_1 1 0 1 -40J 0n
+preplace netloc ad_frstdata_0_1 1 0 1 -50J 20n
+preplace netloc lock_in_amp_0_ad_convst 1 1 3 320J -230 NJ -230 1310J
+preplace netloc lock_in_amp_0_ad_cs_n 1 1 3 300J -270 NJ -270 1320J
+preplace netloc lock_in_amp_0_ad_os 1 1 3 340J -220 840J -160 NJ
+preplace netloc lock_in_amp_0_ad_rd_n 1 1 3 310J -240 NJ -240 1290J
+preplace netloc lock_in_amp_0_ad_reset 1 1 3 350J -210 NJ -210 1280J
+preplace netloc lock_in_amp_0_ad_wr_n 1 1 3 360J 50 NJ 50 1320J
+preplace netloc lock_in_amp_0_da_data 1 1 3 300J 210 NJ 210 NJ
+preplace netloc lock_in_amp_0_dac_clk 1 1 3 310J 190 NJ 190 NJ
+preplace netloc lock_in_amp_0_dac_pd 1 1 3 320J 170 NJ 170 NJ
+preplace netloc lock_in_amp_0_pl_led1 1 1 3 350J 130 NJ 130 NJ
+preplace netloc lock_in_amp_0_pl_led2 1 1 3 330J 150 NJ 150 NJ
+preplace netloc lock_in_amp_0_uart_txd 1 1 3 330J -260 NJ -260 NJ
+preplace netloc processing_system7_0_FCLK_CLK0 1 1 2 440 -10 840
 preplace netloc processing_system7_0_FCLK_RESET0_N 1 2 1 N -70
-preplace netloc sys_clk_0_1 1 0 1 -50 -50n
-preplace netloc sys_rst_n_0_1 1 0 1 -50 -30n
-preplace netloc eth_rxc_0_1 1 0 1 NJ 40
-preplace netloc eth_rxctl_0_1 1 0 1 NJ 60
-preplace netloc eth_rxd_0_1 1 0 1 NJ 80
-preplace netloc lock_in_amp_0_eth_txc 1 1 3 370J 90 NJ 90 NJ
-preplace netloc lock_in_amp_0_eth_txctl 1 1 3 NJ 10 890J 60 1350J
-preplace netloc lock_in_amp_0_eth_txd 1 1 3 NJ 30 840J 80 1280J
-preplace netloc lock_in_amp_0_eth_nrst 1 1 3 NJ 50 NJ 50 NJ
-preplace netloc lock_in_amp_0_eth_mdc 1 1 3 NJ 70 NJ 70 NJ
-preplace netloc Net2 1 1 3 340J -270 NJ -270 1350J
-preplace netloc lock_in_amp_0_pl_led1 1 1 3 390J 130 NJ 130 NJ
-preplace netloc lock_in_amp_0_pl_led2 1 1 3 370J 150 NJ 150 NJ
-preplace netloc processing_system7_0_DDR 1 2 2 860J -230 1340J
-preplace netloc processing_system7_0_FIXED_IO 1 2 2 890J -170 1310J
+preplace netloc sys_clk_0_1 1 0 1 -20 -50n
+preplace netloc sys_rst_n_0_1 1 0 1 -30 -30n
+preplace netloc uart_rxd_0_1 1 0 1 N 60
+preplace netloc processing_system7_0_DDR 1 2 2 860J -280 NJ
+preplace netloc processing_system7_0_FIXED_IO 1 2 2 850J -300 NJ
 levelinfo -pg 1 -70 170 640 1110 1390
-pagesize -pg 1 -db -bbox -sgen -250 -300 1550 490
+pagesize -pg 1 -db -bbox -sgen -250 -320 1550 490
 "
 }
 {

@@ -172,6 +172,9 @@ double Frame::ch3DcVolts() const { return ch3Dc * voltsPerLsbDc(); }
 struct LockinDevice::Impl {
     detail::SerialPort port;
     std::string portName;
+    uint32_t baud = kDefaultBaud;
+    AdcRange rngV3 = AdcRange::Bipolar10V;
+    AdcRange rngV4 = AdcRange::Bipolar10V;
 
     // 接收线程
     std::thread reader;
@@ -429,6 +432,7 @@ bool LockinDevice::open(const std::string& portIn, uint32_t baud) {
         return false;
     }
     d_->portName = port;
+    d_->baud = baud;
     d_->portLost = false;
     d_->rxBuf.clear();
     d_->respTail.clear();
@@ -455,6 +459,36 @@ bool LockinDevice::open(const std::string& portIn, uint32_t baud) {
     return false;
 }
 
+bool LockinDevice::setBaudRate(uint32_t baud) {
+    static const uint32_t kOk[] = {
+        9600u, 19200u, 38400u, 57600u, 115200u, 230400u, 460800u, 921600u};
+    bool allowed = false;
+    for (uint32_t b : kOk)
+        if (b == baud) { allowed = true; break; }
+    if (!allowed) {
+        d_->setError("unsupported baud (use 9600/19200/38400/57600/115200/230400/460800/921600)");
+        return false;
+    }
+    if (!isOpen()) {
+        d_->setError("device not open");
+        return false;
+    }
+    if (baud == d_->baud) return true;
+    const bool wasStreaming = d_->streaming.load();
+    if (wasStreaming) stopStream();
+    if (!d_->command("BAUD:" + std::to_string(baud))) return false;
+    std::string port = d_->portName;
+    d_->streaming = false;
+    d_->stopReader();
+    d_->port.close();
+    d_->respCv.notify_all();
+    d_->scopeCv.notify_all();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (!open(port, baud)) return false;
+    if (wasStreaming) return startStream();
+    return true;
+}
+
 void LockinDevice::close() {
     if (!d_->port.isOpen()) return;
     if (d_->streaming && !d_->portLost) d_->command("stop", 200);
@@ -477,6 +511,31 @@ std::string LockinDevice::lastError() const {
 void LockinDevice::setCommandTimeout(int ms) { d_->cmdTimeoutMs = std::max(10, ms); }
 
 bool LockinDevice::sendCommand(const std::string& cmd) { return d_->command(cmd); }
+
+bool LockinDevice::setAdcRangeV3(AdcRange range) {
+    int c = static_cast<int>(range);
+    if (c < 0 || c > 11) {
+        d_->setError("ADC range code must be 0..11");
+        return false;
+    }
+    if (!d_->command("RNG3:" + std::to_string(c))) return false;
+    d_->rngV3 = range;
+    return true;
+}
+
+bool LockinDevice::setAdcRangeV4(AdcRange range) {
+    int c = static_cast<int>(range);
+    if (c < 0 || c > 11) {
+        d_->setError("ADC range code must be 0..11");
+        return false;
+    }
+    if (!d_->command("RNG4:" + std::to_string(c))) return false;
+    d_->rngV4 = range;
+    return true;
+}
+
+AdcRange LockinDevice::adcRangeV3() const { return d_->rngV3; }
+AdcRange LockinDevice::adcRangeV4() const { return d_->rngV4; }
 
 void LockinDevice::setClockCalibration(double k) {
     if (k > 0.9 && k < 1.1) d_->clkCal = k;

@@ -2,29 +2,22 @@
 // =============================================================================
 //  uart_link.v
 //
-//  板载 CH340 USB 串口链路 (替代 eth_udp_link / FT245): 上位机命令下行 + 字节流上行
-//  8N1, 无流控 (CH340 只接 TXD/RXD). 复用 uart_rec / uart_send.
-//
-//  对 usb_commend 呈现与 eth_udp_link / ft245_rx / ft245_tx 相同的字节接口 (clk 域):
-//    下行: uart_rxd → uart_rec → RX FIFO → rec_data / rec_done
-//          usb_commend 发应答 / 示波器包期间 rx_ready=0 不收字节, 而 PC 不会停发,
-//          所以必须先进 FIFO; rx_pending = FIFO 非空.
-//    上行: send_en (电平, 见到 tx_done 才撤) → 取上升沿启动 uart_send.
-//          uart_send 在 IDLE 只看 send_en 电平, 直接接会把同一字节发两遍.
-//          tx_busy 从启动保持到 tx_done, usb_commend 据此等串口发完再送下一字节.
-//
-//  LED: pl_led1 约 1 Hz 闪烁 = 逻辑在跑; pl_led2 亮 50 ms = 收到 / 发出字节
+//  板载 CH340 USB 串口链路: 上位机命令下行 + 字节流上行
+//  8N1, 无流控. 复用 uart_rec / uart_send.
+//  波特率由 baud_div (每比特时钟数) 运行时可调; 上电默认见 BAUD_RATE.
 // =============================================================================
 module uart_link #(
     parameter CLK_FREQ   = 65_000_000,
-    parameter BAUD_RATE  = 921_600,
-    parameter RX_FIFO_AW = 8                 // RX FIFO 深度 2^AW 字节
+    parameter BAUD_RATE  = 115_200,
+    parameter RX_FIFO_AW = 8
 )(
     input  wire       clk,
     input  wire       rst_n,
 
-    input  wire       uart_rxd,              // ← CH340 TXD
-    output wire       uart_txd,              // → CH340 RXD
+    input  wire       uart_rxd,
+    output wire       uart_txd,
+
+    input  wire [15:0] baud_div,     // 每比特 clk 拍数 (usb_commend 维护)
 
     output reg  [7:0] rec_data,
     output reg        rec_done,
@@ -39,9 +32,6 @@ module uart_link #(
     output wire       pl_led2
 );
 
-    // -------------------------------------------------------------------------
-    // RX: uart_rec → FIFO → usb_commend
-    // -------------------------------------------------------------------------
     wire [7:0] rx_byte;
     wire       rx_vld;
 
@@ -52,6 +42,7 @@ module uart_link #(
         .clk      (clk),
         .rst_n    (rst_n),
         .rx       (uart_rxd),
+        .baud_div (baud_div),
         .rec_data (rx_byte),
         .rec_done (rx_vld)
     );
@@ -61,8 +52,6 @@ module uart_link #(
     wire rx_empty = (rx_wp == rx_rp);
     wire rx_full  = (rx_wp + 1'b1 == rx_rp);
     wire rx_push  = rx_vld && !rx_full;
-    // !rec_done: 本拍送出的字节可能让 usb_commend 下一拍转入 SEND_RESPONSE (rx_ready 变 0),
-    // 同拍再弹会丢字节
     wire rx_pop   = !rx_empty && rx_ready && !rec_done;
 
     assign rx_pending = !rx_empty;
@@ -88,9 +77,6 @@ module uart_link #(
         end
     end
 
-    // -------------------------------------------------------------------------
-    // TX: usb_commend → uart_send
-    // -------------------------------------------------------------------------
     reg  send_en_d;
     wire send_start = send_en && !send_en_d && !tx_busy;
 
@@ -115,14 +101,12 @@ module uart_link #(
         .rst_n     (rst_n),
         .send_en   (send_start),
         .send_data (send_data),
+        .baud_div  (baud_div),
         .tx        (uart_txd),
         .tx_done   (tx_done)
     );
 
-    // -------------------------------------------------------------------------
-    // LED
-    // -------------------------------------------------------------------------
-    localparam ACT_CYCLES = CLK_FREQ / 20;     // 50 ms
+    localparam ACT_CYCLES = CLK_FREQ / 20;
 
     reg [25:0] blink_cnt;
     reg [23:0] act_cnt;
